@@ -13,8 +13,10 @@ import {
   Settings,
   LogOut,
   Plus,
+  FileCheck,
 } from "lucide-react";
 import { signOutAction } from "@/app/actions/auth";
+import { ThemeQuickToggle } from "@/components/settings/ThemeSettingsControl";
 
 const PRIMARY_NAV = [
   { href: "/today", label: "วันนี้", icon: CalendarDays },
@@ -30,6 +32,7 @@ const PRIMARY_NAV = [
 ];
 
 const SECONDARY_NAV = [
+  { href: "/review", label: "รอตรวจสอบ", icon: FileCheck },
   { href: "/categories", label: "หมวดหมู่", icon: Tag },
 ];
 
@@ -45,24 +48,25 @@ export function Sidebar() {
   };
 
   return (
-    <aside className="hidden md:flex md:w-56 lg:w-60 md:flex-col md:fixed md:inset-y-0 bg-white border-r border-slate-200/70 z-30">
+    <aside className="hidden md:flex md:w-56 lg:w-60 md:flex-col md:fixed md:inset-y-0 bg-surface dark:bg-bg-subtle border-r border-border z-30 transition-colors">
       {/* Brand Header */}
-      <div className="flex items-center h-16 px-6">
+      <div className="flex items-center justify-between h-16 px-6">
         <Link href="/today" className="flex items-center gap-2.5 group">
-          <div className="w-8 h-8 rounded-xl bg-slate-950 text-white flex items-center justify-center font-bold text-sm tracking-wider shadow-sm transition-transform group-hover:scale-95">
+          <div className="w-8 h-8 rounded-xl bg-slate-900 dark:bg-primary text-white dark:text-primary-foreground flex items-center justify-center font-bold text-sm tracking-wider shadow-sm transition-transform group-hover:scale-95">
             F
           </div>
-          <span className="font-bold text-slate-900 text-lg tracking-tight">
+          <span className="font-bold text-text-primary text-lg tracking-tight">
             Finn
           </span>
         </Link>
+        <ThemeQuickToggle />
       </div>
 
       {/* Quick Fast Add Action */}
       <div className="px-4 pt-1 pb-3">
         <Link
           href="/transactions/new"
-          className="flex items-center justify-center gap-2 w-full py-2 px-3.5 bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold rounded-xl shadow-sm transition-all active:scale-[0.99]"
+          className="flex items-center justify-center gap-2 w-full py-2 px-3.5 bg-slate-900 hover:bg-slate-800 dark:bg-primary dark:hover:bg-primary-hover text-white dark:text-primary-foreground text-xs font-semibold rounded-xl shadow-xs transition-all active:scale-[0.99]"
         >
           <Plus className="w-3.5 h-3.5 stroke-[2.5]" />
           <span>เพิ่มรายการ</span>
@@ -82,13 +86,13 @@ export function Sidebar() {
                 href={item.href}
                 className={`flex items-center gap-3 px-3 py-2 text-sm rounded-xl transition-colors ${
                   active
-                    ? "bg-slate-100/90 text-slate-950 font-semibold"
-                    : "text-slate-600 hover:text-slate-950 hover:bg-slate-50 font-medium"
+                    ? "bg-surface-soft dark:bg-surface-raised text-text-primary font-semibold shadow-2xs"
+                    : "text-text-secondary hover:text-text-primary hover:bg-surface-soft font-medium"
                 }`}
               >
                 <Icon
-                  className={`w-4 h-4 ${
-                    active ? "text-slate-950" : "text-slate-400"
+                  className={`w-4 h-4 transition-colors ${
+                    active ? "text-primary dark:text-primary" : "text-text-muted"
                   }`}
                 />
                 <span>{item.label}</span>
@@ -97,7 +101,7 @@ export function Sidebar() {
           })}
         </div>
 
-        <div className="space-y-0.5 pt-2 border-t border-slate-100">
+        <div className="space-y-0.5 pt-2 border-t border-border">
           {SECONDARY_NAV.map((item) => {
             const Icon = item.icon;
             const active = isItemActive(item);
@@ -108,13 +112,13 @@ export function Sidebar() {
                 href={item.href}
                 className={`flex items-center gap-3 px-3 py-2 text-sm rounded-xl transition-colors ${
                   active
-                    ? "bg-slate-100/90 text-slate-950 font-semibold"
-                    : "text-slate-600 hover:text-slate-950 hover:bg-slate-50 font-medium"
+                    ? "bg-surface-soft dark:bg-surface-raised text-text-primary font-semibold shadow-2xs"
+                    : "text-text-secondary hover:text-text-primary hover:bg-surface-soft font-medium"
                 }`}
               >
                 <Icon
-                  className={`w-4 h-4 ${
-                    active ? "text-slate-950" : "text-slate-400"
+                  className={`w-4 h-4 transition-colors ${
+                    active ? "text-primary dark:text-primary" : "text-text-muted"
                   }`}
                 />
                 <span>{item.label}</span>
@@ -125,25 +129,25 @@ export function Sidebar() {
       </nav>
 
       {/* Footer Settings & Sign Out */}
-      <div className="p-3 border-t border-slate-100 space-y-1">
+      <div className="p-3 border-t border-border space-y-1">
         <Link
           href="/settings"
           className={`flex items-center gap-3 w-full px-3 py-2 text-sm rounded-xl transition-colors ${
             pathname.startsWith("/settings")
-              ? "bg-slate-100/90 text-slate-950 font-semibold"
-              : "text-slate-600 hover:text-slate-950 hover:bg-slate-50 font-medium"
+              ? "bg-surface-soft dark:bg-surface-raised text-text-primary font-semibold"
+              : "text-text-secondary hover:text-text-primary hover:bg-surface-soft font-medium"
           }`}
         >
-          <Settings className="w-4 h-4 text-slate-400" />
+          <Settings className="w-4 h-4 text-text-muted" />
           <span>ตั้งค่า</span>
         </Link>
 
         <form action={signOutAction}>
           <button
             type="submit"
-            className="flex items-center gap-3 w-full px-3 py-2 text-sm font-medium text-slate-500 hover:text-rose-600 hover:bg-rose-50/50 rounded-xl transition-colors"
+            className="flex items-center gap-3 w-full px-3 py-2 text-sm font-medium text-text-muted hover:text-expense hover:bg-expense-soft rounded-xl transition-colors"
           >
-            <LogOut className="w-4 h-4 text-slate-400 group-hover:text-rose-600" />
+            <LogOut className="w-4 h-4 text-text-muted group-hover:text-expense" />
             <span>ออกจากระบบ</span>
           </button>
         </form>

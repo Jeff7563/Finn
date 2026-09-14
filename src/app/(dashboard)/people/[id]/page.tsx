@@ -45,28 +45,28 @@ export default async function PersonDetailPage({
       {/* Back button */}
       <Link
         href="/people"
-        className="inline-flex items-center gap-1.5 text-xs font-semibold text-slate-500 hover:text-slate-900 transition-colors"
+        className="inline-flex items-center gap-1.5 text-xs font-semibold text-text-muted hover:text-text-primary transition-colors"
       >
         <ArrowLeft className="w-4 h-4" />
         <span>Back to people</span>
       </Link>
 
       {/* Header Profile Card */}
-      <div className="p-6 bg-white rounded-2xl border border-slate-200/80 shadow-sm flex items-center gap-4">
-        <div className="w-14 h-14 rounded-full bg-slate-100 flex items-center justify-center text-slate-700 flex-shrink-0">
+      <div className="p-6 bg-surface dark:bg-surface-raised rounded-2xl border border-border shadow-sm flex items-center gap-4">
+        <div className="w-14 h-14 rounded-full bg-surface-soft border border-border flex items-center justify-center text-text-primary flex-shrink-0">
           <User className="w-7 h-7" />
         </div>
         <div>
-          <h1 className="text-xl sm:text-2xl font-bold text-slate-900">
+          <h1 className="text-xl sm:text-2xl font-bold text-text-primary">
             {person.display_name}
           </h1>
           {person.aliases && person.aliases.length > 0 && (
-            <p className="text-xs text-slate-500 mt-0.5">
+            <p className="text-xs text-text-muted mt-0.5">
               Aliases: {person.aliases.join(", ")}
             </p>
           )}
           {person.phone && (
-            <p className="text-xs text-slate-400 mt-0.5 font-mono">
+            <p className="text-xs text-text-muted mt-0.5 font-mono">
               {person.phone}
             </p>
           )}
@@ -79,19 +79,19 @@ export default async function PersonDetailPage({
           label="Received"
           amount={summary.total_received}
           type="income"
-          icon={<TrendingUp className="w-4 h-4 text-emerald-600" />}
+          icon={<TrendingUp className="w-4 h-4 text-income" />}
         />
         <SummaryMetric
           label="Paid"
           amount={summary.total_paid}
           type="expense"
-          icon={<TrendingDown className="w-4 h-4 text-rose-600" />}
+          icon={<TrendingDown className="w-4 h-4 text-expense" />}
         />
         <SummaryMetric
           label="Net"
           amount={summary.net}
           type="net"
-          icon={<Scale className="w-4 h-4 text-slate-600" />}
+          icon={<Scale className="w-4 h-4 text-text-muted" />}
         />
       </div>
 
@@ -99,25 +99,25 @@ export default async function PersonDetailPage({
       <div className="space-y-3">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-1.5">
-            <Clock className="w-4 h-4 text-slate-400" />
-            <h2 className="font-semibold text-base text-slate-900">
+            <Clock className="w-4 h-4 text-text-muted" />
+            <h2 className="font-semibold text-base text-text-primary">
               Transaction History ({personTransactions.length})
             </h2>
           </div>
           <Link
             href={`/transactions/new?type=expense`}
-            className="text-xs font-semibold text-slate-700 hover:text-slate-900"
+            className="text-xs font-semibold text-text-secondary hover:text-text-primary"
           >
             + Add Transaction
           </Link>
         </div>
 
         {personTransactions.length === 0 ? (
-          <div className="p-8 text-center bg-white rounded-xl border border-dashed border-slate-200 text-sm text-slate-500">
+          <div className="p-8 text-center bg-surface rounded-xl border border-dashed border-border text-sm text-text-muted">
             No transactions linked to {person.display_name} yet.
           </div>
         ) : (
-          <div className="bg-white rounded-2xl border border-slate-200/80 shadow-sm overflow-hidden divide-y divide-slate-100">
+          <div className="bg-surface dark:bg-surface-raised rounded-2xl border border-border shadow-sm overflow-hidden divide-y divide-border">
             {personTransactions.map((tx) => (
               <TransactionItem key={tx.id} transaction={tx} />
             ))}

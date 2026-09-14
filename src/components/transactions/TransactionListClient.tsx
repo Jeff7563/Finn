@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
 import {
   Account,
   Category,
@@ -18,7 +19,9 @@ import {
   Filter,
   X,
   ArrowUpDown,
+  UploadCloud,
 } from "lucide-react";
+import { SlipUploadModal } from "@/components/slips/SlipUploadModal";
 
 interface TransactionListClientProps {
   initialTransactions: TransactionWithRelations[];
@@ -39,6 +42,7 @@ export function TransactionListClient({
   initialAccountId,
   initialDate,
 }: TransactionListClientProps) {
+  const router = useRouter();
   const [search, setSearch] = useState("");
   const [selectedType, setSelectedType] = useState<TransactionType | "all">("all");
   const [selectedAccountId, setSelectedAccountId] = useState(initialAccountId || "");
@@ -49,6 +53,7 @@ export function TransactionListClient({
   const [endDate, setEndDate] = useState(initialDate || "");
   const [sortOrder, setSortOrder] = useState<"desc" | "asc">("desc");
   const [showFilters, setShowFilters] = useState(Boolean(initialDate));
+  const [isUploadModalOpen, setIsUploadModalOpen] = useState(false);
 
   const activeFilterCount =
     (selectedType !== "all" ? 1 : 0) +
@@ -133,18 +138,18 @@ export function TransactionListClient({
       {/* Search & Top Action Bar */}
       <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2.5">
         <div className="relative flex-1">
-          <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-3" />
+          <Search className="w-4 h-4 text-text-muted absolute left-3.5 top-3 pointer-events-none" />
           <input
             type="text"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="ค้นหารายการ, ร้านค้า, บุคคล, จำนวนเงิน..."
-            className="w-full pl-9 pr-8 py-2 text-sm bg-white border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-slate-900/10 focus:border-slate-900 transition-colors"
+            className="w-full pl-9 pr-8 py-2 text-sm bg-surface border border-border text-text-primary rounded-xl focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary transition-colors placeholder:text-text-muted/60"
           />
           {search && (
             <button
               onClick={() => setSearch("")}
-              className="absolute right-2.5 top-2.5 text-slate-400 hover:text-slate-600 p-0.5"
+              className="absolute right-2.5 top-2.5 text-text-muted hover:text-text-primary p-0.5"
               aria-label="ล้างการค้นหา"
             >
               <X className="w-4 h-4" />
@@ -157,22 +162,31 @@ export function TransactionListClient({
             onClick={() => setShowFilters(!showFilters)}
             className={`flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs sm:text-sm font-medium border transition-colors ${
               showFilters || activeFilterCount > 0
-                ? "bg-slate-900 text-white border-slate-900"
-                : "bg-white text-slate-700 border-slate-200 hover:bg-slate-50"
+                ? "bg-slate-900 dark:bg-primary text-white dark:text-primary-foreground border-transparent"
+                : "bg-surface text-text-secondary border-border hover:bg-surface-soft"
             }`}
           >
             <Filter className="w-3.5 h-3.5" />
             <span>ตัวกรอง</span>
             {activeFilterCount > 0 && (
-              <span className="w-4 h-4 rounded-full bg-white text-slate-900 text-[10px] font-bold flex items-center justify-center ml-0.5">
+              <span className="w-4 h-4 rounded-full bg-surface text-text-primary text-[10px] font-bold flex items-center justify-center ml-0.5">
                 {activeFilterCount}
               </span>
             )}
           </button>
 
           <button
+            onClick={() => setIsUploadModalOpen(true)}
+            className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs sm:text-sm font-semibold bg-surface border border-border text-text-primary hover:bg-surface-soft transition-colors shadow-2xs"
+            title="อัปโหลดสลิปธนาคาร"
+          >
+            <UploadCloud className="w-3.5 h-3.5 text-primary" />
+            <span>อัปโหลดสลิป</span>
+          </button>
+
+          <button
             onClick={() => setSortOrder(sortOrder === "desc" ? "asc" : "desc")}
-            className="p-2 rounded-xl bg-white border border-slate-200 text-slate-700 hover:bg-slate-50 transition-colors"
+            className="p-2 rounded-xl bg-surface border border-border text-text-secondary hover:bg-surface-soft transition-colors"
             title={`เรียงลำดับ: ${sortOrder === "desc" ? "ล่าสุดก่อน" : "เก่าสุดก่อน"}`}
             aria-label="สลับลำดับเวลา"
           >
@@ -189,8 +203,8 @@ export function TransactionListClient({
             onClick={() => setSelectedType(t.key)}
             className={`px-3 py-1.5 rounded-lg font-medium whitespace-nowrap transition-colors ${
               selectedType === t.key
-                ? "bg-slate-900 text-white font-semibold"
-                : "bg-white text-slate-600 border border-slate-200 hover:bg-slate-50"
+                ? "bg-slate-900 dark:bg-primary text-white dark:text-primary-foreground font-semibold"
+                : "bg-surface text-text-secondary border border-border hover:bg-surface-soft"
             }`}
           >
             {t.label}
@@ -199,7 +213,7 @@ export function TransactionListClient({
         {activeFilterCount > 0 && (
           <button
             onClick={clearFilters}
-            className="text-xs text-rose-600 hover:text-rose-700 font-semibold px-2 py-1 ml-auto"
+            className="text-xs text-expense hover:opacity-80 font-semibold px-2 py-1 ml-auto"
           >
             ล้างตัวกรอง
           </button>
@@ -208,17 +222,17 @@ export function TransactionListClient({
 
       {/* Expanded Filters Drawer / Panel */}
       {showFilters && (
-        <div className="p-4 bg-white rounded-2xl border border-slate-200 shadow-sm space-y-4 animate-in fade-in">
+        <div className="p-4 bg-surface dark:bg-surface-raised rounded-2xl border border-border shadow-sm space-y-4 animate-in fade-in">
           <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3">
             {/* Account */}
             <div>
-              <label className="block text-xs font-medium text-slate-600 mb-1">
+              <label className="block text-xs font-medium text-text-secondary mb-1">
                 บัญชี (Account)
               </label>
               <select
                 value={selectedAccountId}
                 onChange={(e) => setSelectedAccountId(e.target.value)}
-                className="w-full text-xs p-2 bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-slate-900"
+                className="w-full text-xs p-2 bg-surface border border-border text-text-primary rounded-lg focus:outline-none focus:ring-1 focus:ring-primary"
               >
                 <option value="">ทุกบัญชี</option>
                 {accounts.map((acc) => (
@@ -231,13 +245,13 @@ export function TransactionListClient({
 
             {/* Category */}
             <div>
-              <label className="block text-xs font-medium text-slate-600 mb-1">
+              <label className="block text-xs font-medium text-text-secondary mb-1">
                 หมวดหมู่ (Category)
               </label>
               <select
                 value={selectedCategoryId}
                 onChange={(e) => setSelectedCategoryId(e.target.value)}
-                className="w-full text-xs p-2 bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-slate-900"
+                className="w-full text-xs p-2 bg-surface border border-border text-text-primary rounded-lg focus:outline-none focus:ring-1 focus:ring-primary"
               >
                 <option value="">ทุกหมวดหมู่</option>
                 {categories.map((c) => (
@@ -250,13 +264,13 @@ export function TransactionListClient({
 
             {/* Person */}
             <div>
-              <label className="block text-xs font-medium text-slate-600 mb-1">
+              <label className="block text-xs font-medium text-text-secondary mb-1">
                 บุคคล (Person)
               </label>
               <select
                 value={selectedPersonId}
                 onChange={(e) => setSelectedPersonId(e.target.value)}
-                className="w-full text-xs p-2 bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-slate-900"
+                className="w-full text-xs p-2 bg-surface border border-border text-text-primary rounded-lg focus:outline-none focus:ring-1 focus:ring-primary"
               >
                 <option value="">ทุกคน</option>
                 {people.map((p) => (
@@ -269,13 +283,13 @@ export function TransactionListClient({
 
             {/* Merchant */}
             <div>
-              <label className="block text-xs font-medium text-slate-600 mb-1">
+              <label className="block text-xs font-medium text-text-secondary mb-1">
                 ร้านค้า (Merchant)
               </label>
               <select
                 value={selectedMerchantId}
                 onChange={(e) => setSelectedMerchantId(e.target.value)}
-                className="w-full text-xs p-2 bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-slate-900"
+                className="w-full text-xs p-2 bg-surface border border-border text-text-primary rounded-lg focus:outline-none focus:ring-1 focus:ring-primary"
               >
                 <option value="">ทุกร้านค้า</option>
                 {merchants.map((m) => (
@@ -287,37 +301,35 @@ export function TransactionListClient({
             </div>
           </div>
 
-          <div className="grid grid-cols-2 gap-3 pt-2 border-t border-slate-100">
+          <div className="grid grid-cols-2 gap-3 pt-2 border-t border-border">
             <div>
-              <label className="block text-xs font-medium text-slate-600 mb-1">
+              <label className="block text-xs font-medium text-text-secondary mb-1">
                 ตั้งแต่วันที่
               </label>
               <input
                 type="date"
                 value={startDate}
                 onChange={(e) => setStartDate(e.target.value)}
-                className="w-full text-xs p-2 bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-slate-900"
-              >
-              </input>
+                className="w-full text-xs p-2 bg-surface border border-border text-text-primary rounded-lg focus:outline-none focus:ring-1 focus:ring-primary"
+              />
             </div>
             <div>
-              <label className="block text-xs font-medium text-slate-600 mb-1">
+              <label className="block text-xs font-medium text-text-secondary mb-1">
                 ถึงวันที่
               </label>
               <input
                 type="date"
                 value={endDate}
                 onChange={(e) => setEndDate(e.target.value)}
-                className="w-full text-xs p-2 bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-slate-900"
-              >
-              </input>
+                className="w-full text-xs p-2 bg-surface border border-border text-text-primary rounded-lg focus:outline-none focus:ring-1 focus:ring-primary"
+              />
             </div>
           </div>
         </div>
       )}
 
       {/* Results Counter */}
-      <div className="flex items-center justify-between text-xs text-slate-400 px-1">
+      <div className="flex items-center justify-between text-xs text-text-muted px-1">
         <span>
           แสดง {filteredTransactions.length} จากทั้งหมด {initialTransactions.length} รายการ
         </span>
@@ -335,10 +347,10 @@ export function TransactionListClient({
         <div className="space-y-4">
           {groupedTransactions.map((group) => (
             <div key={group.heading} className="space-y-1.5">
-              <h3 className="text-xs font-semibold text-slate-500 px-1">
+              <h3 className="text-xs font-semibold text-text-muted px-1">
                 {group.heading}
               </h3>
-              <div className="bg-white rounded-2xl border border-slate-200/80 shadow-sm overflow-hidden divide-y divide-slate-100">
+              <div className="bg-surface dark:bg-surface-raised rounded-2xl border border-border shadow-sm overflow-hidden divide-y divide-border">
                 {group.items.map((tx) => (
                   <TransactionItem key={tx.id} transaction={tx} />
                 ))}
@@ -347,6 +359,13 @@ export function TransactionListClient({
           ))}
         </div>
       )}
+
+      {/* Manual Slip Upload Modal */}
+      <SlipUploadModal
+        isOpen={isUploadModalOpen}
+        onClose={() => setIsUploadModalOpen(false)}
+        onSuccess={() => router.refresh()}
+      />
     </div>
   );
 }

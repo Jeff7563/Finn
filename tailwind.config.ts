@@ -10,37 +10,85 @@ const config: Config = {
   theme: {
     extend: {
       colors: {
-        border: "hsl(var(--border))",
-        input: "hsl(var(--input))",
-        ring: "hsl(var(--ring))",
-        background: "hsl(var(--background))",
-        foreground: "hsl(var(--foreground))",
+        bg: {
+          DEFAULT: "var(--bg)",
+          subtle: "var(--bg-subtle)",
+        },
+        surface: {
+          DEFAULT: "var(--surface)",
+          raised: "var(--surface-raised)",
+          soft: "var(--surface-soft)",
+          muted: "var(--surface-muted)",
+        },
+        text: {
+          primary: "var(--text-primary)",
+          secondary: "var(--text-secondary)",
+          muted: "var(--text-muted)",
+        },
+        border: {
+          DEFAULT: "var(--border)",
+          strong: "var(--border-strong)",
+        },
         primary: {
-          DEFAULT: "hsl(var(--primary))",
-          foreground: "hsl(var(--primary-foreground))",
+          DEFAULT: "var(--primary)",
+          hover: "var(--primary-hover)",
+          soft: "var(--primary-soft)",
+          foreground: "var(--primary-foreground)",
         },
-        secondary: {
-          DEFAULT: "hsl(var(--secondary))",
-          foreground: "hsl(var(--secondary-foreground))",
+        income: {
+          DEFAULT: "var(--income)",
+          soft: "var(--income-soft)",
         },
-        muted: {
-          DEFAULT: "hsl(var(--muted))",
-          foreground: "hsl(var(--muted-foreground))",
+        expense: {
+          DEFAULT: "var(--expense)",
+          soft: "var(--expense-soft)",
         },
-        accent: {
-          DEFAULT: "hsl(var(--accent))",
-          foreground: "hsl(var(--accent-foreground))",
+        transfer: {
+          DEFAULT: "var(--transfer)",
+          soft: "var(--transfer-soft)",
         },
-        card: {
-          DEFAULT: "hsl(var(--card))",
-          foreground: "hsl(var(--card-foreground))",
+        warning: {
+          DEFAULT: "var(--warning)",
+          soft: "var(--warning-soft)",
         },
         finance: {
-          income: "#059669",
-          expense: "#e11d48",
-          transfer: "#2563eb",
-          muted: "#64748b",
+          income: "var(--income)",
+          expense: "var(--expense)",
+          transfer: "var(--transfer)",
+          muted: "var(--text-muted)",
         },
+        // Compatibility with shadcn / HSL tokens
+        input: "var(--border)",
+        ring: "var(--primary)",
+        background: "var(--bg)",
+        foreground: "var(--text-primary)",
+        secondary: {
+          DEFAULT: "var(--surface-soft)",
+          foreground: "var(--text-primary)",
+        },
+        muted: {
+          DEFAULT: "var(--surface-soft)",
+          foreground: "var(--text-muted)",
+        },
+        accent: {
+          DEFAULT: "var(--surface-soft)",
+          foreground: "var(--text-primary)",
+        },
+        card: {
+          DEFAULT: "var(--surface)",
+          foreground: "var(--text-primary)",
+        },
+      },
+      boxShadow: {
+        "2xs": "0 1px 2px 0 rgba(0, 0, 0, 0.03)",
+        xs: "var(--shadow-sm)",
+        sm: "var(--shadow-sm)",
+        md: "var(--shadow-md)",
+        lg: "var(--shadow-lg)",
+      },
+      backgroundImage: {
+        "hero-gradient": "var(--gradient-hero)",
+        "accent-gradient": "var(--gradient-accent)",
       },
       fontFamily: {
         sans: [

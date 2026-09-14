@@ -20,12 +20,12 @@ export function SummaryMetric({
   icon,
 }: SummaryMetricProps) {
   return (
-    <div className="p-4 sm:p-5 bg-white rounded-xl border border-slate-200/80 shadow-sm flex flex-col justify-between">
-      <div className="flex items-center justify-between gap-2 text-slate-500 mb-2">
+    <div className="p-4 sm:p-5 bg-surface dark:bg-surface-raised rounded-xl border border-border shadow-sm flex flex-col justify-between">
+      <div className="flex items-center justify-between gap-2 text-text-muted mb-2">
         <span className="text-xs font-semibold uppercase tracking-wider">
           {label}
         </span>
-        {icon && <div className="text-slate-400">{icon}</div>}
+        {icon && <div className="text-text-muted">{icon}</div>}
       </div>
 
       <div>
@@ -37,7 +37,7 @@ export function SummaryMetric({
           className="block"
         />
         {subtitle && (
-          <p className="text-xs text-slate-500 mt-1 font-medium">{subtitle}</p>
+          <p className="text-xs text-text-muted mt-1 font-medium">{subtitle}</p>
         )}
       </div>
     </div>

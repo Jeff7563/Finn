@@ -26,7 +26,7 @@ export function FinanceMonthCalendar({
           <div
             key={dayLabel}
             className={`text-xs font-medium py-1 ${
-              idx >= 5 ? "text-slate-400" : "text-slate-600"
+              idx >= 5 ? "text-text-muted" : "text-text-secondary"
             }`}
           >
             {dayLabel}

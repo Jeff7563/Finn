@@ -4,6 +4,11 @@ import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import { authSchema } from "@/lib/validation/schemas";
+import {
+  signSessionPayload,
+  isDemoModeAllowed,
+  DEMO_USER,
+} from "@/lib/server/session";
 
 export interface ActionResult {
   success: boolean;
@@ -43,12 +48,12 @@ export async function signInAction(
       ) {
         cookieStore.set(
           "finn_session",
-          JSON.stringify({
+          await signSessionPayload({
             id: "dev-user-12345",
             email: parsed.data.email,
             display_name: parsed.data.email.split("@")[0],
           }),
-          { path: "/", httpOnly: true, secure: process.env.NODE_ENV === "production" }
+          { path: "/", httpOnly: true, secure: process.env.NODE_ENV === "production", sameSite: "lax" }
         );
       } else {
         return { success: false, error: error.message };
@@ -58,12 +63,12 @@ export async function signInAction(
     // Dev fallback
     cookieStore.set(
       "finn_session",
-      JSON.stringify({
+      await signSessionPayload({
         id: "dev-user-12345",
         email: parsed.data.email,
         display_name: parsed.data.email.split("@")[0],
       }),
-      { path: "/", httpOnly: true, secure: process.env.NODE_ENV === "production" }
+      { path: "/", httpOnly: true, secure: process.env.NODE_ENV === "production", sameSite: "lax" }
     );
   }
 
@@ -102,12 +107,12 @@ export async function signUpAction(
       ) {
         cookieStore.set(
           "finn_session",
-          JSON.stringify({
+          await signSessionPayload({
             id: `user-${crypto.randomUUID()}`,
             email: parsed.data.email,
             display_name: parsed.data.email.split("@")[0],
           }),
-          { path: "/", httpOnly: true, secure: process.env.NODE_ENV === "production" }
+          { path: "/", httpOnly: true, secure: process.env.NODE_ENV === "production", sameSite: "lax" }
         );
       } else {
         return { success: false, error: error.message };
@@ -116,12 +121,12 @@ export async function signUpAction(
   } catch {
     cookieStore.set(
       "finn_session",
-      JSON.stringify({
+      await signSessionPayload({
         id: `user-${crypto.randomUUID()}`,
         email: parsed.data.email,
         display_name: parsed.data.email.split("@")[0],
       }),
-      { path: "/", httpOnly: true, secure: process.env.NODE_ENV === "production" }
+      { path: "/", httpOnly: true, secure: process.env.NODE_ENV === "production", sameSite: "lax" }
     );
   }
 
@@ -143,15 +148,15 @@ export async function signOutAction(): Promise<void> {
 }
 
 export async function signInDemoAction(): Promise<void> {
+  if (!isDemoModeAllowed()) {
+    redirect("/login?error=demo_disabled");
+  }
+
   const cookieStore = await cookies();
   cookieStore.set(
     "finn_session",
-    JSON.stringify({
-      id: "demo-user-fintech",
-      email: "demo@finn.local",
-      display_name: "Fintech User",
-    }),
-    { path: "/", httpOnly: true, secure: process.env.NODE_ENV === "production" }
+    await signSessionPayload(DEMO_USER),
+    { path: "/", httpOnly: true, secure: process.env.NODE_ENV === "production", sameSite: "lax" }
   );
 
   redirect("/today");

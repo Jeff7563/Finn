@@ -1,5 +1,6 @@
 import { createServerClient, type CookieOptions } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
+import { verifySessionToken } from "../server/session";
 
 export async function updateSession(request: NextRequest) {
   let supabaseResponse = NextResponse.next({
@@ -37,16 +38,11 @@ export async function updateSession(request: NextRequest) {
     },
   });
 
-  // Check demo session cookie first (for e2e/preview testing without active supabase cloud)
-  const demoUser = request.cookies.get("finn_session")?.value;
-
-  let user = null;
-  if (demoUser) {
-    try {
-      user = JSON.parse(demoUser);
-    } catch {
-      user = null;
-    }
+  // Check verified demo session token
+  const demoToken = request.cookies.get("finn_session")?.value;
+  let user: { id: string; email?: string } | null = null;
+  if (demoToken) {
+    user = await verifySessionToken(demoToken);
   }
 
   if (!user) {

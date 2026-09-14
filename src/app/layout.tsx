@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import "./globals.css";
+import { ThemeProvider, themeInitScript } from "@/components/theme/ThemeProvider";
 
 export const metadata: Metadata = {
   title: "Finn — Personal Finance OS",
@@ -12,7 +13,6 @@ export const viewport: Viewport = {
   initialScale: 1,
   maximumScale: 1,
   viewportFit: "cover",
-  themeColor: "#ffffff",
 };
 
 export default function RootLayout({
@@ -21,9 +21,16 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="th">
-      <body className="min-h-screen bg-slate-50 text-slate-900 antialiased selection:bg-slate-200">
-        {children}
+    <html lang="th" suppressHydrationWarning>
+      <head>
+        <script
+          dangerouslySetInnerHTML={{
+            __html: themeInitScript,
+          }}
+        />
+      </head>
+      <body className="min-h-screen bg-bg text-text-primary antialiased selection:bg-primary/20">
+        <ThemeProvider>{children}</ThemeProvider>
       </body>
     </html>
   );

@@ -30,19 +30,19 @@ export default async function TransactionsPage({
   return (
     <div className="space-y-6 max-w-4xl mx-auto pb-6">
       {/* Header */}
-      <div className="flex items-center justify-between gap-4 border-b border-slate-100 pb-3">
+      <div className="flex items-center justify-between gap-4 border-b border-border pb-3">
         <div>
-          <h1 className="text-2xl sm:text-3xl font-semibold tracking-tight text-slate-900">
+          <h1 className="text-2xl sm:text-3xl font-semibold tracking-tight text-text-primary">
             รายการทั้งหมด
           </h1>
-          <p className="text-xs text-slate-500 mt-0.5">
+          <p className="text-xs text-text-muted mt-0.5">
             บันทึกรายรับ รายจ่าย และการโอนเงิน
           </p>
         </div>
 
         <Link
           href="/transactions/new"
-          className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs sm:text-sm font-semibold text-white bg-slate-900 hover:bg-slate-800 rounded-xl transition-all shadow-sm active:scale-[0.98]"
+          className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs sm:text-sm font-semibold text-white bg-slate-900 hover:bg-slate-800 dark:bg-primary dark:text-primary-foreground dark:hover:bg-primary-hover rounded-xl transition-all shadow-xs active:scale-[0.98]"
         >
           <Plus className="w-4 h-4" />
           <span>+ เพิ่มรายการ</span>

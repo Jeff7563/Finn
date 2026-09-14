@@ -29,7 +29,7 @@ export function MoneyAmount({
 
   if (!type) {
     return (
-      <span className={`tabular-nums text-slate-900 ${sizeClasses[size]} ${className}`}>
+      <span className={`tabular-nums text-text-primary ${sizeClasses[size]} ${className}`}>
         {formatMoney(amount, currency, showDecimals)}
       </span>
     );
@@ -39,10 +39,10 @@ export function MoneyAmount({
     const isPositive = amount > 0;
     const isNegative = amount < 0;
     const color = isPositive
-      ? "text-emerald-700"
+      ? "text-income"
       : isNegative
-      ? "text-rose-700"
-      : "text-slate-700";
+      ? "text-expense"
+      : "text-text-primary";
     const sign = isPositive ? "+" : isNegative ? "-" : "";
 
     return (
@@ -56,10 +56,10 @@ export function MoneyAmount({
   const formatted = formatSignedMoney(amount, type, currency, showDecimals);
   const color =
     type === "income" || type === "refund" || type === "reimbursement" || type === "gift"
-      ? "text-emerald-700"
+      ? "text-income"
       : type === "expense" || type === "loan_payment"
-      ? "text-rose-700"
-      : "text-slate-800";
+      ? "text-expense"
+      : "text-text-primary";
 
   return (
     <span className={`tabular-nums ${color} ${sizeClasses[size]} ${className}`}>

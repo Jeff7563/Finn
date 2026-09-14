@@ -24,7 +24,7 @@ export function SeedSampleDataButton() {
     <button
       onClick={handleSeed}
       disabled={isPending}
-      className="flex items-center gap-2 px-4 py-2.5 bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold rounded-xl shadow-sm transition-all disabled:opacity-50"
+      className="flex items-center gap-2 px-4 py-2.5 bg-slate-900 hover:bg-slate-800 dark:bg-primary dark:text-primary-foreground dark:hover:bg-primary-hover text-white text-xs font-semibold rounded-xl shadow-xs transition-all disabled:opacity-50"
     >
       {isPending ? (
         <span>Populating...</span>

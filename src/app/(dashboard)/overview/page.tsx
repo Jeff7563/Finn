@@ -75,17 +75,17 @@ export default async function OverviewPage() {
   return (
     <div className="space-y-6 max-w-5xl mx-auto pb-6">
       {/* Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-100 pb-3">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-border pb-3">
         <div>
-          <h1 className="text-2xl sm:text-3xl font-semibold tracking-tight text-slate-900">
-            ภาพรวม <span className="text-sm font-normal text-slate-400">· Financial Overview</span>
+          <h1 className="text-2xl sm:text-3xl font-semibold tracking-tight text-text-primary">
+            ภาพรวม <span className="text-sm font-normal text-text-muted">· Financial Overview</span>
           </h1>
-          <p className="text-xs text-slate-500 mt-0.5">
+          <p className="text-xs text-text-muted mt-0.5">
             สรุปกระแสเงินสด ยอดคงเหลือ บัญชี และหมวดหมู่ค่าใช้จ่าย
           </p>
         </div>
 
-        <div className="inline-flex items-center gap-1 px-3 py-1.5 bg-slate-100 rounded-lg text-xs font-semibold text-slate-700 w-fit">
+        <div className="inline-flex items-center gap-1 px-3 py-1.5 bg-surface-soft border border-border rounded-lg text-xs font-semibold text-text-primary w-fit">
           <span>{currentMonthThai}</span>
         </div>
       </div>
@@ -93,36 +93,36 @@ export default async function OverviewPage() {
       {/* Main Cash Flow & Balance Hero */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         {/* Hero Net Cash Flow */}
-        <div className="md:col-span-2 bg-white rounded-2xl p-5 sm:p-6 border border-slate-200/80 shadow-sm flex flex-col justify-between">
+        <div className="md:col-span-2 bg-surface dark:bg-surface-raised rounded-2xl p-5 sm:p-6 border border-border shadow-sm flex flex-col justify-between">
           <div>
             <div className="flex items-center justify-between">
-              <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">
-                กระแสเงินสดเดือนนี้ <span className="font-normal text-slate-400">· Net Cash Flow</span>
+              <span className="text-xs font-semibold uppercase tracking-wider text-text-muted">
+                กระแสเงินสดเดือนนี้ <span className="font-normal text-text-muted">· Net Cash Flow</span>
               </span>
-              <Scale className="w-4 h-4 text-slate-400" />
+              <Scale className="w-4 h-4 text-text-muted" />
             </div>
             <div className="mt-2">
               <MoneyAmount amount={monthSummary.net_cash_flow} type="net" size="2xl" />
             </div>
           </div>
 
-          <div className="mt-4 pt-3 border-t border-slate-100 grid grid-cols-2 gap-4">
+          <div className="mt-4 pt-3 border-t border-border grid grid-cols-2 gap-4">
             <div className="flex items-center gap-2">
-              <div className="w-8 h-8 rounded-lg bg-emerald-50 text-emerald-600 flex items-center justify-center flex-shrink-0">
+              <div className="w-8 h-8 rounded-lg bg-income-soft text-income flex items-center justify-center flex-shrink-0">
                 <TrendingUp className="w-4 h-4" />
               </div>
               <div>
-                <span className="text-[11px] text-slate-400 block">รายรับ</span>
+                <span className="text-[11px] text-text-muted block">รายรับ</span>
                 <MoneyAmount amount={monthSummary.income_total} type="income" size="sm" />
               </div>
             </div>
 
             <div className="flex items-center gap-2">
-              <div className="w-8 h-8 rounded-lg bg-rose-50 text-rose-600 flex items-center justify-center flex-shrink-0">
+              <div className="w-8 h-8 rounded-lg bg-expense-soft text-expense flex items-center justify-center flex-shrink-0">
                 <TrendingDown className="w-4 h-4" />
               </div>
               <div>
-                <span className="text-[11px] text-slate-400 block">รายจ่าย</span>
+                <span className="text-[11px] text-text-muted block">รายจ่าย</span>
                 <MoneyAmount amount={monthSummary.expense_total} type="expense" size="sm" />
               </div>
             </div>
@@ -130,27 +130,27 @@ export default async function OverviewPage() {
         </div>
 
         {/* Total Balance Card */}
-        <div className="bg-white rounded-2xl p-5 sm:p-6 border border-slate-200/80 shadow-sm flex flex-col justify-between">
+        <div className="bg-surface dark:bg-surface-raised rounded-2xl p-5 sm:p-6 border border-border shadow-sm flex flex-col justify-between">
           <div>
             <div className="flex items-center justify-between">
-              <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">
-                ยอดเงินทั้งหมด <span className="font-normal text-slate-400">· Total Balance</span>
+              <span className="text-xs font-semibold uppercase tracking-wider text-text-muted">
+                ยอดเงินทั้งหมด <span className="font-normal text-text-muted">· Total Balance</span>
               </span>
-              <Wallet className="w-4 h-4 text-slate-400" />
+              <Wallet className="w-4 h-4 text-text-muted" />
             </div>
             <div className="mt-2">
               <MoneyAmount amount={totalBalance} size="xl" />
             </div>
-            <p className="text-xs text-slate-500 mt-1">
+            <p className="text-xs text-text-muted mt-1">
               อัตราการออม: {monthSummary.savings_rate}%
             </p>
           </div>
 
-          <div className="mt-4 pt-3 border-t border-slate-100 flex items-center justify-between text-xs text-slate-500">
+          <div className="mt-4 pt-3 border-t border-border flex items-center justify-between text-xs text-text-muted">
             <span>{accounts.length} บัญชีที่ใช้งาน</span>
             <Link
               href="/accounts"
-              className="font-medium text-slate-700 hover:text-slate-900 flex items-center gap-0.5"
+              className="font-medium text-text-secondary hover:text-text-primary flex items-center gap-0.5"
             >
               <span>จัดการ</span>
               <ChevronRight className="w-3.5 h-3.5" />
@@ -162,25 +162,25 @@ export default async function OverviewPage() {
       {/* Monthly Trend & Spending Breakdown Grid */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
         {/* 6-Month Trend */}
-        <div className="p-5 sm:p-6 bg-white rounded-2xl border border-slate-200/80 shadow-sm space-y-4">
+        <div className="p-5 sm:p-6 bg-surface dark:bg-surface-raised rounded-2xl border border-border shadow-sm space-y-4">
           <div className="flex items-center justify-between">
-            <h2 className="font-semibold text-sm sm:text-base text-slate-900">
+            <h2 className="font-semibold text-sm sm:text-base text-text-primary">
               แนวโน้ม 6 เดือน (รายรับ vs รายจ่าย)
             </h2>
             <div className="flex items-center gap-2.5 text-xs">
-              <span className="inline-flex items-center gap-1 text-slate-600">
-                <span className="w-2 h-2 rounded-full bg-emerald-500" />
+              <span className="inline-flex items-center gap-1 text-text-secondary">
+                <span className="w-2 h-2 rounded-full bg-income" />
                 รายรับ
               </span>
-              <span className="inline-flex items-center gap-1 text-slate-600">
-                <span className="w-2 h-2 rounded-full bg-rose-500" />
+              <span className="inline-flex items-center gap-1 text-text-secondary">
+                <span className="w-2 h-2 rounded-full bg-expense" />
                 รายจ่าย
               </span>
             </div>
           </div>
 
           {!hasTrendData ? (
-            <div className="py-10 text-center text-xs text-slate-400">
+            <div className="py-10 text-center text-xs text-text-muted">
               ยังไม่มีข้อมูลย้อนหลังเพียงพอสำหรับแสดงแนวโน้ม
             </div>
           ) : (
@@ -191,13 +191,13 @@ export default async function OverviewPage() {
 
                 return (
                   <div key={trend.yearMonth} className="space-y-1">
-                    <div className="flex items-center justify-between text-xs text-slate-500 font-medium">
+                    <div className="flex items-center justify-between text-xs text-text-secondary font-medium">
                       <span>{trend.label}</span>
                       <span className="tabular-nums">
                         สุทธิ:{" "}
                         <strong
                           className={
-                            trend.net >= 0 ? "text-emerald-700" : "text-rose-700"
+                            trend.net >= 0 ? "text-income" : "text-expense"
                           }
                         >
                           {formatMoney(trend.net)}
@@ -206,16 +206,16 @@ export default async function OverviewPage() {
                     </div>
 
                     <div className="space-y-1">
-                      <div className="w-full bg-slate-100 rounded-full h-1.5 overflow-hidden flex">
+                      <div className="w-full bg-surface-soft rounded-full h-1.5 overflow-hidden flex">
                         <div
-                          className="bg-emerald-500 h-full rounded-full transition-all duration-300"
+                          className="bg-income h-full rounded-full transition-all duration-300"
                           style={{ width: `${Math.max(incomeWidth, 1)}%` }}
                           title={`รายรับ: ${formatMoney(trend.income)}`}
                         />
                       </div>
-                      <div className="w-full bg-slate-100 rounded-full h-1.5 overflow-hidden flex">
+                      <div className="w-full bg-surface-soft rounded-full h-1.5 overflow-hidden flex">
                         <div
-                          className="bg-rose-500 h-full rounded-full transition-all duration-300"
+                          className="bg-expense h-full rounded-full transition-all duration-300"
                           style={{ width: `${Math.max(expenseWidth, 1)}%` }}
                           title={`รายจ่าย: ${formatMoney(trend.expense)}`}
                         />
@@ -229,24 +229,24 @@ export default async function OverviewPage() {
         </div>
 
         {/* Top Spending Categories */}
-        <div className="p-5 sm:p-6 bg-white rounded-2xl border border-slate-200/80 shadow-sm space-y-4">
+        <div className="p-5 sm:p-6 bg-surface dark:bg-surface-raised rounded-2xl border border-border shadow-sm space-y-4">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-1.5">
-              <PieChart className="w-4 h-4 text-slate-400" />
-              <h2 className="font-semibold text-sm sm:text-base text-slate-900">
+              <PieChart className="w-4 h-4 text-text-muted" />
+              <h2 className="font-semibold text-sm sm:text-base text-text-primary">
                 เงินออกไปกับอะไร (หมวดหมู่ยอดนิยม)
               </h2>
             </div>
             <Link
               href="/categories"
-              className="text-xs font-semibold text-slate-600 hover:text-slate-900"
+              className="text-xs font-semibold text-text-secondary hover:text-text-primary"
             >
               ดูทั้งหมด
             </Link>
           </div>
 
           {categoryExpenses.length === 0 ? (
-            <div className="py-10 text-center text-xs text-slate-400">
+            <div className="py-10 text-center text-xs text-text-muted">
               ยังไม่มีบันทึกรายจ่ายแยกตามหมวดหมู่ในเดือนนี้
             </div>
           ) : (
@@ -254,19 +254,19 @@ export default async function OverviewPage() {
               {categoryExpenses.map((cat) => (
                 <div key={cat.category_id} className="space-y-1">
                   <div className="flex items-center justify-between text-xs font-medium">
-                    <span className="text-slate-700 truncate pr-2">
+                    <span className="text-text-primary truncate pr-2">
                       {cat.category_name}
                     </span>
                     <div className="flex items-center gap-2 text-right flex-shrink-0">
-                      <span className="text-slate-400 tabular-nums">
+                      <span className="text-text-muted tabular-nums">
                         {cat.percentage}%
                       </span>
                       <MoneyAmount amount={cat.total} size="sm" />
                     </div>
                   </div>
-                  <div className="w-full bg-slate-100 rounded-full h-1.5 overflow-hidden">
+                  <div className="w-full bg-surface-soft rounded-full h-1.5 overflow-hidden">
                     <div
-                      className="bg-slate-800 h-full rounded-full transition-all duration-300"
+                      className="bg-primary h-full rounded-full transition-all duration-300"
                       style={{ width: `${cat.percentage}%` }}
                     />
                   </div>
@@ -286,12 +286,12 @@ export default async function OverviewPage() {
       {/* Accounts Snapshot */}
       <div className="space-y-3">
         <div className="flex items-center justify-between">
-          <h2 className="font-semibold text-base text-slate-900">
+          <h2 className="font-semibold text-base text-text-primary">
             บัญชีของฉัน
           </h2>
           <Link
             href="/accounts"
-            className="text-xs font-semibold text-slate-600 hover:text-slate-900 flex items-center gap-1"
+            className="text-xs font-semibold text-text-secondary hover:text-text-primary flex items-center gap-1"
           >
             <span>ดูทุกบัญชี ({accounts.length})</span>
             <ChevronRight className="w-3.5 h-3.5" />
@@ -299,7 +299,7 @@ export default async function OverviewPage() {
         </div>
 
         {accountBalances.length === 0 ? (
-          <p className="text-xs text-slate-500 p-4 bg-white rounded-xl border border-slate-200">
+          <p className="text-xs text-text-muted p-4 bg-surface dark:bg-surface-raised rounded-xl border border-border">
             ยังไม่มีบัญชี
           </p>
         ) : (
@@ -318,14 +318,14 @@ export default async function OverviewPage() {
             <div className="space-y-3">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-1.5">
-                  <Users className="w-4 h-4 text-slate-400" />
-                  <h2 className="font-semibold text-sm sm:text-base text-slate-900">
+                  <Users className="w-4 h-4 text-text-muted" />
+                  <h2 className="font-semibold text-sm sm:text-base text-text-primary">
                     บุคคลที่ทำธุรกรรมด้วย
                   </h2>
                 </div>
                 <Link
                   href="/people"
-                  className="text-xs font-semibold text-slate-600 hover:text-slate-900"
+                  className="text-xs font-semibold text-text-secondary hover:text-text-primary"
                 >
                   ดูทั้งหมด
                 </Link>
@@ -343,14 +343,14 @@ export default async function OverviewPage() {
             <div className="space-y-3">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-1.5">
-                  <Store className="w-4 h-4 text-slate-400" />
-                  <h2 className="font-semibold text-sm sm:text-base text-slate-900">
+                  <Store className="w-4 h-4 text-text-muted" />
+                  <h2 className="font-semibold text-sm sm:text-base text-text-primary">
                     ร้านค้ายอดนิยม
                   </h2>
                 </div>
                 <Link
                   href="/merchants"
-                  className="text-xs font-semibold text-slate-600 hover:text-slate-900"
+                  className="text-xs font-semibold text-text-secondary hover:text-text-primary"
                 >
                   ดูทั้งหมด
                 </Link>

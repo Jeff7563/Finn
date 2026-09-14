@@ -9,11 +9,11 @@ export default async function CategoriesPage() {
 
   return (
     <div className="space-y-6 max-w-5xl mx-auto pb-6">
-      <div className="border-b border-slate-100 pb-3">
-        <h1 className="text-2xl sm:text-3xl font-semibold tracking-tight text-slate-900">
-          หมวดหมู่ <span className="text-sm font-normal text-slate-400">· Categories</span>
+      <div className="border-b border-border pb-3">
+        <h1 className="text-2xl sm:text-3xl font-semibold tracking-tight text-text-primary">
+          หมวดหมู่ <span className="text-sm font-normal text-text-muted">· Categories</span>
         </h1>
-        <p className="text-xs text-slate-500 mt-0.5">
+        <p className="text-xs text-text-muted mt-0.5">
           จัดกลุ่มรายรับและรายจ่ายเพื่อวิเคราะห์กระแสเงินสด
         </p>
       </div>

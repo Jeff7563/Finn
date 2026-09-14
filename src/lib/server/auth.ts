@@ -1,5 +1,6 @@
 import { cookies } from "next/headers";
 import { createClient } from "../supabase/server";
+import { verifySessionToken } from "./session";
 
 export interface AuthenticatedUser {
   id: string;
@@ -10,16 +11,12 @@ export interface AuthenticatedUser {
 export async function getAuthenticatedUser(): Promise<AuthenticatedUser | null> {
   const cookieStore = await cookies();
 
-  // 1. Check demo/session cookie
+  // 1. Check verified demo/session token
   const sessionCookie = cookieStore.get("finn_session")?.value;
   if (sessionCookie) {
-    try {
-      const user = JSON.parse(sessionCookie);
-      if (user && user.id && user.email) {
-        return user;
-      }
-    } catch {
-      // ignore
+    const verified = await verifySessionToken(sessionCookie);
+    if (verified) {
+      return verified;
     }
   }
 

@@ -65,14 +65,14 @@ export function AccountsClient({
   return (
     <div className="space-y-5">
       <div className="flex items-center justify-between">
-        <p className="text-xs text-slate-500 font-medium">
+        <p className="text-xs text-text-muted font-medium">
           {initialAccountBalances.length} บัญชีที่ใช้งาน
         </p>
 
         <button
           onClick={() => setShowAddModal(true)}
           aria-label="Add Account"
-          className="flex items-center gap-1.5 px-3.5 py-2 bg-slate-900 hover:bg-slate-800 text-white text-xs sm:text-sm font-semibold rounded-xl shadow-sm transition-all active:scale-[0.98]"
+          className="flex items-center gap-1.5 px-3.5 py-2 bg-slate-900 hover:bg-slate-800 dark:bg-primary dark:text-primary-foreground dark:hover:bg-primary-hover text-white text-xs sm:text-sm font-semibold rounded-xl shadow-sm transition-all active:scale-[0.98]"
         >
           <Plus className="w-4 h-4" />
           <span>Add Account</span>
@@ -81,7 +81,7 @@ export function AccountsClient({
 
       {initialAccountBalances.length === 0 ? (
         <EmptyState
-          icon={<Landmark className="w-8 h-8 text-slate-400" />}
+          icon={<Landmark className="w-8 h-8 text-text-muted" />}
           title="ยังไม่มีบัญชี"
           description="เพิ่มบัญชีธนาคาร เงินสด หรือ E-wallet เพื่อเริ่มติดตามยอดเงิน"
           onAction={() => setShowAddModal(true)}
@@ -92,10 +92,10 @@ export function AccountsClient({
           {initialAccountBalances.map((ab) => (
             <div key={ab.account.id} className="relative group">
               <AccountCard accountBalance={ab} />
-              <div className="absolute top-3.5 right-3.5 flex items-center gap-1 bg-white/90 p-1 rounded-lg border border-slate-100 opacity-0 group-hover:opacity-100 transition-opacity">
+              <div className="absolute top-3.5 right-3.5 flex items-center gap-1 bg-surface/90 p-1 rounded-lg border border-border opacity-0 group-hover:opacity-100 transition-opacity">
                 <button
                   onClick={() => setEditingAccount(ab.account)}
-                  className="p-1 text-slate-500 hover:text-slate-900 rounded"
+                  className="p-1 text-text-muted hover:text-text-primary rounded"
                   title="แก้ไขบัญชี"
                   aria-label="Edit Account"
                 >
@@ -103,7 +103,7 @@ export function AccountsClient({
                 </button>
                 <button
                   onClick={() => handleArchive(ab.account.id)}
-                  className="p-1 text-rose-500 hover:text-rose-700 rounded"
+                  className="p-1 text-expense hover:opacity-80 rounded"
                   title="เก็บถาวรบัญชี"
                   aria-label="Archive Account"
                 >
@@ -117,15 +117,15 @@ export function AccountsClient({
 
       {/* Add Account Modal */}
       {showAddModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm animate-in fade-in">
-          <div className="bg-white rounded-2xl p-6 max-w-md w-full shadow-xl border border-slate-200 space-y-4">
-            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
-              <h3 className="font-semibold text-base text-slate-900">
-                เพิ่มบัญชีใหม่ (Add Account)
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/60 backdrop-blur-xs animate-in fade-in">
+          <div className="bg-surface dark:bg-surface-raised rounded-2xl p-6 max-w-md w-full shadow-xl border border-border space-y-4">
+            <div className="flex items-center justify-between pb-3 border-b border-border">
+              <h3 className="font-semibold text-base text-text-primary">
+                เพิ่มบัญชีการเงินใหม่ (Add Account)
               </h3>
               <button
                 onClick={() => setShowAddModal(false)}
-                className="text-slate-400 hover:text-slate-600"
+                className="text-text-muted hover:text-text-primary"
                 aria-label="ปิด"
               >
                 <X className="w-5 h-5" />
@@ -134,34 +134,34 @@ export function AccountsClient({
 
             <form action={createAction} className="space-y-3.5">
               {createState.error && (
-                <div className="p-3 text-xs text-rose-700 bg-rose-50 rounded-xl border border-rose-200">
+                <div className="p-3 text-xs text-expense bg-expense-soft rounded-xl border border-expense/30">
                   {createState.error}
                 </div>
               )}
 
               <div>
-                <label className="block text-xs font-medium text-slate-700 mb-1">
+                <label className="block text-xs font-medium text-text-secondary mb-1">
                   ชื่อบัญชี (Account Name)
                 </label>
                 <input
                   type="text"
                   name="name"
                   required
-                  placeholder="เช่น SCB Main Account, เงินสด, KBank ออมทรัพย์"
-                  className="w-full px-3 py-2 text-sm bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-1 focus:ring-slate-900"
+                  placeholder="เช่น SCB หลัก, KBank เงินเดือน, กระเป๋าตังค์"
+                  className="w-full px-3 py-2 text-sm bg-surface border border-border text-text-primary rounded-xl focus:outline-none focus:ring-1 focus:ring-primary"
                 />
               </div>
 
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="block text-xs font-medium text-slate-700 mb-1">
-                    ประเภท (Type)
+                  <label className="block text-xs font-medium text-text-secondary mb-1">
+                    ประเภทบัญชี
                   </label>
                   <select
                     name="type"
                     required
                     defaultValue="bank"
-                    className="w-full p-2 text-xs bg-slate-50 border border-slate-200 rounded-xl"
+                    className="w-full p-2 text-xs bg-surface border border-border text-text-primary rounded-xl"
                   >
                     <option value="bank">ธนาคาร (Bank)</option>
                     <option value="cash">เงินสด (Cash)</option>
@@ -173,21 +173,22 @@ export function AccountsClient({
                 </div>
 
                 <div>
-                  <label className="block text-xs font-medium text-slate-700 mb-1">
+                  <label className="block text-xs font-medium text-text-secondary mb-1">
                     สถาบันการเงิน (Institution)
                   </label>
                   <input
                     type="text"
                     name="institution"
-                    placeholder="เช่น SCB, KBANK, BBL"
-                    className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl"
-                  />
+                    placeholder="เช่น SCB, KBANK, TrueMoney"
+                    className="w-full px-3 py-2 text-xs bg-surface border border-border text-text-primary rounded-xl"
+                  >
+                  </input>
                 </div>
               </div>
 
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="block text-xs font-medium text-slate-700 mb-1">
+                  <label className="block text-xs font-medium text-text-secondary mb-1">
                     ยอดเงินตั้งต้น (Opening Balance)
                   </label>
                   <input
@@ -195,12 +196,12 @@ export function AccountsClient({
                     step="0.01"
                     name="opening_balance"
                     defaultValue="0"
-                    className="w-full px-3 py-2 text-sm bg-slate-50 border border-slate-200 rounded-xl tabular-nums"
+                    className="w-full px-3 py-2 text-sm bg-surface border border-border text-text-primary rounded-xl tabular-nums"
                   />
                 </div>
 
                 <div>
-                  <label className="block text-xs font-medium text-slate-700 mb-1">
+                  <label className="block text-xs font-medium text-text-secondary mb-1">
                     เลขท้าย 4 หลัก (Masked Number)
                   </label>
                   <input
@@ -208,16 +209,16 @@ export function AccountsClient({
                     name="masked_number"
                     placeholder="เช่น 1234"
                     maxLength={10}
-                    className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl"
+                    className="w-full px-3 py-2 text-xs bg-surface border border-border text-text-primary rounded-xl"
                   />
                 </div>
               </div>
 
-              <div className="flex items-center justify-end gap-3 pt-3 border-t border-slate-100">
+              <div className="flex items-center justify-end gap-3 pt-3 border-t border-border">
                 <button
                   type="button"
                   onClick={() => setShowAddModal(false)}
-                  className="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-900"
+                  className="px-4 py-2 text-sm font-medium text-text-secondary hover:text-text-primary"
                 >
                   ยกเลิก
                 </button>
@@ -225,7 +226,7 @@ export function AccountsClient({
                   type="submit"
                   disabled={isCreating}
                   aria-label="Create Account"
-                  className="flex items-center gap-1.5 px-4 py-2 text-sm font-semibold text-white bg-slate-900 rounded-xl hover:bg-slate-800 disabled:opacity-50"
+                  className="flex items-center gap-1.5 px-4 py-2 text-sm font-semibold text-white bg-slate-900 hover:bg-slate-800 dark:bg-primary dark:text-primary-foreground dark:hover:bg-primary-hover rounded-xl disabled:opacity-50"
                 >
                   <Check className="w-4 h-4" />
                   <span>{isCreating ? "กำลังบันทึก..." : "Create Account"}</span>
@@ -238,15 +239,15 @@ export function AccountsClient({
 
       {/* Edit Account Modal */}
       {editingAccount && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm animate-in fade-in">
-          <div className="bg-white rounded-2xl p-6 max-w-md w-full shadow-xl border border-slate-200 space-y-4">
-            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
-              <h3 className="font-semibold text-base text-slate-900">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/60 backdrop-blur-xs animate-in fade-in">
+          <div className="bg-surface dark:bg-surface-raised rounded-2xl p-6 max-w-md w-full shadow-xl border border-border space-y-4">
+            <div className="flex items-center justify-between pb-3 border-b border-border">
+              <h3 className="font-semibold text-base text-text-primary">
                 แก้ไขบัญชี: {editingAccount.name}
               </h3>
               <button
                 onClick={() => setEditingAccount(null)}
-                className="text-slate-400 hover:text-slate-600"
+                className="text-text-muted hover:text-text-primary"
                 aria-label="ปิด"
               >
                 <X className="w-5 h-5" />
@@ -255,13 +256,13 @@ export function AccountsClient({
 
             <form action={updateAction} className="space-y-3.5">
               {updateState.error && (
-                <div className="p-3 text-xs text-rose-700 bg-rose-50 rounded-xl border border-rose-200">
+                <div className="p-3 text-xs text-expense bg-expense-soft rounded-xl border border-expense/30">
                   {updateState.error}
                 </div>
               )}
 
               <div>
-                <label className="block text-xs font-medium text-slate-700 mb-1">
+                <label className="block text-xs font-medium text-text-secondary mb-1">
                   ชื่อบัญชี (Account Name)
                 </label>
                 <input
@@ -269,20 +270,20 @@ export function AccountsClient({
                   name="name"
                   required
                   defaultValue={editingAccount.name}
-                  className="w-full px-3 py-2 text-sm bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-1 focus:ring-slate-900"
+                  className="w-full px-3 py-2 text-sm bg-surface border border-border text-text-primary rounded-xl focus:outline-none focus:ring-1 focus:ring-primary"
                 />
               </div>
 
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="block text-xs font-medium text-slate-700 mb-1">
+                  <label className="block text-xs font-medium text-text-secondary mb-1">
                     ประเภท
                   </label>
                   <select
                     name="type"
                     required
                     defaultValue={editingAccount.type}
-                    className="w-full p-2 text-xs bg-slate-50 border border-slate-200 rounded-xl"
+                    className="w-full p-2 text-xs bg-surface border border-border text-text-primary rounded-xl"
                   >
                     <option value="bank">ธนาคาร (Bank)</option>
                     <option value="cash">เงินสด (Cash)</option>
@@ -294,21 +295,21 @@ export function AccountsClient({
                 </div>
 
                 <div>
-                  <label className="block text-xs font-medium text-slate-700 mb-1">
+                  <label className="block text-xs font-medium text-text-secondary mb-1">
                     สถาบันการเงิน
                   </label>
                   <input
                     type="text"
                     name="institution"
                     defaultValue={editingAccount.institution || ""}
-                    className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl"
+                    className="w-full px-3 py-2 text-xs bg-surface border border-border text-text-primary rounded-xl"
                   />
                 </div>
               </div>
 
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="block text-xs font-medium text-slate-700 mb-1">
+                  <label className="block text-xs font-medium text-text-secondary mb-1">
                     ยอดเงินตั้งต้น
                   </label>
                   <input
@@ -316,12 +317,12 @@ export function AccountsClient({
                     step="0.01"
                     name="opening_balance"
                     defaultValue={editingAccount.opening_balance}
-                    className="w-full px-3 py-2 text-sm bg-slate-50 border border-slate-200 rounded-xl tabular-nums"
+                    className="w-full px-3 py-2 text-sm bg-surface border border-border text-text-primary rounded-xl tabular-nums"
                   />
                 </div>
 
                 <div>
-                  <label className="block text-xs font-medium text-slate-700 mb-1">
+                  <label className="block text-xs font-medium text-text-secondary mb-1">
                     เลขท้าย 4 หลัก
                   </label>
                   <input
@@ -329,23 +330,23 @@ export function AccountsClient({
                     name="masked_number"
                     defaultValue={editingAccount.masked_number || ""}
                     maxLength={10}
-                    className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl"
+                    className="w-full px-3 py-2 text-xs bg-surface border border-border text-text-primary rounded-xl"
                   />
                 </div>
               </div>
 
-              <div className="flex items-center justify-end gap-3 pt-3 border-t border-slate-100">
+              <div className="flex items-center justify-end gap-3 pt-3 border-t border-border">
                 <button
                   type="button"
                   onClick={() => setEditingAccount(null)}
-                  className="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-900"
+                  className="px-4 py-2 text-sm font-medium text-text-secondary hover:text-text-primary"
                 >
                   ยกเลิก
                 </button>
                 <button
                   type="submit"
                   disabled={isUpdating}
-                  className="flex items-center gap-1.5 px-4 py-2 text-sm font-semibold text-white bg-slate-900 rounded-xl hover:bg-slate-800 disabled:opacity-50"
+                  className="flex items-center gap-1.5 px-4 py-2 text-sm font-semibold text-white bg-slate-900 hover:bg-slate-800 dark:bg-primary dark:text-primary-foreground dark:hover:bg-primary-hover rounded-xl disabled:opacity-50"
                 >
                   <Check className="w-4 h-4" />
                   <span>{isUpdating ? "กำลังบันทึก..." : "บันทึกการเปลี่ยนแปลง"}</span>

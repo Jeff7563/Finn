@@ -42,7 +42,7 @@ export function CalendarDayCell({
     return (
       <div
         aria-hidden="true"
-        className="w-full min-h-[44px] sm:min-h-[52px] rounded-xl border border-transparent bg-slate-50/30 text-slate-300 flex items-center justify-center text-xs select-none pointer-events-none"
+        className="w-full min-h-[44px] sm:min-h-[52px] rounded-xl border border-transparent bg-surface-soft/20 text-text-muted/40 flex items-center justify-center text-xs select-none pointer-events-none"
       >
         <span>{day.day}</span>
       </div>
@@ -50,17 +50,24 @@ export function CalendarDayCell({
   }
 
   // Heatmap mode styling based on intensity 0-4
+  // Light: neutral → lavender → violet
+  // Dark: muted navy → teal → emerald-teal
   if (mode === "heatmap") {
-    let intensityClasses = "bg-slate-50/80 border-slate-200/60 text-slate-700 hover:bg-slate-100";
+    let intensityClasses =
+      "bg-surface-soft border-border text-text-primary hover:bg-surface-muted dark:bg-[#142133] dark:border-[#223149] dark:text-slate-200 dark:hover:bg-[#182639]";
 
     if (heatmapIntensity === 1) {
-      intensityClasses = "bg-rose-50 border-rose-200/70 text-rose-700 hover:bg-rose-100";
+      intensityClasses =
+        "bg-[#EEF2FF] border-[#C7D2FE] text-[#4338CA] hover:bg-[#E0E7FF] dark:bg-[#0D2830] dark:border-[#134E5E] dark:text-[#2DD4BF] dark:hover:bg-[#10343F]";
     } else if (heatmapIntensity === 2) {
-      intensityClasses = "bg-rose-100 border-rose-200 text-rose-800 hover:bg-rose-200";
+      intensityClasses =
+        "bg-[#DDD6FE] border-[#C4B5FD] text-[#4C1D95] hover:bg-[#EDE9FE] dark:bg-[#113E4B] dark:border-[#147287] dark:text-[#5EEAD4] dark:hover:bg-[#144A59]";
     } else if (heatmapIntensity === 3) {
-      intensityClasses = "bg-rose-200 border-rose-300 text-rose-900 hover:bg-rose-300 font-semibold";
+      intensityClasses =
+        "bg-[#C4B5FD] border-[#A78BFA] text-[#3B0764] hover:bg-[#B496FC] font-semibold dark:bg-[#135263] dark:border-[#14B8A6] dark:text-[#99F6E4] dark:hover:bg-[#165E71]";
     } else if (heatmapIntensity === 4) {
-      intensityClasses = "bg-rose-300 border-rose-400 text-rose-950 hover:bg-rose-400 font-bold";
+      intensityClasses =
+        "bg-[#A78BFA] border-[#8B5CF6] text-[#2E1065] hover:bg-[#9061F9] font-bold dark:bg-[#166574] dark:border-[#2DD4BF] dark:text-[#CCFBF1] dark:hover:bg-[#197485]";
     }
 
     return (
@@ -69,20 +76,20 @@ export function CalendarDayCell({
         onClick={() => onSelect(day)}
         aria-label={ariaLabel}
         aria-pressed={isSelected}
-        className={`relative w-full min-h-[44px] sm:min-h-[52px] rounded-xl border p-1 sm:p-1.5 flex flex-col items-center justify-between transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-900 focus-visible:ring-offset-1 ${intensityClasses} ${
+        className={`relative w-full min-h-[44px] sm:min-h-[52px] rounded-xl border p-1 sm:p-1.5 flex flex-col items-center justify-between transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-1 ${intensityClasses} ${
           isSelected
-            ? "ring-2 ring-slate-900 ring-offset-2 z-10 shadow-sm"
+            ? "ring-2 ring-indigo-600 dark:ring-teal-400 ring-offset-2 ring-offset-surface dark:ring-offset-[#08111F] z-10 shadow-sm"
             : ""
         } ${
           isToday
-            ? "ring-1.5 ring-slate-800 ring-offset-0.5"
+            ? "ring-1.5 ring-slate-800 dark:ring-teal-400 ring-offset-0.5"
             : ""
         }`}
       >
         {/* Day Number */}
         <span
           className={`text-xs sm:text-sm tabular-nums leading-none ${
-            isToday ? "font-bold underline decoration-slate-800 underline-offset-2" : ""
+            isToday ? "font-bold underline decoration-current underline-offset-2" : ""
           }`}
         >
           {day.day}
@@ -92,13 +99,13 @@ export function CalendarDayCell({
         <div className="flex items-center justify-center gap-1 min-h-[6px]">
           {summary.income > 0 && (
             <span
-              className="w-1.5 h-1.5 rounded-full bg-emerald-500 flex-shrink-0"
+              className="w-1.5 h-1.5 rounded-full bg-income flex-shrink-0"
               title={`รายรับ ${formatMoney(summary.income)}`}
             />
           )}
           {summary.transfer > 0 && (
             <span
-              className="w-1.5 h-1.5 rounded-full bg-blue-500 flex-shrink-0"
+              className="w-1.5 h-1.5 rounded-full bg-transfer flex-shrink-0"
               title={`โอนเงิน ${formatMoney(summary.transfer)}`}
             />
           )}
@@ -114,13 +121,13 @@ export function CalendarDayCell({
       onClick={() => onSelect(day)}
       aria-label={ariaLabel}
       aria-pressed={isSelected}
-      className={`relative w-full min-h-[56px] sm:min-h-[72px] rounded-xl border p-1 sm:p-1.5 flex flex-col justify-between text-left transition-all bg-white hover:bg-slate-50/80 border-slate-200/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-900 focus-visible:ring-offset-1 ${
+      className={`relative w-full min-h-[56px] sm:min-h-[72px] rounded-xl border p-1 sm:p-1.5 flex flex-col justify-between text-left transition-all bg-surface hover:bg-surface-soft border-border focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-1 ${
         isSelected
-          ? "ring-2 ring-slate-900 ring-offset-2 z-10 shadow-sm"
+          ? "ring-2 ring-indigo-600 dark:ring-teal-400 ring-offset-2 ring-offset-surface dark:ring-offset-[#08111F] z-10 shadow-sm"
           : ""
       } ${
         isToday
-          ? "ring-1.5 ring-slate-800 bg-slate-50/50"
+          ? "ring-1.5 ring-primary bg-primary-soft/20"
           : ""
       }`}
     >
@@ -129,36 +136,36 @@ export function CalendarDayCell({
         <span
           className={`text-xs sm:text-sm tabular-nums leading-none ${
             isToday
-              ? "font-bold text-slate-950 underline decoration-slate-800 underline-offset-2"
-              : "text-slate-700 font-medium"
+              ? "font-bold text-text-primary underline decoration-current underline-offset-2"
+              : "text-text-primary font-medium"
           }`}
         >
           {day.day}
         </span>
         {summary.transfer > 0 && (
           <span
-            className="w-1.5 h-1.5 rounded-full bg-blue-500"
+            className="w-1.5 h-1.5 rounded-full bg-transfer"
             title={`โอนเงิน ${formatMoney(summary.transfer)}`}
           />
         )}
       </div>
 
-      {/* Middle: Financial amounts (clean and responsive) */}
+      {/* Middle: Financial amounts */}
       <div className="w-full space-y-0.5 overflow-hidden my-0.5">
         {summary.expense > 0 && (
-          <div className="text-[10px] sm:text-xs font-semibold text-rose-600 truncate tabular-nums leading-tight">
+          <div className="text-[10px] sm:text-xs font-semibold text-expense truncate tabular-nums leading-tight">
             -{formatMoney(summary.expense, "THB", false)}
           </div>
         )}
         {summary.income > 0 && (
-          <div className="text-[10px] sm:text-xs font-semibold text-emerald-600 truncate tabular-nums leading-tight">
+          <div className="text-[10px] sm:text-xs font-semibold text-income truncate tabular-nums leading-tight">
             +{formatMoney(summary.income, "THB", false)}
           </div>
         )}
       </div>
 
       {/* Bottom: Transaction count (desktop only) */}
-      <div className="hidden sm:block text-[9px] text-slate-400 truncate leading-none">
+      <div className="hidden sm:block text-[9px] text-text-muted truncate leading-none">
         {summary.transactionCount > 0 ? `${summary.transactionCount} รายการ` : ""}
       </div>
     </button>

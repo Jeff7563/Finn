@@ -15,19 +15,19 @@ export function CalendarModeToggle({ mode, onChange }: CalendarModeToggleProps) 
     <div
       role="group"
       aria-label="เลือกมุมมองปฏิทิน"
-      className="inline-flex items-center p-1 bg-slate-100 rounded-xl border border-slate-200/60"
+      className="inline-flex items-center p-1 bg-surface-soft rounded-xl border border-border"
     >
       <button
         type="button"
         onClick={() => onChange("heatmap")}
         className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
           mode === "heatmap"
-            ? "bg-white text-slate-900 shadow-xs"
-            : "text-slate-500 hover:text-slate-900"
+            ? "bg-surface text-text-primary shadow-xs border border-border/80"
+            : "text-text-muted hover:text-text-primary"
         }`}
         aria-pressed={mode === "heatmap"}
       >
-        <Flame className="w-3.5 h-3.5 text-rose-500" />
+        <Flame className="w-3.5 h-3.5 text-expense" />
         <span>Heatmap</span>
       </button>
 
@@ -36,12 +36,12 @@ export function CalendarModeToggle({ mode, onChange }: CalendarModeToggleProps) 
         onClick={() => onChange("calendar")}
         className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
           mode === "calendar"
-            ? "bg-white text-slate-900 shadow-xs"
-            : "text-slate-500 hover:text-slate-900"
+            ? "bg-surface text-text-primary shadow-xs border border-border/80"
+            : "text-text-muted hover:text-text-primary"
         }`}
         aria-pressed={mode === "calendar"}
       >
-        <CalendarIcon className="w-3.5 h-3.5 text-slate-600" />
+        <CalendarIcon className="w-3.5 h-3.5 text-text-secondary" />
         <span>Calendar</span>
       </button>
     </div>

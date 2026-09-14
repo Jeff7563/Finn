@@ -32,13 +32,13 @@ export function CategoriesClient({
     <div className="space-y-5">
       {/* Type Switcher Tabs & Add Category */}
       <div className="flex items-center justify-between gap-3">
-        <div className="flex items-center p-1 bg-slate-100 rounded-xl">
+        <div className="flex items-center p-1 bg-surface-soft rounded-xl border border-border">
           <button
             onClick={() => setActiveTab("expense")}
             className={`px-4 py-1.5 rounded-lg text-xs sm:text-sm font-semibold transition-all ${
               activeTab === "expense"
-                ? "bg-white text-slate-900 shadow-sm"
-                : "text-slate-600 hover:text-slate-900"
+                ? "bg-surface text-text-primary shadow-xs border border-border/80"
+                : "text-text-muted hover:text-text-primary"
             }`}
           >
             รายจ่าย (Expense)
@@ -47,8 +47,8 @@ export function CategoriesClient({
             onClick={() => setActiveTab("income")}
             className={`px-4 py-1.5 rounded-lg text-xs sm:text-sm font-semibold transition-all ${
               activeTab === "income"
-                ? "bg-white text-slate-900 shadow-sm"
-                : "text-slate-600 hover:text-slate-900"
+                ? "bg-surface text-text-primary shadow-xs border border-border/80"
+                : "text-text-muted hover:text-text-primary"
             }`}
           >
             รายรับ (Income)
@@ -58,7 +58,7 @@ export function CategoriesClient({
         <button
           onClick={() => setShowModal(true)}
           aria-label="Add Category"
-          className="flex items-center gap-1.5 px-3.5 py-2 bg-slate-900 hover:bg-slate-800 text-white text-xs sm:text-sm font-semibold rounded-xl shadow-sm transition-all active:scale-[0.98]"
+          className="flex items-center gap-1.5 px-3.5 py-2 bg-slate-900 hover:bg-slate-800 dark:bg-primary dark:text-primary-foreground dark:hover:bg-primary-hover text-white text-xs sm:text-sm font-semibold rounded-xl shadow-xs transition-all active:scale-[0.98]"
         >
           <Plus className="w-4 h-4" />
           <span>+ สร้างหมวดหมู่</span>
@@ -70,25 +70,25 @@ export function CategoriesClient({
         {categories.map((cat) => (
           <div
             key={cat.id}
-            className="p-3.5 bg-white rounded-xl border border-slate-200/80 shadow-sm flex items-center justify-between hover:border-slate-300 transition-colors"
+            className="p-3.5 bg-surface dark:bg-surface-raised rounded-xl border border-border shadow-sm flex items-center justify-between hover:border-border-strong transition-colors"
           >
             <div className="flex items-center gap-2.5 min-w-0">
               <div
                 className={`w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0 ${
                   cat.type === "expense"
-                    ? "bg-slate-100 text-slate-700"
-                    : "bg-emerald-50 text-emerald-700"
+                    ? "bg-surface-soft border border-border text-text-secondary"
+                    : "bg-income-soft text-income"
                 }`}
               >
                 <Tag className="w-3.5 h-3.5" />
               </div>
-              <span className="font-semibold text-xs sm:text-sm text-slate-800 truncate">
+              <span className="font-semibold text-xs sm:text-sm text-text-primary truncate">
                 {cat.name}
               </span>
             </div>
 
             {!cat.is_system && (
-              <span className="text-[10px] font-medium text-slate-500 bg-slate-100 px-1.5 py-0.5 rounded">
+              <span className="text-[10px] font-medium text-text-muted bg-surface-soft border border-border px-1.5 py-0.5 rounded">
                 กำหนดเอง
               </span>
             )}
@@ -98,15 +98,15 @@ export function CategoriesClient({
 
       {/* Add Custom Category Modal */}
       {showModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm animate-in fade-in">
-          <div className="bg-white rounded-2xl p-6 max-w-md w-full shadow-xl border border-slate-200 space-y-4">
-            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
-              <h3 className="font-semibold text-base text-slate-900">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/60 backdrop-blur-xs animate-in fade-in">
+          <div className="bg-surface dark:bg-surface-raised rounded-2xl p-6 max-w-md w-full shadow-xl border border-border space-y-4">
+            <div className="flex items-center justify-between pb-3 border-b border-border">
+              <h3 className="font-semibold text-base text-text-primary">
                 สร้างหมวดหมู่ใหม่ (Add Category)
               </h3>
               <button
                 onClick={() => setShowModal(false)}
-                className="text-slate-400 hover:text-slate-600"
+                className="text-text-muted hover:text-text-primary"
                 aria-label="ปิด"
               >
                 <X className="w-5 h-5" />
@@ -115,19 +115,19 @@ export function CategoriesClient({
 
             <form action={formAction} className="space-y-3.5">
               {createState.error && (
-                <div className="p-3 text-xs text-rose-700 bg-rose-50 rounded-xl border border-rose-200">
+                <div className="p-3 text-xs text-expense bg-expense-soft rounded-xl border border-expense/30">
                   {createState.error}
                 </div>
               )}
 
               <div>
-                <label className="block text-xs font-medium text-slate-700 mb-1">
+                <label className="block text-xs font-medium text-text-secondary mb-1">
                   ประเภทหมวดหมู่ (Type)
                 </label>
                 <select
                   name="type"
                   defaultValue={activeTab}
-                  className="w-full p-2.5 text-xs bg-slate-50 border border-slate-200 rounded-xl"
+                  className="w-full p-2.5 text-xs bg-surface border border-border text-text-primary rounded-xl"
                 >
                   <option value="expense">รายจ่าย (Expense)</option>
                   <option value="income">รายรับ (Income)</option>
@@ -135,7 +135,7 @@ export function CategoriesClient({
               </div>
 
               <div>
-                <label className="block text-xs font-medium text-slate-700 mb-1">
+                <label className="block text-xs font-medium text-text-secondary mb-1">
                   ชื่อหมวดหมู่ (Category Name)
                 </label>
                 <input
@@ -143,15 +143,15 @@ export function CategoriesClient({
                   name="name"
                   required
                   placeholder="เช่น ค่ากาแฟ, งานฟรีแลนซ์, ช้อปปิ้ง"
-                  className="w-full px-3.5 py-2 text-sm bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-1 focus:ring-slate-900"
+                  className="w-full px-3.5 py-2 text-sm bg-surface border border-border text-text-primary rounded-xl focus:outline-none focus:ring-1 focus:ring-primary"
                 />
               </div>
 
-              <div className="flex items-center justify-end gap-3 pt-3 border-t border-slate-100">
+              <div className="flex items-center justify-end gap-3 pt-3 border-t border-border">
                 <button
                   type="button"
                   onClick={() => setShowModal(false)}
-                  className="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-900"
+                  className="px-4 py-2 text-sm font-medium text-text-secondary hover:text-text-primary"
                 >
                   ยกเลิก
                 </button>
@@ -159,7 +159,7 @@ export function CategoriesClient({
                   type="submit"
                   disabled={isCreating}
                   aria-label="Add Category"
-                  className="flex items-center gap-1.5 px-4 py-2 text-sm font-semibold text-white bg-slate-900 rounded-xl hover:bg-slate-800 disabled:opacity-50"
+                  className="flex items-center gap-1.5 px-4 py-2 text-sm font-semibold text-white bg-slate-900 hover:bg-slate-800 dark:bg-primary dark:text-primary-foreground dark:hover:bg-primary-hover rounded-xl disabled:opacity-50"
                 >
                   <Check className="w-4 h-4" />
                   <span>{isCreating ? "กำลังบันทึก..." : "สร้างหมวดหมู่"}</span>

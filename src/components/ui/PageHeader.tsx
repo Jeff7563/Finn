@@ -22,11 +22,11 @@ export function PageHeader({
   return (
     <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
       <div>
-        <h1 className="text-2xl sm:text-3xl font-bold tracking-tight text-slate-900">
+        <h1 className="text-2xl sm:text-3xl font-bold tracking-tight text-text-primary">
           {title}
         </h1>
         {description && (
-          <p className="text-sm text-slate-500 mt-1 font-normal">
+          <p className="text-sm text-text-muted mt-1 font-normal">
             {description}
           </p>
         )}
@@ -36,7 +36,7 @@ export function PageHeader({
         {actionHref && actionLabel && (
           <Link
             href={actionHref}
-            className="inline-flex items-center justify-center gap-1.5 px-4 py-2 text-sm font-medium text-white bg-slate-900 rounded-lg hover:bg-slate-800 transition-colors shadow-sm active:scale-[0.98]"
+            className="inline-flex items-center justify-center gap-1.5 px-4 py-2 text-sm font-medium text-white bg-slate-900 hover:bg-slate-800 dark:bg-primary dark:text-primary-foreground dark:hover:bg-primary-hover rounded-xl transition-colors shadow-xs active:scale-[0.98]"
           >
             {actionIcon}
             <span>{actionLabel}</span>

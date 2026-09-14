@@ -3,11 +3,20 @@
 import { revalidatePath } from "next/cache";
 import { requireUser } from "@/lib/server/auth";
 import { DataStore } from "@/lib/server/data-store";
+import { isDemoModeAllowed, DEMO_USER_ID } from "@/lib/server/session";
 import { ActionResult } from "./auth";
 
 export async function seedSampleDataAction(): Promise<ActionResult> {
   try {
     const user = await requireUser();
+
+    // Prevent sample data seeding in production unless demo mode is enabled or user is the demo account
+    if (process.env.NODE_ENV === "production" && !isDemoModeAllowed() && user.id !== DEMO_USER_ID) {
+      return {
+        success: false,
+        error: "Sample data seeding is disabled in production.",
+      };
+    }
 
     // 1. Create accounts
     const scb = await DataStore.createAccount(user.id, {

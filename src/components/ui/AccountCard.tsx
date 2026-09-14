@@ -31,33 +31,33 @@ export function AccountCard({ accountBalance }: AccountCardProps) {
   const getTypeIcon = (type: string) => {
     switch (type) {
       case "bank":
-        return <Landmark className="w-4 h-4 text-slate-700" />;
+        return <Landmark className="w-4 h-4 text-text-primary" />;
       case "cash":
-        return <Wallet className="w-4 h-4 text-slate-700" />;
+        return <Wallet className="w-4 h-4 text-text-primary" />;
       case "credit_card":
-        return <CreditCard className="w-4 h-4 text-slate-700" />;
+        return <CreditCard className="w-4 h-4 text-text-primary" />;
       case "e_wallet":
-        return <Layers className="w-4 h-4 text-slate-700" />;
+        return <Layers className="w-4 h-4 text-text-primary" />;
       case "investment":
-        return <TrendingUp className="w-4 h-4 text-slate-700" />;
+        return <TrendingUp className="w-4 h-4 text-text-primary" />;
       default:
-        return <HelpCircle className="w-4 h-4 text-slate-700" />;
+        return <HelpCircle className="w-4 h-4 text-text-primary" />;
     }
   };
 
   return (
-    <div className="p-4 sm:p-5 bg-white rounded-2xl border border-slate-200/70 shadow-sm hover:border-slate-300 transition-all flex flex-col justify-between">
+    <div className="p-4 sm:p-5 bg-surface dark:bg-surface-raised rounded-2xl border border-border shadow-sm hover:border-border-strong transition-all flex flex-col justify-between">
       <div>
         <div className="flex items-center justify-between gap-2">
           <div className="flex items-center gap-2.5 min-w-0">
-            <div className="w-8 h-8 rounded-xl bg-slate-100 flex items-center justify-center flex-shrink-0">
+            <div className="w-8 h-8 rounded-xl bg-surface-soft border border-border flex items-center justify-center flex-shrink-0">
               {getTypeIcon(account.type)}
             </div>
             <div className="min-w-0">
-              <h3 className="font-semibold text-sm text-slate-900 truncate">
+              <h3 className="font-semibold text-sm text-text-primary truncate">
                 {account.name}
               </h3>
-              <p className="text-xs text-slate-400 truncate mt-0.5">
+              <p className="text-xs text-text-muted truncate mt-0.5">
                 {account.institution || getTypeLabel(account.type)}
                 {account.masked_number && ` · ••${account.masked_number.slice(-4)}`}
               </p>
@@ -65,10 +65,10 @@ export function AccountCard({ accountBalance }: AccountCardProps) {
           </div>
 
           <span
-            className={`px-2 py-0.5 rounded-full text-[11px] font-medium ${
+            className={`px-2 py-0.5 rounded-full text-[11px] font-medium border ${
               account.active
-                ? "bg-emerald-50 text-emerald-700"
-                : "bg-slate-100 text-slate-500"
+                ? "bg-income-soft text-income border-income/30"
+                : "bg-surface-soft text-text-muted border-border"
             }`}
           >
             {account.active ? "ใช้งาน" : "เก็บถาวร"}
@@ -77,7 +77,7 @@ export function AccountCard({ accountBalance }: AccountCardProps) {
 
         {/* Balance Display */}
         <div className="mt-5">
-          <span className="block text-[11px] font-medium text-slate-400 mb-1">
+          <span className="block text-[11px] font-medium text-text-muted mb-1">
             ยอดคงเหลือ
           </span>
           <MoneyAmount
@@ -88,10 +88,10 @@ export function AccountCard({ accountBalance }: AccountCardProps) {
         </div>
       </div>
 
-      <div className="mt-4 pt-3 border-t border-slate-100 flex items-center justify-between text-xs">
+      <div className="mt-4 pt-3 border-t border-border flex items-center justify-between text-xs">
         <Link
           href={`/transactions?accountId=${account.id}`}
-          className="text-slate-500 hover:text-slate-900 font-medium"
+          className="text-text-secondary hover:text-text-primary font-medium"
         >
           {transaction_count} รายการ
         </Link>
