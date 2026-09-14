@@ -160,7 +160,6 @@ BEGIN
 
     -- Ensure storage schema policies are defined if storage.objects exists
     IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'storage' AND table_name = 'objects') THEN
-        EXECUTE 'ALTER TABLE storage.objects ENABLE ROW LEVEL SECURITY;';
 
         EXECUTE 'DROP POLICY IF EXISTS "Users can access own slips" ON storage.objects;';
         EXECUTE 'DROP POLICY IF EXISTS "Users can upload own slips" ON storage.objects;';
