@@ -29,6 +29,8 @@ yarn-error.log*
 .env*.local
 .env
 .local-db.json
+/.storage/
+/scratch/
 /backups/
 *.dump
 

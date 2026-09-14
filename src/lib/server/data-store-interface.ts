@@ -1,0 +1,91 @@
+import {
+  Account,
+  Category,
+  Merchant,
+  Person,
+  Transaction,
+  TransactionWithRelations,
+} from "@/types/finance";
+import {
+  AccountFormData,
+  AccountInput,
+  CategoryFormData,
+  MerchantFormData,
+  PersonFormData,
+  TransactionFormData,
+  TransactionInput,
+} from "../validation/schemas";
+import {
+  IngestToken,
+  Slip,
+  SlipIngestionJob,
+  SlipCorrection,
+} from "@/types/slip";
+
+export interface IDataStore {
+  // Accounts
+  getAccounts(userId: string): Promise<Account[]>;
+  getAllAccounts(userId: string): Promise<Account[]>;
+  getAccountById(userId: string, id: string): Promise<Account | null>;
+  createAccount(userId: string, data: AccountInput | AccountFormData): Promise<Account>;
+  updateAccount(userId: string, id: string, data: Partial<AccountFormData>): Promise<Account>;
+  archiveAccount(userId: string, id: string): Promise<void>;
+
+  // Categories
+  getCategories(userId: string): Promise<Category[]>;
+  createCategory(userId: string, data: CategoryFormData): Promise<Category>;
+
+  // People
+  getPeople(userId: string): Promise<Person[]>;
+  getPersonById(userId: string, id: string): Promise<Person | null>;
+  createPerson(userId: string, data: PersonFormData): Promise<Person>;
+  updatePerson(userId: string, id: string, data: Partial<PersonFormData>): Promise<Person>;
+
+  // Merchants
+  getMerchants(userId: string): Promise<Merchant[]>;
+  getMerchantById(userId: string, id: string): Promise<Merchant | null>;
+  createMerchant(userId: string, data: MerchantFormData): Promise<Merchant>;
+  updateMerchant(userId: string, id: string, data: Partial<MerchantFormData>): Promise<Merchant>;
+
+  // Transactions
+  getTransactions(userId: string): Promise<TransactionWithRelations[]>;
+  getTransactionById(userId: string, id: string): Promise<TransactionWithRelations | null>;
+  createTransaction(userId: string, data: TransactionInput | TransactionFormData): Promise<Transaction>;
+  updateTransaction(userId: string, id: string, data: Partial<TransactionFormData>): Promise<Transaction>;
+  deleteTransaction(userId: string, id: string): Promise<void>;
+
+  // Ingest Tokens
+  getIngestTokens(userId: string): Promise<IngestToken[]>;
+  createIngestToken(
+    userId: string,
+    data: { label: string; scope?: string; expires_at?: string | null }
+  ): Promise<{ rawToken: string; record: IngestToken }>;
+  verifyAndConsumeIngestToken(rawToken: string): Promise<IngestToken | null>;
+  revokeIngestToken(userId: string, tokenId: string): Promise<void>;
+
+  // Slips
+  getSlips(userId: string): Promise<Slip[]>;
+  getSlipById(userId: string, id: string): Promise<Slip | null>;
+  getSlipByIdUnscoped(id: string): Promise<Slip | null>;
+  getSlipByFileHash(userId: string, hash: string): Promise<Slip | null>;
+  getPendingReviewSlips(userId: string): Promise<Slip[]>;
+  createSlip(userId: string, data: Partial<Slip>): Promise<Slip>;
+  updateSlip(userId: string, id: string, data: Partial<Slip>): Promise<Slip>;
+
+  // Slip Jobs
+  createSlipJob(userId: string, data: Partial<SlipIngestionJob>): Promise<SlipIngestionJob>;
+  updateSlipJob(userId: string, id: string, data: Partial<SlipIngestionJob>): Promise<SlipIngestionJob>;
+  getSlipJobById(userId: string, id: string): Promise<SlipIngestionJob | null>;
+
+  // Slip Corrections
+  createSlipCorrection(userId: string, data: Partial<SlipCorrection>): Promise<SlipCorrection>;
+
+  // Storage
+  saveSlipFile(storagePath: string, buffer: Buffer): Promise<void>;
+  getSlipFile(storagePath: string): Promise<Buffer | null>;
+  createSignedSlipUrl(userId: string, slipId: string, expiresInSeconds?: number): Promise<string>;
+  verifySlipPreviewSignature(slipId: string, exp: number, sig: string): boolean;
+
+  // Test reset helper
+  reset(initialState?: unknown): void;
+}

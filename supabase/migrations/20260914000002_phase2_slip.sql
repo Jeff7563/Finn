@@ -139,14 +139,34 @@ BEFORE INSERT OR UPDATE OF linked_transaction_id ON public.slips
 FOR EACH ROW
 EXECUTE FUNCTION public.check_slip_transaction_ownership();
 
--- 6. STORAGE POLICIES FOR PRIVATE 'slips' BUCKET
--- Note: Buckets are created via Supabase dashboard or storage API with public = false.
--- The following policies secure private storage access for authenticated users.
-
+-- 6. STORAGE BUCKET AND POLICIES FOR PRIVATE 'slips' BUCKET
 DO $$
 BEGIN
+    -- Ensure bucket exists and is strictly private
+    IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'storage' AND table_name = 'buckets') THEN
+        INSERT INTO storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+        VALUES (
+            'slips',
+            'slips',
+            false,
+            10485760, -- 10MB limit
+            ARRAY['image/jpeg', 'image/png', 'image/webp', 'application/pdf']
+        )
+        ON CONFLICT (id) DO UPDATE SET
+            public = false,
+            file_size_limit = 10485760,
+            allowed_mime_types = ARRAY['image/jpeg', 'image/png', 'image/webp', 'application/pdf'];
+    END IF;
+
     -- Ensure storage schema policies are defined if storage.objects exists
     IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'storage' AND table_name = 'objects') THEN
+        EXECUTE 'ALTER TABLE storage.objects ENABLE ROW LEVEL SECURITY;';
+
+        EXECUTE 'DROP POLICY IF EXISTS "Users can access own slips" ON storage.objects;';
+        EXECUTE 'DROP POLICY IF EXISTS "Users can upload own slips" ON storage.objects;';
+        EXECUTE 'DROP POLICY IF EXISTS "Users can update own slips" ON storage.objects;';
+        EXECUTE 'DROP POLICY IF EXISTS "Users can delete own slips" ON storage.objects;';
+
         EXECUTE '
             CREATE POLICY "Users can access own slips"
             ON storage.objects FOR SELECT
@@ -164,6 +184,18 @@ BEGIN
                 (storage.foldername(name))[1] = auth.uid()::text
             );
 
+            CREATE POLICY "Users can update own slips"
+            ON storage.objects FOR UPDATE
+            TO authenticated
+            USING (
+                bucket_id = ''slips'' AND
+                (storage.foldername(name))[1] = auth.uid()::text
+            )
+            WITH CHECK (
+                bucket_id = ''slips'' AND
+                (storage.foldername(name))[1] = auth.uid()::text
+            );
+
             CREATE POLICY "Users can delete own slips"
             ON storage.objects FOR DELETE
             TO authenticated
@@ -173,7 +205,4 @@ BEGIN
             );
         ';
     END IF;
-EXCEPTION
-    WHEN duplicate_object THEN NULL;
-    WHEN OTHERS THEN NULL;
 END $$;

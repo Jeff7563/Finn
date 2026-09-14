@@ -124,6 +124,24 @@ export function matchOwnedAccount(
       };
     }
 
+    // If party has NO digits:
+    // If the account has specific masked digits (e.g. 5678) but the party provided NO digits,
+    // we should only match if the party name matches the account name or alias.
+    // If party name is clearly different (e.g. merchant or external person like "Starbucks Cafe"), do NOT match!
+    if (!partyDigits && accDigits) {
+      if (
+        partyName &&
+        !acc.name.toLowerCase().includes(partyName) &&
+        !partyName.includes(acc.name.toLowerCase())
+      ) {
+        return {
+          accountId: null,
+          confidence: 0,
+          reason: `Bank ${partyBank} matched but account has digits (${accDigits}) while party has no digits and different name (${party.name})`,
+        };
+      }
+    }
+
     return {
       accountId: acc.id,
       accountName: acc.name,
