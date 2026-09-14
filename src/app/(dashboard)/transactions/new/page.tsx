@@ -8,6 +8,7 @@ import { TransactionType } from "@/types/finance";
 interface NewTransactionPageProps {
   searchParams: Promise<{
     type?: string;
+    date?: string;
   }>;
 }
 
@@ -18,6 +19,7 @@ export default async function NewTransactionPage({
   const params = await searchParams;
 
   const defaultType = (params.type || "expense") as TransactionType;
+  const defaultDate = params.date;
 
   const [accounts, categories, people, merchants] = await Promise.all([
     DataStore.getAccounts(user.id),
@@ -39,6 +41,7 @@ export default async function NewTransactionPage({
         people={people}
         merchants={merchants}
         defaultType={defaultType}
+        defaultDate={defaultDate}
       />
     </div>
   );

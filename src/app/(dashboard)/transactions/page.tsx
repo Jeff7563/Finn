@@ -1,12 +1,14 @@
 import React from "react";
+import Link from "next/link";
 import { requireUser } from "@/lib/server/auth";
 import { DataStore } from "@/lib/server/data-store";
 import { TransactionListClient } from "@/components/transactions/TransactionListClient";
-import { PageHeader } from "@/components/ui/PageHeader";
+import { Plus } from "lucide-react";
 
 interface TransactionsPageProps {
   searchParams: Promise<{
     accountId?: string;
+    date?: string;
   }>;
 }
 
@@ -26,13 +28,26 @@ export default async function TransactionsPage({
     ]);
 
   return (
-    <div className="space-y-6 max-w-4xl mx-auto">
-      <PageHeader
-        title="Transactions"
-        description="Comprehensive central ledger of all financial entries."
-        actionHref="/transactions/new"
-        actionLabel="New Transaction"
-      />
+    <div className="space-y-6 max-w-4xl mx-auto pb-6">
+      {/* Header */}
+      <div className="flex items-center justify-between gap-4 border-b border-slate-100 pb-3">
+        <div>
+          <h1 className="text-2xl sm:text-3xl font-semibold tracking-tight text-slate-900">
+            รายการทั้งหมด
+          </h1>
+          <p className="text-xs text-slate-500 mt-0.5">
+            บันทึกรายรับ รายจ่าย และการโอนเงิน
+          </p>
+        </div>
+
+        <Link
+          href="/transactions/new"
+          className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs sm:text-sm font-semibold text-white bg-slate-900 hover:bg-slate-800 rounded-xl transition-all shadow-sm active:scale-[0.98]"
+        >
+          <Plus className="w-4 h-4" />
+          <span>+ เพิ่มรายการ</span>
+        </Link>
+      </div>
 
       <TransactionListClient
         initialTransactions={transactions}
@@ -41,6 +56,7 @@ export default async function TransactionsPage({
         people={people}
         merchants={merchants}
         initialAccountId={params.accountId}
+        initialDate={params.date}
       />
     </div>
   );

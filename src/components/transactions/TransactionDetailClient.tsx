@@ -16,7 +16,7 @@ import {
 } from "@/app/actions/transactions";
 import { MoneyAmount } from "@/components/ui/MoneyAmount";
 import { TransactionTypeBadge } from "@/components/ui/TransactionTypeBadge";
-import { formatDateTime } from "@/lib/finance/formatters";
+import { formatDateTimeThai } from "@/lib/finance/formatters";
 import {
   Trash2,
   Edit2,
@@ -68,28 +68,28 @@ export function TransactionDetailClient({
   );
 
   const handleDelete = async () => {
-    if (!confirm("Are you sure you want to delete this transaction?")) return;
+    if (!confirm("คุณต้องการลบรายการนี้ใช่หรือไม่?")) return;
     setIsDeleting(true);
     const res = await deleteTransactionAction(transaction.id);
     if (res.success) {
       router.push("/transactions");
     } else {
-      alert(res.error || "Failed to delete transaction");
+      alert(res.error || "ไม่สามารถลบรายการได้ กรุณาลองใหม่อีกครั้ง");
       setIsDeleting(false);
     }
   };
 
-  const formattedDateTime = formatDateTime(transaction.transaction_date);
+  const formattedDateTime = formatDateTimeThai(transaction.transaction_date);
 
   return (
-    <div className="max-w-xl mx-auto space-y-6">
+    <div className="max-w-xl mx-auto space-y-6 pb-6">
       {/* Back link */}
       <Link
         href="/transactions"
         className="inline-flex items-center gap-1.5 text-xs font-semibold text-slate-500 hover:text-slate-900 transition-colors"
       >
         <ArrowLeft className="w-4 h-4" />
-        <span>Back to transactions</span>
+        <span>กลับไปหน้ารายการ (Transactions)</span>
       </Link>
 
       {/* Main Card */}
@@ -100,7 +100,7 @@ export function TransactionDetailClient({
             <div className="flex items-center gap-2 mb-2">
               <TransactionTypeBadge type={transaction.type} />
               <span className="text-xs font-medium text-slate-400 capitalize">
-                Source: {transaction.source}
+                ที่มา: {transaction.source}
               </span>
             </div>
             <MoneyAmount
@@ -117,7 +117,7 @@ export function TransactionDetailClient({
                 <button
                   onClick={() => setIsEditing(true)}
                   className="p-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 transition-colors"
-                  title="Edit transaction"
+                  title="แก้ไขรายการ"
                   aria-label="Edit transaction"
                 >
                   <Edit2 className="w-4 h-4" />
@@ -126,7 +126,7 @@ export function TransactionDetailClient({
                   onClick={handleDelete}
                   disabled={isDeleting}
                   className="p-2 rounded-xl bg-rose-50 hover:bg-rose-100 text-rose-700 transition-colors"
-                  title="Delete transaction"
+                  title="ลบรายการ"
                   aria-label="Delete transaction"
                 >
                   <Trash2 className="w-4 h-4" />
@@ -136,7 +136,7 @@ export function TransactionDetailClient({
               <button
                 onClick={() => setIsEditing(false)}
                 className="p-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 transition-colors"
-                title="Cancel edit"
+                title="ยกเลิกการแก้ไข"
               >
                 <X className="w-4 h-4" />
               </button>
@@ -151,20 +151,20 @@ export function TransactionDetailClient({
             {transaction.type === "transfer" && (
               <div className="pb-4">
                 <span className="text-xs font-semibold uppercase tracking-wider text-slate-400 block mb-2">
-                  Transfer Flow
+                  เส้นทางการโอนเงิน (Transfer Flow)
                 </span>
                 <div className="flex items-center gap-3 p-3.5 bg-slate-50 rounded-xl border border-slate-200/80">
                   <div className="flex-1 min-w-0">
-                    <span className="text-xs text-slate-500 block">From</span>
+                    <span className="text-xs text-slate-500 block">จากบัญชี</span>
                     <strong className="text-slate-900 font-semibold truncate block">
-                      {transaction.from_account?.name || "Account"}
+                      {transaction.from_account?.name || "บัญชี"}
                     </strong>
                   </div>
                   <ArrowRight className="w-4 h-4 text-blue-600 flex-shrink-0" />
                   <div className="flex-1 min-w-0 text-right">
-                    <span className="text-xs text-slate-500 block">To</span>
+                    <span className="text-xs text-slate-500 block">ไปยังบัญชี</span>
                     <strong className="text-slate-900 font-semibold truncate block">
-                      {transaction.to_account?.name || "Account"}
+                      {transaction.to_account?.name || "บัญชี"}
                     </strong>
                   </div>
                 </div>
@@ -175,7 +175,7 @@ export function TransactionDetailClient({
             {transaction.description && (
               <div className="pt-4 first:pt-0">
                 <span className="text-xs font-semibold uppercase tracking-wider text-slate-400 block mb-1">
-                  Description
+                  รายละเอียด
                 </span>
                 <p className="text-slate-800 font-medium">
                   {transaction.description}
@@ -188,12 +188,12 @@ export function TransactionDetailClient({
               <div className="pt-4 flex items-center justify-between">
                 <span className="flex items-center gap-2 text-slate-500">
                   <Wallet className="w-4 h-4 text-slate-400" />
-                  Account
+                  บัญชี
                 </span>
                 <span className="font-medium text-slate-900">
                   {transaction.type === "income"
-                    ? transaction.to_account?.name || "Unassigned"
-                    : transaction.from_account?.name || "Unassigned"}
+                    ? transaction.to_account?.name || "ไม่ได้ระบุ"
+                    : transaction.from_account?.name || "ไม่ได้ระบุ"}
                 </span>
               </div>
             )}
@@ -203,10 +203,10 @@ export function TransactionDetailClient({
               <div className="pt-4 flex items-center justify-between">
                 <span className="flex items-center gap-2 text-slate-500">
                   <Tag className="w-4 h-4 text-slate-400" />
-                  Category
+                  หมวดหมู่
                 </span>
                 <span className="font-medium text-slate-900">
-                  {transaction.category?.name || "Uncategorized"}
+                  {transaction.category?.name || "ไม่มีหมวดหมู่"}
                 </span>
               </div>
             )}
@@ -216,7 +216,7 @@ export function TransactionDetailClient({
               <div className="pt-4 flex items-center justify-between">
                 <span className="flex items-center gap-2 text-slate-500">
                   <Store className="w-4 h-4 text-slate-400" />
-                  Merchant
+                  ร้านค้า
                 </span>
                 <Link
                   href={`/merchants/${transaction.merchant.id}`}
@@ -231,7 +231,7 @@ export function TransactionDetailClient({
               <div className="pt-4 flex items-center justify-between">
                 <span className="flex items-center gap-2 text-slate-500">
                   <User className="w-4 h-4 text-slate-400" />
-                  Person
+                  บุคคล
                 </span>
                 <Link
                   href={`/people/${transaction.person.id}`}
@@ -246,7 +246,7 @@ export function TransactionDetailClient({
             <div className="pt-4 flex items-center justify-between">
               <span className="flex items-center gap-2 text-slate-500">
                 <Calendar className="w-4 h-4 text-slate-400" />
-                Date & Time
+                วันและเวลา
               </span>
               <span className="font-medium text-slate-900 tabular-nums">
                 {formattedDateTime}
@@ -256,7 +256,7 @@ export function TransactionDetailClient({
             {/* Payment Method */}
             {transaction.payment_method && (
               <div className="pt-4 flex items-center justify-between">
-                <span className="text-slate-500">Payment Method</span>
+                <span className="text-slate-500">ช่องทางการชำระ</span>
                 <span className="font-medium text-slate-900">
                   {transaction.payment_method}
                 </span>
@@ -267,7 +267,7 @@ export function TransactionDetailClient({
             <div className="pt-4 flex items-center justify-between text-xs">
               <span className="flex items-center gap-1.5 text-slate-500">
                 <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" />
-                Confidence
+                ความมั่นใจ (Confidence)
               </span>
               <span className="font-semibold text-slate-700 tabular-nums">
                 {Math.round(transaction.confidence * 100)}% ({transaction.review_status})
@@ -278,7 +278,7 @@ export function TransactionDetailClient({
             {transaction.note && (
               <div className="pt-4">
                 <span className="text-xs font-semibold uppercase tracking-wider text-slate-400 block mb-1">
-                  Note
+                  บันทึกช่วยจำ
                 </span>
                 <p className="text-slate-600 bg-slate-50 p-3 rounded-xl border border-slate-100 text-xs leading-relaxed">
                   {transaction.note}
@@ -300,7 +300,7 @@ export function TransactionDetailClient({
 
             <div>
               <label className="block text-xs font-medium text-slate-700 mb-1">
-                Amount (THB)
+                จำนวนเงิน (THB)
               </label>
               <input
                 type="number"
@@ -308,13 +308,13 @@ export function TransactionDetailClient({
                 step="0.01"
                 required
                 defaultValue={transaction.amount}
-                className="w-full p-2.5 text-sm bg-slate-50 border border-slate-200 rounded-xl"
+                className="w-full p-2.5 text-sm bg-slate-50 border border-slate-200 rounded-xl tabular-nums"
               />
             </div>
 
             <div>
               <label className="block text-xs font-medium text-slate-700 mb-1">
-                Description
+                รายละเอียด
               </label>
               <input
                 type="text"
@@ -329,7 +329,7 @@ export function TransactionDetailClient({
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="block text-xs font-medium text-slate-700 mb-1">
-                    From Account
+                    จากบัญชี
                   </label>
                   <select
                     name="from_account_id"
@@ -345,7 +345,7 @@ export function TransactionDetailClient({
                 </div>
                 <div>
                   <label className="block text-xs font-medium text-slate-700 mb-1">
-                    To Account
+                    ไปยังบัญชี
                   </label>
                   <select
                     name="to_account_id"
@@ -363,7 +363,7 @@ export function TransactionDetailClient({
             ) : (
               <div>
                 <label className="block text-xs font-medium text-slate-700 mb-1">
-                  Account
+                  บัญชี
                 </label>
                 <select
                   name={
@@ -391,36 +391,36 @@ export function TransactionDetailClient({
             {transaction.type !== "transfer" && (
               <div>
                 <label className="block text-xs font-medium text-slate-700 mb-1">
-                  Category
+                  หมวดหมู่
                 </label>
                 <select
                   name="category_id"
                   defaultValue={transaction.category_id || ""}
                   className="w-full p-2.5 text-sm bg-slate-50 border border-slate-200 rounded-xl"
                 >
-                  <option value="">None / Uncategorized</option>
+                  <option value="">ไม่มีหมวดหมู่</option>
                   {categories.map((c) => (
                     <option key={c.id} value={c.id}>
-                      {c.name} ({c.type})
+                      {c.name} ({c.type === "expense" ? "รายจ่าย" : "รายรับ"})
                     </option>
                   ))}
                 </select>
               </div>
             )}
 
-            {/* Counterparty Person */}
+            {/* Counterparties */}
             {transaction.type !== "transfer" && (
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="block text-xs font-medium text-slate-700 mb-1">
-                    Merchant
+                    ร้านค้า
                   </label>
                   <select
                     name="merchant_id"
                     defaultValue={transaction.merchant_id || ""}
                     className="w-full p-2 text-xs bg-slate-50 border border-slate-200 rounded-xl"
                   >
-                    <option value="">None</option>
+                    <option value="">ไม่ระบุ</option>
                     {merchants.map((m) => (
                       <option key={m.id} value={m.id}>
                         {m.display_name}
@@ -431,14 +431,14 @@ export function TransactionDetailClient({
 
                 <div>
                   <label className="block text-xs font-medium text-slate-700 mb-1">
-                    Person
+                    บุคคล
                   </label>
                   <select
                     name="person_id"
                     defaultValue={transaction.person_id || ""}
                     className="w-full p-2 text-xs bg-slate-50 border border-slate-200 rounded-xl"
                   >
-                    <option value="">None</option>
+                    <option value="">ไม่ระบุ</option>
                     {people.map((p) => (
                       <option key={p.id} value={p.id}>
                         {p.display_name}
@@ -451,7 +451,7 @@ export function TransactionDetailClient({
 
             <div>
               <label className="block text-xs font-medium text-slate-700 mb-1">
-                Date & Time
+                วันและเวลา
               </label>
               <input
                 type="datetime-local"
@@ -464,7 +464,7 @@ export function TransactionDetailClient({
 
             <div>
               <label className="block text-xs font-medium text-slate-700 mb-1">
-                Note
+                บันทึกช่วยจำ
               </label>
               <textarea
                 name="note"
@@ -480,7 +480,7 @@ export function TransactionDetailClient({
                 onClick={() => setIsEditing(false)}
                 className="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-900"
               >
-                Cancel
+                ยกเลิก
               </button>
               <button
                 type="submit"
@@ -488,7 +488,7 @@ export function TransactionDetailClient({
                 className="flex items-center gap-1.5 px-4 py-2 text-sm font-semibold text-white bg-slate-900 rounded-xl hover:bg-slate-800 disabled:opacity-50"
               >
                 <Check className="w-4 h-4" />
-                <span>{isUpdating ? "Saving..." : "Save Changes"}</span>
+                <span>{isUpdating ? "กำลังบันทึก..." : "บันทึกการเปลี่ยนแปลง"}</span>
               </button>
             </div>
           </form>

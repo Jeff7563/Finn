@@ -3,7 +3,7 @@
 import React, { useActionState } from "react";
 import Link from "next/link";
 import { signInAction, signInDemoAction } from "@/app/actions/auth";
-import { Lock, Mail, ArrowRight, ShieldCheck } from "lucide-react";
+import { Lock, Mail, ArrowRight, Sparkles } from "lucide-react";
 
 export default function LoginPage() {
   const [state, formAction, isPending] = useActionState(signInAction, {
@@ -12,27 +12,27 @@ export default function LoginPage() {
   });
 
   return (
-    <div className="min-h-screen flex flex-col justify-center items-center px-4 sm:px-6 lg:px-8 bg-slate-50">
-      <div className="w-full max-w-sm space-y-8 bg-white p-6 sm:p-8 rounded-2xl border border-slate-200/80 shadow-sm">
+    <div className="min-h-screen flex flex-col justify-center items-center px-4 sm:px-6 lg:px-8 bg-slate-50 py-12">
+      <div className="w-full max-w-sm space-y-6 bg-white p-7 sm:p-8 rounded-2xl border border-slate-200/80 shadow-sm">
         {/* Header */}
         <div className="text-center">
-          <div className="w-12 h-12 rounded-xl bg-slate-900 text-white font-bold text-xl mx-auto flex items-center justify-center shadow-sm">
+          <div className="w-12 h-12 rounded-2xl bg-slate-900 text-white font-extrabold text-xl mx-auto flex items-center justify-center shadow-sm">
             F
           </div>
-          <h2 className="mt-4 text-2xl font-bold tracking-tight text-slate-900">
-            Sign In to Finn
-          </h2>
+          <h1 className="mt-4 text-2xl font-bold tracking-tight text-slate-900">
+            เข้าสู่ระบบ Finn
+          </h1>
           <p className="mt-1 text-xs text-slate-500">
-            Deterministic Personal Finance OS
+            Personal Finance Operating System
           </p>
         </div>
 
         {/* Form */}
-        <form action={formAction} className="mt-6 space-y-4">
+        <form action={formAction} className="space-y-4">
           {state.error && (
             <div
               role="alert"
-              className="p-3 text-xs font-medium text-rose-700 bg-rose-50 border border-rose-200 rounded-lg"
+              className="p-3 text-xs font-medium text-rose-700 bg-rose-50 border border-rose-200 rounded-xl"
             >
               {state.error}
             </div>
@@ -43,10 +43,10 @@ export default function LoginPage() {
               htmlFor="email"
               className="block text-xs font-medium text-slate-700 mb-1"
             >
-              Email address
+              อีเมล (Email address)
             </label>
             <div className="relative">
-              <Mail className="w-4 h-4 text-slate-400 absolute left-3 top-3" />
+              <Mail className="w-4 h-4 text-slate-400 absolute left-3.5 top-3" />
               <input
                 id="email"
                 name="email"
@@ -54,7 +54,7 @@ export default function LoginPage() {
                 required
                 autoComplete="email"
                 placeholder="you@example.com"
-                className="w-full pl-9 pr-3 py-2 text-sm border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-900/10 focus:border-slate-900 transition-colors bg-white"
+                className="w-full pl-9 pr-3.5 py-2.5 text-sm border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-slate-900/10 focus:border-slate-900 transition-colors bg-white"
               />
             </div>
           </div>
@@ -64,10 +64,10 @@ export default function LoginPage() {
               htmlFor="password"
               className="block text-xs font-medium text-slate-700 mb-1"
             >
-              Password
+              รหัสผ่าน (Password)
             </label>
             <div className="relative">
-              <Lock className="w-4 h-4 text-slate-400 absolute left-3 top-3" />
+              <Lock className="w-4 h-4 text-slate-400 absolute left-3.5 top-3" />
               <input
                 id="password"
                 name="password"
@@ -75,7 +75,7 @@ export default function LoginPage() {
                 required
                 autoComplete="current-password"
                 placeholder="••••••••"
-                className="w-full pl-9 pr-3 py-2 text-sm border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-900/10 focus:border-slate-900 transition-colors bg-white"
+                className="w-full pl-9 pr-3.5 py-2.5 text-sm border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-slate-900/10 focus:border-slate-900 transition-colors bg-white"
               />
             </div>
           </div>
@@ -83,34 +83,37 @@ export default function LoginPage() {
           <button
             type="submit"
             disabled={isPending}
-            className="w-full mt-2 py-2.5 px-4 flex items-center justify-center gap-2 bg-slate-900 hover:bg-slate-800 text-white text-sm font-semibold rounded-lg shadow-sm transition-all active:scale-[0.99] disabled:opacity-50"
+            className="w-full mt-2 py-2.5 px-4 flex items-center justify-center gap-2 bg-slate-900 hover:bg-slate-800 text-white text-sm font-semibold rounded-xl shadow-sm transition-all active:scale-[0.99] disabled:opacity-50"
           >
-            {isPending ? "Signing In..." : "Sign In"}
+            <span>{isPending ? "กำลังเข้าสู่ระบบ..." : "เข้าสู่ระบบ"}</span>
             <ArrowRight className="w-4 h-4" />
           </button>
         </form>
 
         {/* Demo Fast Login */}
-        <div className="pt-2 border-t border-slate-100">
+        <div className="pt-3 border-t border-slate-100 space-y-2">
           <form action={signInDemoAction}>
             <button
               type="submit"
-              className="w-full py-2 px-3 flex items-center justify-center gap-2 bg-slate-50 hover:bg-slate-100 text-slate-700 text-xs font-medium rounded-lg border border-slate-200 transition-colors"
+              className="w-full py-2.5 px-3 flex items-center justify-center gap-2 bg-slate-50 hover:bg-slate-100 text-slate-700 text-xs font-semibold rounded-xl border border-slate-200 transition-colors active:scale-[0.99]"
             >
-              <ShieldCheck className="w-4 h-4 text-emerald-600" />
-              <span>Explore as Demo User</span>
+              <Sparkles className="w-4 h-4 text-amber-500" />
+              <span>ทดลองใช้งาน (Explore as Demo User)</span>
             </button>
           </form>
+          <p className="text-[11px] text-center text-slate-400">
+            โหมดทดลอง — ข้อมูลนี้เป็นตัวอย่างสำหรับการประเมินผล
+          </p>
         </div>
 
         {/* Footer */}
-        <p className="text-center text-xs text-slate-500">
-          Don&apos;t have an account?{" "}
+        <p className="text-center text-xs text-slate-500 pt-1">
+          ยังไม่มีบัญชีผู้ใช้?{" "}
           <Link
             href="/signup"
             className="font-semibold text-slate-900 hover:underline"
           >
-            Sign up
+            สมัครสมาชิก
           </Link>
         </p>
       </div>

@@ -8,97 +8,143 @@ import {
   LayoutDashboard,
   ReceiptText,
   Landmark,
-  Users,
-  Store,
+  Users2,
   Tag,
   Settings,
   LogOut,
-  PlusCircle,
+  Plus,
 } from "lucide-react";
 import { signOutAction } from "@/app/actions/auth";
 
-const NAV_ITEMS = [
-  { href: "/today", label: "Today", icon: CalendarDays },
-  { href: "/overview", label: "Overview", icon: LayoutDashboard },
-  { href: "/transactions", label: "Transactions", icon: ReceiptText },
-  { href: "/accounts", label: "Accounts", icon: Landmark },
-  { href: "/people", label: "People", icon: Users },
-  { href: "/merchants", label: "Merchants", icon: Store },
-  { href: "/categories", label: "Categories", icon: Tag },
-  { href: "/settings", label: "Settings", icon: Settings },
+const PRIMARY_NAV = [
+  { href: "/today", label: "วันนี้", icon: CalendarDays },
+  { href: "/overview", label: "ภาพรวม", icon: LayoutDashboard },
+  { href: "/transactions", label: "รายการ", icon: ReceiptText },
+  { href: "/accounts", label: "บัญชี", icon: Landmark },
+  {
+    href: "/people",
+    label: "คนและร้านค้า",
+    icon: Users2,
+    matchPaths: ["/people", "/merchants", "/contacts"],
+  },
+];
+
+const SECONDARY_NAV = [
+  { href: "/categories", label: "หมวดหมู่", icon: Tag },
 ];
 
 export function Sidebar() {
   const pathname = usePathname();
 
+  const isItemActive = (item: { href: string; matchPaths?: string[] }) => {
+    if (item.matchPaths) {
+      return item.matchPaths.some((p) => pathname.startsWith(p));
+    }
+    if (item.href === "/today") return pathname === "/today";
+    return pathname.startsWith(item.href);
+  };
+
   return (
-    <aside className="hidden md:flex md:w-64 md:flex-col md:fixed md:inset-y-0 bg-white border-r border-slate-200/80 z-30">
+    <aside className="hidden md:flex md:w-56 lg:w-60 md:flex-col md:fixed md:inset-y-0 bg-white border-r border-slate-200/70 z-30">
       {/* Brand Header */}
-      <div className="flex items-center justify-between h-16 px-6 border-b border-slate-100">
-        <Link href="/today" className="flex items-center gap-2.5">
-          <div className="w-8 h-8 rounded-lg bg-slate-900 text-white flex items-center justify-center font-bold text-base shadow-sm">
+      <div className="flex items-center h-16 px-6">
+        <Link href="/today" className="flex items-center gap-2.5 group">
+          <div className="w-8 h-8 rounded-xl bg-slate-950 text-white flex items-center justify-center font-bold text-sm tracking-wider shadow-sm transition-transform group-hover:scale-95">
             F
           </div>
-          <div>
-            <span className="font-bold text-slate-900 text-lg tracking-tight block leading-none">
-              Finn
-            </span>
-            <span className="text-[10px] text-slate-400 font-medium tracking-wider uppercase">
-              Finance OS
-            </span>
-          </div>
+          <span className="font-bold text-slate-900 text-lg tracking-tight">
+            Finn
+          </span>
         </Link>
       </div>
 
-      {/* Quick Action Button */}
-      <div className="p-4">
+      {/* Quick Fast Add Action */}
+      <div className="px-4 pt-1 pb-3">
         <Link
           href="/transactions/new"
-          className="flex items-center justify-center gap-2 w-full py-2.5 px-4 bg-slate-900 hover:bg-slate-800 text-white text-sm font-semibold rounded-lg shadow-sm transition-all active:scale-[0.99]"
+          className="flex items-center justify-center gap-2 w-full py-2 px-3.5 bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold rounded-xl shadow-sm transition-all active:scale-[0.99]"
         >
-          <PlusCircle className="w-4 h-4" />
-          <span>Add Transaction</span>
+          <Plus className="w-3.5 h-3.5 stroke-[2.5]" />
+          <span>เพิ่มรายการ</span>
         </Link>
       </div>
 
-      {/* Navigation Links */}
-      <nav className="flex-1 px-3 space-y-1 overflow-y-auto py-2">
-        {NAV_ITEMS.map((item) => {
-          const Icon = item.icon;
-          const isActive =
-            pathname === item.href ||
-            (item.href !== "/today" && pathname.startsWith(item.href));
+      {/* Main Navigation */}
+      <nav className="flex-1 px-3 space-y-6 overflow-y-auto py-2">
+        <div className="space-y-0.5">
+          {PRIMARY_NAV.map((item) => {
+            const Icon = item.icon;
+            const active = isItemActive(item);
 
-          return (
-            <Link
-              key={item.href}
-              href={item.href}
-              className={`flex items-center gap-3 px-3.5 py-2.5 text-sm font-medium rounded-lg transition-colors ${
-                isActive
-                  ? "bg-slate-100 text-slate-900 font-semibold"
-                  : "text-slate-600 hover:text-slate-900 hover:bg-slate-50"
-              }`}
-            >
-              <Icon
-                className={`w-4 h-4 ${
-                  isActive ? "text-slate-900" : "text-slate-400"
+            return (
+              <Link
+                key={item.href}
+                href={item.href}
+                className={`flex items-center gap-3 px-3 py-2 text-sm rounded-xl transition-colors ${
+                  active
+                    ? "bg-slate-100/90 text-slate-950 font-semibold"
+                    : "text-slate-600 hover:text-slate-950 hover:bg-slate-50 font-medium"
                 }`}
-              />
-              <span>{item.label}</span>
-            </Link>
-          );
-        })}
+              >
+                <Icon
+                  className={`w-4 h-4 ${
+                    active ? "text-slate-950" : "text-slate-400"
+                  }`}
+                />
+                <span>{item.label}</span>
+              </Link>
+            );
+          })}
+        </div>
+
+        <div className="space-y-0.5 pt-2 border-t border-slate-100">
+          {SECONDARY_NAV.map((item) => {
+            const Icon = item.icon;
+            const active = isItemActive(item);
+
+            return (
+              <Link
+                key={item.href}
+                href={item.href}
+                className={`flex items-center gap-3 px-3 py-2 text-sm rounded-xl transition-colors ${
+                  active
+                    ? "bg-slate-100/90 text-slate-950 font-semibold"
+                    : "text-slate-600 hover:text-slate-950 hover:bg-slate-50 font-medium"
+                }`}
+              >
+                <Icon
+                  className={`w-4 h-4 ${
+                    active ? "text-slate-950" : "text-slate-400"
+                  }`}
+                />
+                <span>{item.label}</span>
+              </Link>
+            );
+          })}
+        </div>
       </nav>
 
-      {/* Footer / Sign Out */}
-      <div className="p-4 border-t border-slate-100">
+      {/* Footer Settings & Sign Out */}
+      <div className="p-3 border-t border-slate-100 space-y-1">
+        <Link
+          href="/settings"
+          className={`flex items-center gap-3 w-full px-3 py-2 text-sm rounded-xl transition-colors ${
+            pathname.startsWith("/settings")
+              ? "bg-slate-100/90 text-slate-950 font-semibold"
+              : "text-slate-600 hover:text-slate-950 hover:bg-slate-50 font-medium"
+          }`}
+        >
+          <Settings className="w-4 h-4 text-slate-400" />
+          <span>ตั้งค่า</span>
+        </Link>
+
         <form action={signOutAction}>
           <button
             type="submit"
-            className="flex items-center gap-3 w-full px-3.5 py-2 text-sm font-medium text-slate-600 hover:text-rose-600 hover:bg-rose-50/50 rounded-lg transition-colors"
+            className="flex items-center gap-3 w-full px-3 py-2 text-sm font-medium text-slate-500 hover:text-rose-600 hover:bg-rose-50/50 rounded-xl transition-colors"
           >
             <LogOut className="w-4 h-4 text-slate-400 group-hover:text-rose-600" />
-            <span>Sign Out</span>
+            <span>ออกจากระบบ</span>
           </button>
         </form>
       </div>

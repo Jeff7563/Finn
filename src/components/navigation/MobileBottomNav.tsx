@@ -10,8 +10,7 @@ import {
   Plus,
   MoreHorizontal,
   Landmark,
-  Users,
-  Store,
+  Users2,
   Tag,
   Settings,
   LogOut,
@@ -31,6 +30,7 @@ export function MobileBottomNav() {
     pathname.startsWith("/accounts") ||
     pathname.startsWith("/people") ||
     pathname.startsWith("/merchants") ||
+    pathname.startsWith("/contacts") ||
     pathname.startsWith("/categories") ||
     pathname.startsWith("/settings");
 
@@ -38,17 +38,17 @@ export function MobileBottomNav() {
     <>
       {/* Mobile Drawer / Sheet for 'More' */}
       {showMore && (
-        <div className="fixed inset-0 z-50 md:hidden flex flex-col justify-end bg-black/40 backdrop-blur-sm animate-in fade-in">
+        <div className="fixed inset-0 z-50 md:hidden flex flex-col justify-end bg-slate-900/40 backdrop-blur-sm animate-in fade-in">
           <div
             className="fixed inset-0"
             onClick={() => setShowMore(false)}
             aria-hidden="true"
           />
 
-          <div className="relative bg-white rounded-t-2xl p-5 shadow-2xl border-t border-slate-200 space-y-4 pb-10">
+          <div className="relative bg-white rounded-t-2xl p-5 shadow-2xl border-t border-slate-200/80 space-y-4 pb-safe">
             <div className="flex items-center justify-between pb-3 border-b border-slate-100">
-              <h2 className="font-semibold text-base text-slate-900">
-                More Features
+              <h2 className="font-semibold text-sm text-slate-900">
+                เพิ่มเติม
               </h2>
               <button
                 onClick={() => setShowMore(false)}
@@ -63,42 +63,34 @@ export function MobileBottomNav() {
               <Link
                 href="/accounts"
                 onClick={() => setShowMore(false)}
-                className="flex items-center gap-3 p-3 rounded-xl bg-slate-50 hover:bg-slate-100 text-slate-800 font-medium text-sm border border-slate-200/50"
+                className="flex items-center gap-3 p-3.5 rounded-xl bg-slate-50 hover:bg-slate-100 text-slate-800 font-medium text-sm border border-slate-200/60 transition-colors min-h-[44px]"
               >
                 <Landmark className="w-4 h-4 text-slate-600" />
-                <span>Accounts</span>
+                <span>บัญชี</span>
               </Link>
               <Link
                 href="/people"
                 onClick={() => setShowMore(false)}
-                className="flex items-center gap-3 p-3 rounded-xl bg-slate-50 hover:bg-slate-100 text-slate-800 font-medium text-sm border border-slate-200/50"
+                className="flex items-center gap-3 p-3.5 rounded-xl bg-slate-50 hover:bg-slate-100 text-slate-800 font-medium text-sm border border-slate-200/60 transition-colors min-h-[44px]"
               >
-                <Users className="w-4 h-4 text-slate-600" />
-                <span>People</span>
-              </Link>
-              <Link
-                href="/merchants"
-                onClick={() => setShowMore(false)}
-                className="flex items-center gap-3 p-3 rounded-xl bg-slate-50 hover:bg-slate-100 text-slate-800 font-medium text-sm border border-slate-200/50"
-              >
-                <Store className="w-4 h-4 text-slate-600" />
-                <span>Merchants</span>
+                <Users2 className="w-4 h-4 text-slate-600" />
+                <span>คนและร้านค้า</span>
               </Link>
               <Link
                 href="/categories"
                 onClick={() => setShowMore(false)}
-                className="flex items-center gap-3 p-3 rounded-xl bg-slate-50 hover:bg-slate-100 text-slate-800 font-medium text-sm border border-slate-200/50"
+                className="flex items-center gap-3 p-3.5 rounded-xl bg-slate-50 hover:bg-slate-100 text-slate-800 font-medium text-sm border border-slate-200/60 transition-colors min-h-[44px]"
               >
                 <Tag className="w-4 h-4 text-slate-600" />
-                <span>Categories</span>
+                <span>หมวดหมู่</span>
               </Link>
               <Link
                 href="/settings"
                 onClick={() => setShowMore(false)}
-                className="flex items-center gap-3 p-3 rounded-xl bg-slate-50 hover:bg-slate-100 text-slate-800 font-medium text-sm border border-slate-200/50 col-span-2"
+                className="flex items-center gap-3 p-3.5 rounded-xl bg-slate-50 hover:bg-slate-100 text-slate-800 font-medium text-sm border border-slate-200/60 transition-colors min-h-[44px]"
               >
                 <Settings className="w-4 h-4 text-slate-600" />
-                <span>Settings</span>
+                <span>ตั้งค่า</span>
               </Link>
             </div>
 
@@ -106,10 +98,10 @@ export function MobileBottomNav() {
               <form action={signOutAction}>
                 <button
                   type="submit"
-                  className="flex items-center justify-center gap-2 w-full p-2.5 rounded-xl bg-rose-50 text-rose-700 font-medium text-sm hover:bg-rose-100 transition-colors"
+                  className="flex items-center justify-center gap-2 w-full p-2.5 rounded-xl bg-rose-50 text-rose-700 font-medium text-sm hover:bg-rose-100 transition-colors min-h-[44px]"
                 >
                   <LogOut className="w-4 h-4" />
-                  <span>Sign Out</span>
+                  <span>ออกจากระบบ</span>
                 </button>
               </form>
             </div>
@@ -120,66 +112,66 @@ export function MobileBottomNav() {
       {/* Fixed Bottom Bar */}
       <nav
         aria-label="Mobile navigation"
-        className="md:hidden fixed bottom-0 inset-x-0 bg-white/95 backdrop-blur border-t border-slate-200/80 z-40 pb-safe"
+        className="md:hidden fixed bottom-0 inset-x-0 bg-white/95 backdrop-blur-md border-t border-slate-200/80 z-40 pb-safe"
       >
         <div className="flex items-center justify-around h-16 px-2">
-          {/* Today */}
+          {/* วันนี้ */}
           <Link
             href="/today"
-            className={`flex flex-col items-center justify-center w-14 h-full gap-1 text-[11px] font-medium transition-colors ${
-              isToday ? "text-slate-900" : "text-slate-400 hover:text-slate-600"
+            className={`flex flex-col items-center justify-center min-w-[56px] min-h-[44px] gap-1 text-[11px] font-medium transition-colors ${
+              isToday ? "text-slate-950 font-semibold" : "text-slate-400 hover:text-slate-600"
             }`}
           >
             <CalendarDays className="w-5 h-5" />
-            <span>Today</span>
+            <span>วันนี้</span>
           </Link>
 
-          {/* Transactions */}
+          {/* รายการ */}
           <Link
             href="/transactions"
-            className={`flex flex-col items-center justify-center w-14 h-full gap-1 text-[11px] font-medium transition-colors ${
+            className={`flex flex-col items-center justify-center min-w-[56px] min-h-[44px] gap-1 text-[11px] font-medium transition-colors ${
               isTransactions
-                ? "text-slate-900"
+                ? "text-slate-950 font-semibold"
                 : "text-slate-400 hover:text-slate-600"
             }`}
           >
             <ReceiptText className="w-5 h-5" />
-            <span>Ledger</span>
+            <span>รายการ</span>
           </Link>
 
-          {/* Fast Add Action Center (+) */}
+          {/* Center Action (+) */}
           <Link
             href="/transactions/new"
             aria-label="Add transaction"
-            className="flex items-center justify-center w-12 h-12 -mt-4 bg-slate-900 text-white rounded-full shadow-lg hover:bg-slate-800 transition-transform active:scale-95"
+            className="flex items-center justify-center w-12 h-12 -mt-4 bg-slate-950 text-white rounded-full shadow-md hover:bg-slate-800 transition-transform active:scale-95"
           >
             <Plus className="w-6 h-6 stroke-[2.5]" />
           </Link>
 
-          {/* Overview */}
+          {/* ภาพรวม */}
           <Link
             href="/overview"
-            className={`flex flex-col items-center justify-center w-14 h-full gap-1 text-[11px] font-medium transition-colors ${
+            className={`flex flex-col items-center justify-center min-w-[56px] min-h-[44px] gap-1 text-[11px] font-medium transition-colors ${
               isOverview
-                ? "text-slate-900"
+                ? "text-slate-950 font-semibold"
                 : "text-slate-400 hover:text-slate-600"
             }`}
           >
             <LayoutDashboard className="w-5 h-5" />
-            <span>Overview</span>
+            <span>ภาพรวม</span>
           </Link>
 
-          {/* More */}
+          {/* เพิ่มเติม */}
           <button
             onClick={() => setShowMore(true)}
-            className={`flex flex-col items-center justify-center w-14 h-full gap-1 text-[11px] font-medium transition-colors ${
+            className={`flex flex-col items-center justify-center min-w-[56px] min-h-[44px] gap-1 text-[11px] font-medium transition-colors ${
               isMoreActive || showMore
-                ? "text-slate-900"
+                ? "text-slate-950 font-semibold"
                 : "text-slate-400 hover:text-slate-600"
             }`}
           >
             <MoreHorizontal className="w-5 h-5" />
-            <span>More</span>
+            <span>เพิ่มเติม</span>
           </button>
         </div>
       </nav>

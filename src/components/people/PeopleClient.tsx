@@ -38,7 +38,7 @@ export function PeopleClient({ initialSummaries }: PeopleClientProps) {
 
   return (
     <div className="space-y-4">
-      {/* Top Search & Add Bar */}
+      {/* Search & Add Bar */}
       <div className="flex items-center justify-between gap-3">
         <div className="relative flex-1 max-w-sm">
           <Search className="w-4 h-4 text-slate-400 absolute left-3 top-3" />
@@ -46,14 +46,15 @@ export function PeopleClient({ initialSummaries }: PeopleClientProps) {
             type="text"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search person or alias..."
-            className="w-full pl-9 pr-4 py-2 text-sm bg-white border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-slate-900/10 focus:border-slate-900"
+            placeholder="ค้นหาชื่อ หรือชื่อเล่น/นามแฝง..."
+            className="w-full pl-9 pr-4 py-2 text-sm bg-white border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-slate-900/10 focus:border-slate-900 transition-colors"
           />
         </div>
 
         <button
           onClick={() => setShowModal(true)}
-          className="flex items-center gap-1.5 px-3.5 py-2 bg-slate-900 hover:bg-slate-800 text-white text-xs sm:text-sm font-semibold rounded-xl shadow-sm transition-all flex-shrink-0"
+          aria-label="Add Person"
+          className="flex items-center gap-1.5 px-3.5 py-2 bg-slate-900 hover:bg-slate-800 text-white text-xs sm:text-sm font-semibold rounded-xl shadow-sm transition-all flex-shrink-0 active:scale-[0.98]"
         >
           <Plus className="w-4 h-4" />
           <span>Add Person</span>
@@ -64,9 +65,9 @@ export function PeopleClient({ initialSummaries }: PeopleClientProps) {
         <EmptyState
           icon={<Users className="w-8 h-8 text-slate-400" />}
           title="ยังไม่มีข้อมูลบุคคล"
-          description="เมื่อมีรายการรับหรือจ่าย ระบบจะแสดงข้อมูลสรุปที่นี่"
-          actionHref="#"
-          actionLabel="+ Add New Person"
+          description="เมื่อคุณเริ่มบันทึกรายการ บุคคลจะปรากฏที่นี่เพื่อสรุปยอดรับ-จ่าย"
+          onAction={() => setShowModal(true)}
+          actionLabel="+ เพิ่มบุคคล"
         />
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -82,11 +83,12 @@ export function PeopleClient({ initialSummaries }: PeopleClientProps) {
           <div className="bg-white rounded-2xl p-6 max-w-md w-full shadow-xl border border-slate-200 space-y-4">
             <div className="flex items-center justify-between pb-3 border-b border-slate-100">
               <h3 className="font-semibold text-base text-slate-900">
-                Add Counterparty Person
+                เพิ่มบุคคล (Add Person)
               </h3>
               <button
                 onClick={() => setShowModal(false)}
                 className="text-slate-400 hover:text-slate-600"
+                aria-label="ปิด"
               >
                 <X className="w-5 h-5" />
               </button>
@@ -101,32 +103,32 @@ export function PeopleClient({ initialSummaries }: PeopleClientProps) {
 
               <div>
                 <label className="block text-xs font-medium text-slate-700 mb-1">
-                  Full Name / Display Name
+                  ชื่อ / ชื่อที่แสดง (Display Name)
                 </label>
                 <input
                   type="text"
                   name="display_name"
                   required
-                  placeholder="e.g. Somchai Jaidee, Alice Tan"
+                  placeholder="เช่น Somchai Jaidee, สมชาย"
                   className="w-full px-3 py-2 text-sm bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-1 focus:ring-slate-900"
                 />
               </div>
 
               <div>
                 <label className="block text-xs font-medium text-slate-700 mb-1">
-                  Aliases (comma separated)
+                  ชื่อเล่น / นามแฝง (Aliases, คั่นด้วยจุลภาค)
                 </label>
                 <input
                   type="text"
                   name="aliases"
-                  placeholder="e.g. สมชาย, Somchai J, น้องบอย"
+                  placeholder="เช่น สมชาย, Somchai J, น้องบอย"
                   className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-1 focus:ring-slate-900"
                 />
               </div>
 
               <div>
                 <label className="block text-xs font-medium text-slate-700 mb-1">
-                  Phone (Optional)
+                  เบอร์โทรศัพท์ (ไม่บังคับ)
                 </label>
                 <input
                   type="tel"
@@ -138,12 +140,12 @@ export function PeopleClient({ initialSummaries }: PeopleClientProps) {
 
               <div>
                 <label className="block text-xs font-medium text-slate-700 mb-1">
-                  Note (Optional)
+                  บันทึกช่วยจำ (ไม่บังคับ)
                 </label>
                 <textarea
                   name="note"
                   rows={2}
-                  placeholder="Relationship, PromptPay account note..."
+                  placeholder="ความสัมพันธ์, เลขพร้อมเพย์, บันทึกย่อ..."
                   className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl"
                 />
               </div>
@@ -154,15 +156,16 @@ export function PeopleClient({ initialSummaries }: PeopleClientProps) {
                   onClick={() => setShowModal(false)}
                   className="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-900"
                 >
-                  Cancel
+                  ยกเลิก
                 </button>
                 <button
                   type="submit"
                   disabled={isCreating}
+                  aria-label="Add Person"
                   className="flex items-center gap-1.5 px-4 py-2 text-sm font-semibold text-white bg-slate-900 rounded-xl hover:bg-slate-800 disabled:opacity-50"
                 >
                   <Check className="w-4 h-4" />
-                  <span>{isCreating ? "Saving..." : "Add Person"}</span>
+                  <span>{isCreating ? "กำลังบันทึก..." : "Add Person"}</span>
                 </button>
               </div>
             </form>

@@ -46,27 +46,28 @@ export function MerchantsClient({ initialSummaries }: MerchantsClientProps) {
             type="text"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search merchant or brand..."
-            className="w-full pl-9 pr-4 py-2 text-sm bg-white border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-slate-900/10 focus:border-slate-900"
+            placeholder="ค้นหาร้านค้า หรือแบรนด์..."
+            className="w-full pl-9 pr-4 py-2 text-sm bg-white border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-slate-900/10 focus:border-slate-900 transition-colors"
           />
         </div>
 
         <button
           onClick={() => setShowModal(true)}
-          className="flex items-center gap-1.5 px-3.5 py-2 bg-slate-900 hover:bg-slate-800 text-white text-xs sm:text-sm font-semibold rounded-xl shadow-sm transition-all flex-shrink-0"
+          aria-label="Add Merchant"
+          className="flex items-center gap-1.5 px-3.5 py-2 bg-slate-900 hover:bg-slate-800 text-white text-xs sm:text-sm font-semibold rounded-xl shadow-sm transition-all flex-shrink-0 active:scale-[0.98]"
         >
           <Plus className="w-4 h-4" />
-          <span>Add Merchant</span>
+          <span>+ เพิ่มร้านค้า</span>
         </button>
       </div>
 
       {filteredSummaries.length === 0 ? (
         <EmptyState
           icon={<Store className="w-8 h-8 text-slate-400" />}
-          title="No merchants yet"
-          description="Track repeated shops, stores, supermarkets, and service providers."
-          actionHref="#"
-          actionLabel="+ Add New Merchant"
+          title="ยังไม่มีข้อมูลร้านค้า"
+          description="เมื่อคุณเริ่มบันทึกรายการ ร้านค้า ซูเปอร์มาร์เก็ต และผู้ให้บริการจะปรากฏที่นี่"
+          onAction={() => setShowModal(true)}
+          actionLabel="+ เพิ่มร้านค้า"
         />
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -82,11 +83,12 @@ export function MerchantsClient({ initialSummaries }: MerchantsClientProps) {
           <div className="bg-white rounded-2xl p-6 max-w-md w-full shadow-xl border border-slate-200 space-y-4">
             <div className="flex items-center justify-between pb-3 border-b border-slate-100">
               <h3 className="font-semibold text-base text-slate-900">
-                Add Merchant
+                เพิ่มร้านค้า (Add Merchant)
               </h3>
               <button
                 onClick={() => setShowModal(false)}
                 className="text-slate-400 hover:text-slate-600"
+                aria-label="ปิด"
               >
                 <X className="w-5 h-5" />
               </button>
@@ -101,37 +103,37 @@ export function MerchantsClient({ initialSummaries }: MerchantsClientProps) {
 
               <div>
                 <label className="block text-xs font-medium text-slate-700 mb-1">
-                  Merchant Name
+                  ชื่อร้านค้า (Merchant Name)
                 </label>
                 <input
                   type="text"
                   name="display_name"
                   required
-                  placeholder="e.g. 7-Eleven, Grab, Lotus's, Shopee"
+                  placeholder="เช่น 7-Eleven, Grab, Lotus's, Shopee"
                   className="w-full px-3 py-2 text-sm bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-1 focus:ring-slate-900"
                 />
               </div>
 
               <div>
                 <label className="block text-xs font-medium text-slate-700 mb-1">
-                  Category Hint
+                  คำแนะนำหมวดหมู่ (Category Hint)
                 </label>
                 <input
                   type="text"
                   name="category_hint"
-                  placeholder="e.g. Food, Transport, Fuel"
+                  placeholder="เช่น อาหาร, การเดินทาง, ค่าน้ำมัน"
                   className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-1 focus:ring-slate-900"
                 />
               </div>
 
               <div>
                 <label className="block text-xs font-medium text-slate-700 mb-1">
-                  Aliases (comma separated)
+                  ชื่อเรียกอื่น / แบรนด์ (Aliases, คั่นด้วยจุลภาค)
                 </label>
                 <input
                   type="text"
                   name="aliases"
-                  placeholder="e.g. เซเว่น, CP ALL, 7-11"
+                  placeholder="เช่น เซเว่น, CP ALL, 7-11"
                   className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl"
                 />
               </div>
@@ -142,15 +144,16 @@ export function MerchantsClient({ initialSummaries }: MerchantsClientProps) {
                   onClick={() => setShowModal(false)}
                   className="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-900"
                 >
-                  Cancel
+                  ยกเลิก
                 </button>
                 <button
                   type="submit"
                   disabled={isCreating}
+                  aria-label="Save Merchant"
                   className="flex items-center gap-1.5 px-4 py-2 text-sm font-semibold text-white bg-slate-900 rounded-xl hover:bg-slate-800 disabled:opacity-50"
                 >
                   <Check className="w-4 h-4" />
-                  <span>{isCreating ? "Saving..." : "Save Merchant"}</span>
+                  <span>{isCreating ? "กำลังบันทึก..." : "บันทึกร้านค้า"}</span>
                 </button>
               </div>
             </form>
