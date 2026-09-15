@@ -1,7 +1,7 @@
 /* eslint-disable @next/next/no-img-element */
 "use client";
 
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { Slip } from "@/types/slip";
 import {
@@ -23,6 +23,7 @@ import { EmptyState } from "@/components/ui/EmptyState";
 import { formatDateTimeThai, formatDateTimeLocal } from "@/lib/finance/formatters";
 import { parseThaiSlipDate } from "@/lib/slip/ocr/thai-slip-normalizer";
 import { matchOwnedAccount } from "@/lib/slip/account-match";
+import { useSlipsRealtime } from "@/lib/slip/realtime/slips-realtime";
 import {
   Check,
   Edit2,
@@ -42,6 +43,7 @@ import {
 import { SlipUploadModal } from "./SlipUploadModal";
 
 interface ReviewInboxClientProps {
+  userId?: string;
   initialSlips: Slip[];
   accounts: Account[];
   categories: Category[];
@@ -50,6 +52,7 @@ interface ReviewInboxClientProps {
 }
 
 export function ReviewInboxClient({
+  userId,
   initialSlips,
   accounts,
   categories,
@@ -59,6 +62,14 @@ export function ReviewInboxClient({
   const router = useRouter();
   const [slips, setSlips] = useState<Slip[]>(initialSlips);
   const [isUploadModalOpen, setIsUploadModalOpen] = useState(false);
+
+  // Sync initialSlips to state when server re-renders after router.refresh()
+  useEffect(() => {
+    setSlips(initialSlips);
+  }, [initialSlips]);
+
+  // Realtime subscription: automatically calls router.refresh() when slips change in Supabase
+  const { justUpdated } = useSlipsRealtime({ userId });
 
   // Preview Modal State
   const [previewModalUrl, setPreviewModalUrl] = useState<string | null>(null);
@@ -259,11 +270,20 @@ export function ReviewInboxClient({
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-border pb-4">
         <div>
-          <h1 className="text-2xl sm:text-3xl font-semibold tracking-tight text-text-primary">
-            รายการรอตรวจสอบ{" "}
+          <h1 className="text-2xl sm:text-3xl font-semibold tracking-tight text-text-primary flex items-center flex-wrap gap-2">
+            <span>รายการรอตรวจสอบ</span>
             <span className="text-sm font-normal text-text-muted">
               · Review Inbox ({slips.length})
             </span>
+            {justUpdated && (
+              <span
+                data-testid="realtime-updated-indicator"
+                className="inline-flex items-center gap-1.5 text-xs font-medium text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800/60 px-2 py-0.5 rounded-full transition-all duration-300"
+              >
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                อัปเดตแล้ว
+              </span>
+            )}
           </h1>
           <p className="text-xs text-text-muted mt-0.5">
             สลิปธนาคารที่ต้องการการยืนยันประเภทรายการ บัญชี หรือมีข้อสงสัย

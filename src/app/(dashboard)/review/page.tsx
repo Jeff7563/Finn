@@ -19,6 +19,7 @@ export default async function ReviewPage() {
 
   return (
     <ReviewInboxClient
+      userId={user.id}
       initialSlips={pendingSlips}
       accounts={accounts}
       categories={categories}
