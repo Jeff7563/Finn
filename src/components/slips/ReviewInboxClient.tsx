@@ -16,6 +16,7 @@ import {
   rejectSlipAction,
   markSlipDuplicateAction,
   getSlipSignedPreviewUrlAction,
+  reprocessSlipAction,
 } from "@/app/actions/slip-review";
 import { MoneyAmount } from "@/components/ui/MoneyAmount";
 import { EmptyState } from "@/components/ui/EmptyState";
@@ -29,6 +30,9 @@ import {
   Eye,
   ArrowRight,
   ShieldCheck,
+  ShieldAlert,
+  AlertCircle,
+  RefreshCw,
   Calendar,
   X,
   Loader2,
@@ -75,6 +79,40 @@ export function ReviewInboxClient({
   });
 
   const [activeActionId, setActiveActionId] = useState<string | null>(null);
+  const [reprocessingId, setReprocessingId] = useState<string | null>(null);
+
+  // Reprocess Slip with Vision
+  const handleReprocess = async (slipId: string) => {
+    setReprocessingId(slipId);
+    try {
+      const res = await reprocessSlipAction(slipId);
+      if (res.success && res.result) {
+        if (res.result.status === "created") {
+          // Auto created, remove from review inbox
+          setSlips(slips.filter((s) => s.id !== slipId));
+        } else if (res.result.extracted) {
+          // Update slip details in-place
+          setSlips(
+            slips.map((s) =>
+              s.id === slipId
+                ? {
+                    ...s,
+                    extracted_json: res.result!.extracted,
+                    overall_confidence: res.result!.overallConfidence,
+                    status: "needs_review",
+                  }
+                : s
+            )
+          );
+        }
+        router.refresh();
+      } else {
+        alert(res.error || "ไม่สามารถประมวลผลสลิปใหม่ได้");
+      }
+    } finally {
+      setReprocessingId(null);
+    }
+  };
 
   // Open Preview Modal with Signed URL
   const handleOpenPreview = async (slipId: string) => {
@@ -242,13 +280,15 @@ export function ReviewInboxClient({
           {slips.map((slip) => {
             const ext = slip.extracted_json;
             const amount = ext?.amount || 0;
+            const isAmountValid = typeof ext?.amount === "number" && ext.amount > 0;
             const formattedDate = ext?.transactionDate
               ? formatDateTimeThai(ext.transactionDate)
               : "ไม่ได้ระบุวันที่";
 
-            const confidencePercent = Math.round(
-              (slip.overall_confidence || 0.8) * 100
-            );
+            const hasConfidence = slip.overall_confidence != null;
+            const confidencePercent = hasConfidence
+              ? Math.round(slip.overall_confidence! * 100)
+              : 0;
 
             const senderMatch = matchOwnedAccount(ext?.sender, accounts);
             const receiverMatch = matchOwnedAccount(ext?.receiver, accounts);
@@ -277,10 +317,24 @@ export function ReviewInboxClient({
                   </div>
 
                   <div className="flex items-center gap-2 flex-wrap">
-                    <span className="flex items-center gap-1 px-2.5 py-1 rounded-full bg-surface-soft border border-border text-[11px] font-medium text-text-secondary">
-                      <ShieldCheck className="w-3.5 h-3.5 text-income" />
-                      <span>ความมั่นใจ {confidencePercent}%</span>
-                    </span>
+                    {!isAmountValid && (
+                      <span className="flex items-center gap-1 px-2.5 py-1 rounded-full bg-amber-500/10 border border-amber-500/20 text-[11px] font-medium text-amber-600 dark:text-amber-400">
+                        <AlertCircle className="w-3.5 h-3.5" />
+                        <span>อ่านข้อมูลสลิปไม่ครบ</span>
+                      </span>
+                    )}
+
+                    {hasConfidence ? (
+                      <span className="flex items-center gap-1 px-2.5 py-1 rounded-full bg-surface-soft border border-border text-[11px] font-medium text-text-secondary">
+                        <ShieldCheck className="w-3.5 h-3.5 text-income" />
+                        <span>ความมั่นใจ {confidencePercent}%</span>
+                      </span>
+                    ) : (
+                      <span className="flex items-center gap-1 px-2.5 py-1 rounded-full bg-surface-soft border border-border text-[11px] font-medium text-text-muted">
+                        <ShieldAlert className="w-3.5 h-3.5 text-amber-500" />
+                        <span>ยังไม่ประเมิน</span>
+                      </span>
+                    )}
 
                     <button
                       onClick={() => handleOpenPreview(slip.id)}
@@ -346,48 +400,71 @@ export function ReviewInboxClient({
                 </div>
 
                 {/* Actions Row */}
-                <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-border">
-                  <div className="flex items-center gap-2">
-                    <button
-                      onClick={() => handleConfirm(slip.id)}
-                      disabled={isActing}
-                      className="flex items-center gap-1.5 px-4 py-2 bg-slate-900 hover:bg-slate-800 dark:bg-primary dark:hover:bg-primary-hover text-white dark:text-primary-foreground font-semibold rounded-xl text-xs shadow-xs transition-transform active:scale-95 disabled:opacity-50"
-                    >
-                      <Check className="w-3.5 h-3.5" />
-                      <span>ยืนยันรายการ</span>
-                    </button>
+                <div className="space-y-2 pt-2 border-t border-border">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <button
+                        onClick={() => handleConfirm(slip.id)}
+                        disabled={isActing || !isAmountValid}
+                        title={!isAmountValid ? "กรุณาแก้ไขจำนวนเงินก่อนยืนยัน" : "ยืนยันรายการ"}
+                        className="flex items-center gap-1.5 px-4 py-2 bg-slate-900 hover:bg-slate-800 dark:bg-primary dark:hover:bg-primary-hover text-white dark:text-primary-foreground font-semibold rounded-xl text-xs shadow-xs transition-transform active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        <Check className="w-3.5 h-3.5" />
+                        <span>ยืนยันรายการ</span>
+                      </button>
 
-                    <button
-                      onClick={() => openEditModal(slip)}
-                      disabled={isActing}
-                      className="flex items-center gap-1.5 px-3.5 py-2 bg-surface-soft hover:bg-surface-muted border border-border text-text-primary font-semibold rounded-xl text-xs transition-colors disabled:opacity-50"
-                    >
-                      <Edit2 className="w-3.5 h-3.5" />
-                      <span>แก้ไข</span>
-                    </button>
+                      <button
+                        onClick={() => openEditModal(slip)}
+                        disabled={isActing}
+                        className="flex items-center gap-1.5 px-3.5 py-2 bg-surface-soft hover:bg-surface-muted border border-border text-text-primary font-semibold rounded-xl text-xs transition-colors disabled:opacity-50"
+                      >
+                        <Edit2 className="w-3.5 h-3.5" />
+                        <span>แก้ไข</span>
+                      </button>
+
+                      <button
+                        onClick={() => handleReprocess(slip.id)}
+                        disabled={isActing || reprocessingId === slip.id}
+                        className="flex items-center gap-1.5 px-3 py-2 bg-surface-soft hover:bg-surface-muted border border-border text-text-primary font-semibold rounded-xl text-xs transition-colors disabled:opacity-50"
+                        title="ประมวลผลข้อมูลสลิปนี้ใหม่อีกครั้ง"
+                      >
+                        {reprocessingId === slip.id ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        ) : (
+                          <RefreshCw className="w-3.5 h-3.5" />
+                        )}
+                        <span>ประมวลผลใหม่</span>
+                      </button>
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => handleMarkDuplicate(slip.id)}
+                        disabled={isActing}
+                        className="flex items-center gap-1 px-3 py-2 text-text-muted hover:text-text-primary text-xs rounded-xl hover:bg-surface-soft transition-colors"
+                        title="ทำเครื่องหมายว่าเป็นรายการซ้ำ"
+                      >
+                        <Copy className="w-3.5 h-3.5" />
+                        <span>รายการซ้ำ</span>
+                      </button>
+
+                      <button
+                        onClick={() => handleReject(slip.id)}
+                        disabled={isActing}
+                        className="flex items-center gap-1 px-3 py-2 text-expense hover:bg-expense-soft text-xs rounded-xl transition-colors"
+                        title="ปฏิเสธสลิปนี้"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                        <span>ปฏิเสธ</span>
+                      </button>
+                    </div>
                   </div>
 
-                  <div className="flex items-center gap-2">
-                    <button
-                      onClick={() => handleMarkDuplicate(slip.id)}
-                      disabled={isActing}
-                      className="flex items-center gap-1 px-3 py-2 text-text-muted hover:text-text-primary text-xs rounded-xl hover:bg-surface-soft transition-colors"
-                      title="ทำเครื่องหมายว่าเป็นรายการซ้ำ"
-                    >
-                      <Copy className="w-3.5 h-3.5" />
-                      <span>รายการซ้ำ</span>
-                    </button>
-
-                    <button
-                      onClick={() => handleReject(slip.id)}
-                      disabled={isActing}
-                      className="flex items-center gap-1 px-3 py-2 text-expense hover:bg-expense-soft text-xs rounded-xl transition-colors"
-                      title="ปฏิเสธสลิปนี้"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" />
-                      <span>ปฏิเสธ</span>
-                    </button>
-                  </div>
+                  {!isAmountValid && (
+                    <p className="text-[11px] text-amber-600 dark:text-amber-400 font-medium">
+                      * ข้อมูลสลิปยังไม่สมบูรณ์ (จำนวนเงินไม่ถูกต้อง) กรุณากด &quot;แก้ไข&quot; เพื่อระบุจำนวนเงิน หรือกด &quot;ประมวลผลใหม่&quot;
+                    </p>
+                  )}
                 </div>
               </div>
             );

@@ -3,6 +3,8 @@
 import { getAuthenticatedUser } from "@/lib/server/auth";
 import { DataStore } from "@/lib/server/data-store";
 import { TransactionFormData } from "@/lib/validation/schemas";
+import { defaultSlipProcessor } from "@/lib/slip/processor";
+import { SlipProcessingResult } from "@/types/slip";
 import { revalidatePath } from "next/cache";
 
 export interface ReviewActionResult {
@@ -252,3 +254,50 @@ export async function getSlipSignedPreviewUrlAction(
     };
   }
 }
+
+/**
+ * Reprocesses an existing slip using current Vision parser and re-evaluates confidence.
+ */
+export async function reprocessSlipAction(
+  slipId: string
+): Promise<{ success: boolean; result?: SlipProcessingResult; error?: string }> {
+  const user = await getAuthenticatedUser();
+  if (!user) {
+    return { success: false, error: "กรุณาเข้าสู่ระบบก่อนทำรายการ" };
+  }
+
+  try {
+    const slip = await DataStore.getSlipById(user.id, slipId);
+    if (!slip) {
+      return { success: false, error: "ไม่พบข้อมูลสลิป" };
+    }
+
+    const buffer = await DataStore.getSlipFile(slip.storage_path);
+    if (!buffer) {
+      return { success: false, error: "ไม่พบไฟล์สลิปในที่จัดเก็บข้อมูลส่วนตัว" };
+    }
+
+    const result = await defaultSlipProcessor.reprocessSlip({
+      userId: user.id,
+      slipId: slip.id,
+      buffer,
+    });
+
+    revalidatePath("/review");
+    revalidatePath("/today");
+    revalidatePath("/transactions");
+    revalidatePath("/overview");
+
+    return {
+      success: result.status !== "failed",
+      result,
+      error: result.status === "failed" ? result.errorMessage : undefined,
+    };
+  } catch (err: unknown) {
+    return {
+      success: false,
+      error: err instanceof Error ? err.message : "เกิดข้อผิดพลาดในการประมวลผลสลิปใหม่",
+    };
+  }
+}
+

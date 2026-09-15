@@ -57,6 +57,9 @@ export const BANK_DEFINITIONS: BankDefinition[] = [
       "k+",
       "k-plus",
       "kplus",
+      "make by kbank",
+      "makebykbank",
+      "make",
     ],
   },
   {

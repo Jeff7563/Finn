@@ -3,6 +3,8 @@ import {
   SlipProcessingResult,
   SlipSource,
   SlipExtraction,
+  Slip,
+  SlipIngestionJob,
 } from "@/types/slip";
 import {
   validateSlipFile,
@@ -10,6 +12,7 @@ import {
   generateSlipStoragePath,
 } from "./validation";
 import { DefaultQrDecoder, QrDecoder } from "./qr/decoder";
+import { parseSlipQrPayload } from "./qr/parser";
 import { CompositeSlipParser, VisionSlipParser } from "./ocr";
 import { normalizeBankName } from "./bank-normalization";
 import { matchOwnedAccount } from "./account-match";
@@ -27,6 +30,12 @@ export interface ProcessSlipOptions {
   clientId?: string | null;
   qrDecoder?: QrDecoder;
   visionParser?: VisionSlipParser;
+}
+
+export interface ReprocessSlipOptions {
+  userId: string;
+  slipId: string;
+  buffer: Buffer;
 }
 
 export class SlipProcessor {
@@ -98,6 +107,76 @@ export class SlipProcessor {
       status: "processing",
     });
 
+    return this.executePipeline({
+      userId,
+      slip,
+      job,
+      buffer,
+      mime: validation.mime,
+      fileHash,
+      source,
+    });
+  }
+
+  /**
+   * Reprocesses an existing slip record (e.g. from Review Inbox).
+   */
+  async reprocessSlip(options: ReprocessSlipOptions): Promise<SlipProcessingResult> {
+    const { userId, slipId, buffer } = options;
+
+    const slip = await DataStore.getSlipById(userId, slipId);
+    if (!slip) {
+      return {
+        jobId: "none",
+        slipId,
+        status: "failed",
+        currency: "THB",
+        errorMessage: "ไม่พบข้อมูลสลิปที่ต้องการประมวลผล",
+      };
+    }
+
+    const validation = validateSlipFile(buffer);
+    if (!validation.valid || !validation.mime) {
+      return {
+        jobId: "none",
+        slipId,
+        status: "failed",
+        currency: "THB",
+        errorCode: validation.errorCode || "INVALID_FILE",
+        errorMessage: validation.error || "ไฟล์สลิปไม่ถูกต้อง",
+      };
+    }
+
+    const job = await DataStore.createSlipJob(userId, {
+      slip_id: slip.id,
+      status: "processing",
+    });
+
+    return this.executePipeline({
+      userId,
+      slip,
+      job,
+      buffer,
+      mime: validation.mime,
+      fileHash: slip.file_hash_sha256,
+      source: slip.source,
+    });
+  }
+
+  /**
+   * Core extraction and classification pipeline shared by processSlip and reprocessSlip.
+   */
+  private async executePipeline(params: {
+    userId: string;
+    slip: Slip;
+    job: SlipIngestionJob;
+    buffer: Buffer;
+    mime: string;
+    fileHash: string;
+    source: SlipSource;
+  }): Promise<SlipProcessingResult> {
+    const { userId, slip, job, buffer, mime, fileHash, source } = params;
+
     try {
       // 6. QR Code Decoding
       let qrPayload: string | null = null;
@@ -112,7 +191,7 @@ export class SlipProcessor {
       try {
         extraction = await this.visionParser.parse({
           imageBuffer: buffer,
-          mimeType: validation.mime,
+          mimeType: mime,
           qrPayload,
         });
       } catch (err: unknown) {
@@ -135,6 +214,31 @@ export class SlipProcessor {
           reviewUrl: `/review?slipId=${slip.id}`,
           errorMessage: safeError,
         };
+      }
+
+      // 7b. QR and Vision Cross-Check & Corroboration
+      let qrMismatch = false;
+      if (qrPayload) {
+        const qrParsed = parseSlipQrPayload(qrPayload);
+        if (qrParsed?.amount != null && extraction.amount != null) {
+          if (Math.abs(qrParsed.amount - extraction.amount) > 0.01) {
+            qrMismatch = true;
+            extraction.fieldConfidence.amount = Math.min(
+              extraction.fieldConfidence.amount || 0.5,
+              0.4
+            );
+          } else {
+            extraction.fieldConfidence.amount = 0.99;
+          }
+        } else if (extraction.amount == null && qrParsed?.amount != null) {
+          extraction.amount = qrParsed.amount;
+          extraction.fieldConfidence.amount = qrParsed.fieldConfidence?.amount || 0.95;
+        }
+
+        if (qrParsed?.reference && !extraction.reference) {
+          extraction.reference = qrParsed.reference;
+          extraction.fieldConfidence.reference = qrParsed.fieldConfidence?.reference || 0.95;
+        }
       }
 
       // 8. Bank Normalization
@@ -235,7 +339,7 @@ export class SlipProcessor {
         amount: extraction.amount,
         transactionDate: extraction.transactionDate,
         direction: directionClass.direction,
-        directionRequiresReview: directionClass.requiresReview,
+        directionRequiresReview: directionClass.requiresReview || qrMismatch,
         senderAccountId: senderMatch.accountId,
         senderAccountConfidence: senderMatch.confidence,
         receiverAccountId: receiverMatch.accountId,
@@ -244,6 +348,12 @@ export class SlipProcessor {
         duplicateWarning: duplicateResult.duplicateType === "fuzzy_match",
         duplicateRequiresReview: duplicateResult.requiresReview,
       });
+
+      if (qrMismatch) {
+        confidenceDecision.reasons.push(
+          "จำนวนเงินจาก QR Code และภาพสลิปไม่ตรงกัน (QR and Vision amount mismatch)"
+        );
+      }
 
       // 15. Execution: Auto-Create OR Review Inbox
       if (confidenceDecision.canAutoCreate) {
@@ -275,6 +385,7 @@ export class SlipProcessor {
           qr_payload: qrPayload,
           extracted_json: extraction,
           overall_confidence: confidenceDecision.overallConfidence,
+          parser_version: "v2-vision",
           processed_at: new Date().toISOString(),
         });
 
@@ -303,6 +414,7 @@ export class SlipProcessor {
           qr_payload: qrPayload,
           extracted_json: extraction,
           overall_confidence: confidenceDecision.overallConfidence,
+          parser_version: "v2-vision",
           processed_at: new Date().toISOString(),
         });
 
