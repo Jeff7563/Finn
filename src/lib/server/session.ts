@@ -17,13 +17,37 @@ const SESSION_SECRET =
 
 /**
  * Checks if demo mode is permitted in the current runtime environment.
- * Default: enabled in development / test, disabled in production unless explicit ENABLE_DEMO_MODE="true".
+ * CRITICAL SECURITY INVARIANT:
+ * Demo mode is STRICTLY PROHIBITED in production runtime.
+ * Only allowed in automated test runners (Playwright / Vitest) or local development.
  */
 export function isDemoModeAllowed(): boolean {
-  if (process.env.ENABLE_DEMO_MODE === "true") return true;
+  // Pure production: ALWAYS false
+  if (process.env.NODE_ENV === "production" && process.env.PLAYWRIGHT_TEST !== "1") {
+    return false;
+  }
   if (process.env.ENABLE_DEMO_MODE === "false") return false;
+  if (process.env.ENABLE_DEMO_MODE === "true") return true;
   if (process.env.PLAYWRIGHT_TEST === "1" || process.env.VITEST === "true") return true;
   return process.env.NODE_ENV !== "production";
+}
+
+/**
+ * Checks if authentication fallback to local session is permitted.
+ * CRITICAL PRODUCTION SECURITY INVARIANT:
+ * In production runtime (Vercel, Docker, node server), fallback MUST NEVER occur.
+ * Supabase failure must fail closed. Only automated tests with dummy keys may use test fallback.
+ */
+export function isTestAuthFallbackAllowed(): boolean {
+  if (process.env.NODE_ENV === "production" && process.env.PLAYWRIGHT_TEST !== "1") {
+    return false;
+  }
+  return (
+    process.env.PLAYWRIGHT_TEST === "1" ||
+    process.env.VITEST === "true" ||
+    process.env.NODE_ENV === "test" ||
+    process.env.NODE_ENV === "development"
+  );
 }
 
 function base64UrlEncode(bytes: Uint8Array): string {

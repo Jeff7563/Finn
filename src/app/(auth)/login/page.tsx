@@ -1,11 +1,15 @@
 "use client";
 
-import React, { useActionState } from "react";
+import React, { Suspense, useActionState } from "react";
 import Link from "next/link";
-import { signInAction, signInDemoAction } from "@/app/actions/auth";
-import { Lock, Mail, ArrowRight, Sparkles } from "lucide-react";
+import { useSearchParams } from "next/navigation";
+import { signInAction } from "@/app/actions/auth";
+import { Lock, Mail, ArrowRight, CheckCircle2 } from "lucide-react";
 
-export default function LoginPage() {
+function LoginForm() {
+  const searchParams = useSearchParams();
+  const resetSuccess = searchParams.get("reset") === "success";
+
   const [state, formAction, isPending] = useActionState(signInAction, {
     success: false,
     error: undefined,
@@ -26,6 +30,17 @@ export default function LoginPage() {
             Personal Finance Operating System
           </p>
         </div>
+
+        {/* Reset Password Success Banner */}
+        {resetSuccess && (
+          <div
+            role="status"
+            className="p-3 text-xs font-medium text-income bg-income-soft border border-income/30 rounded-xl flex items-center gap-2"
+          >
+            <CheckCircle2 className="w-4 h-4 shrink-0" />
+            <span>เปลี่ยนรหัสผ่านเรียบร้อยแล้ว กรุณาเข้าสู่ระบบด้วยรหัสผ่านใหม่</span>
+          </div>
+        )}
 
         {/* Form */}
         <form action={formAction} className="space-y-4">
@@ -60,12 +75,20 @@ export default function LoginPage() {
           </div>
 
           <div>
-            <label
-              htmlFor="password"
-              className="block text-xs font-medium text-text-secondary mb-1"
-            >
-              รหัสผ่าน (Password)
-            </label>
+            <div className="flex items-center justify-between mb-1">
+              <label
+                htmlFor="password"
+                className="block text-xs font-medium text-text-secondary"
+              >
+                รหัสผ่าน (Password)
+              </label>
+              <Link
+                href="/forgot-password"
+                className="text-xs text-text-muted hover:text-text-primary hover:underline transition-colors"
+              >
+                ลืมรหัสผ่าน?
+              </Link>
+            </div>
             <div className="relative">
               <Lock className="w-4 h-4 text-text-muted absolute left-3.5 top-3 pointer-events-none" />
               <input
@@ -90,22 +113,6 @@ export default function LoginPage() {
           </button>
         </form>
 
-        {/* Demo Fast Login */}
-        <div className="pt-3 border-t border-border space-y-2">
-          <form action={signInDemoAction}>
-            <button
-              type="submit"
-              className="w-full py-2.5 px-3 flex items-center justify-center gap-2 bg-surface-soft hover:bg-surface-muted text-text-primary text-xs font-semibold rounded-xl border border-border transition-colors active:scale-[0.99]"
-            >
-              <Sparkles className="w-4 h-4 text-amber-500" />
-              <span>ทดลองใช้งาน (Explore as Demo User)</span>
-            </button>
-          </form>
-          <p className="text-[11px] text-center text-text-muted">
-            โหมดทดลอง — ข้อมูลนี้เป็นตัวอย่างสำหรับการประเมินผล
-          </p>
-        </div>
-
         {/* Footer */}
         <p className="text-center text-xs text-text-muted pt-1">
           ยังไม่มีบัญชีผู้ใช้?{" "}
@@ -118,5 +125,13 @@ export default function LoginPage() {
         </p>
       </div>
     </div>
+  );
+}
+
+export default function LoginPage() {
+  return (
+    <Suspense fallback={<div className="min-h-screen bg-bg" />}>
+      <LoginForm />
+    </Suspense>
   );
 }

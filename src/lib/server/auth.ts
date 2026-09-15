@@ -9,10 +9,15 @@ export interface AuthenticatedUser {
 }
 
 export async function getAuthenticatedUser(): Promise<AuthenticatedUser | null> {
-  const cookieStore = await cookies();
+  let cookieStore: Awaited<ReturnType<typeof cookies>> | null = null;
+  try {
+    cookieStore = await cookies();
+  } catch {
+    cookieStore = null;
+  }
 
   // 1. Check verified demo/session token
-  const sessionCookie = cookieStore.get("finn_session")?.value;
+  const sessionCookie = cookieStore?.get("finn_session")?.value;
   if (sessionCookie) {
     const verified = await verifySessionToken(sessionCookie);
     if (verified) {
