@@ -30,8 +30,40 @@ import {
   isTokenUsable,
 } from "../slip/token";
 import { createClient as createServerSupabaseClient } from "../supabase/server";
+import { cache } from "react";
 import { createAdminClient, hasAdminCredentials } from "../supabase/admin";
-import { IDataStore } from "./data-store-interface";
+import { IDataStore, PreloadedRelations, TransactionsPageData } from "./data-store-interface";
+import {
+  withJwtSkewRetry,
+  executeQueryWithSkewRetry,
+  isTransientJwtSkewError,
+} from "./jwt-resilience";
+import { getAuthenticatedUser } from "./auth";
+import { measurePerf } from "./perf";
+
+const getCachedAccounts = cache(
+  async (store: SupabaseDataStoreImpl, userId: string): Promise<Account[]> => {
+    return store.fetchAccountsDirect(userId);
+  }
+);
+
+const getCachedCategories = cache(
+  async (store: SupabaseDataStoreImpl, userId: string): Promise<Category[]> => {
+    return store.fetchCategoriesDirect(userId);
+  }
+);
+
+const getCachedPeople = cache(
+  async (store: SupabaseDataStoreImpl, userId: string): Promise<Person[]> => {
+    return store.fetchPeopleDirect(userId);
+  }
+);
+
+const getCachedMerchants = cache(
+  async (store: SupabaseDataStoreImpl, userId: string): Promise<Merchant[]> => {
+    return store.fetchMerchantsDirect(userId);
+  }
+);
 
 function assertUserId(userId: unknown): asserts userId is string {
   if (!userId || typeof userId !== "string" || userId.trim() === "") {
@@ -240,13 +272,11 @@ export class SupabaseDataStoreImpl implements IDataStore {
     const userClient = await createServerSupabaseClient();
     if (!userId) return userClient;
 
-    try {
-      const { data } = await userClient.auth.getUser();
-      if (data?.user?.id === userId) {
-        return userClient;
-      }
-    } catch {
-      // ignore
+    // Fast path: Reuse request-scoped user verified via getAuthenticatedUser().
+    // Since getAuthenticatedUser() is wrapped in React cache(), this costs 0 extra network calls!
+    const authUser = await getAuthenticatedUser();
+    if (authUser && authUser.id === userId) {
+      return userClient;
     }
 
     // If no active user session cookie exists for this userId (e.g. iOS ingest token path),
@@ -255,53 +285,96 @@ export class SupabaseDataStoreImpl implements IDataStore {
       return createAdminClient();
     }
 
+    // Fallback if not pre-resolved in request scope (e.g. isolated test or script)
+    try {
+      const { data } = await withJwtSkewRetry(async () => {
+        const res = await userClient.auth.getUser();
+        if (res.error && isTransientJwtSkewError(res.error)) {
+          throw res.error;
+        }
+        return res;
+      });
+      if (data?.user?.id === userId) {
+        return userClient;
+      }
+    } catch {
+      // ignore
+    }
+
     return userClient;
+  }
+
+  /**
+   * Executes a database query with automatic clock-skew resilience.
+   * If a transient "JWT issued at future" error is encountered immediately after login,
+   * retries up to 2 times with bounded delays (300ms, 700ms).
+   * Unrelated errors fail immediately without retry.
+   */
+  private async executeRead<T extends { error: unknown }>(
+    queryFn: () => PromiseLike<T>
+  ): Promise<T> {
+    return executeQueryWithSkewRetry(queryFn);
   }
 
   // ACCOUNTS
   async getAccounts(userId: string): Promise<Account[]> {
     assertUserId(userId);
-    const client = await this.getClient(userId);
-    const { data, error } = await client
-      .from("accounts")
-      .select("*")
-      .eq("user_id", userId)
-      .eq("active", true)
-      .order("created_at", { ascending: true });
+    return getCachedAccounts(this, userId);
+  }
 
-    if (error) {
-      throw new Error(`Failed to fetch accounts: ${error.message}`);
-    }
-    return (data || []).map(mapAccount);
+  async fetchAccountsDirect(userId: string): Promise<Account[]> {
+    assertUserId(userId);
+    return measurePerf("data.accounts", async () => {
+      const client = await this.getClient(userId);
+      const { data, error } = await this.executeRead(() =>
+        client
+          .from("accounts")
+          .select("*")
+          .eq("user_id", userId)
+          .eq("active", true)
+          .order("created_at", { ascending: true })
+      );
+
+      if (error) {
+        throw new Error(`Failed to fetch accounts: ${(error as Error).message}`);
+      }
+      return (data || []).map(mapAccount);
+    }, (res) => res.length);
   }
 
   async getAllAccounts(userId: string): Promise<Account[]> {
     assertUserId(userId);
-    const client = await this.getClient(userId);
-    const { data, error } = await client
-      .from("accounts")
-      .select("*")
-      .eq("user_id", userId)
-      .order("created_at", { ascending: true });
+    return measurePerf("data.allAccounts", async () => {
+      const client = await this.getClient(userId);
+      const { data, error } = await this.executeRead(() =>
+        client
+          .from("accounts")
+          .select("*")
+          .eq("user_id", userId)
+          .order("created_at", { ascending: true })
+      );
 
-    if (error) {
-      throw new Error(`Failed to fetch all accounts: ${error.message}`);
-    }
-    return (data || []).map(mapAccount);
+      if (error) {
+        throw new Error(`Failed to fetch all accounts: ${(error as Error).message}`);
+      }
+      return (data || []).map(mapAccount);
+    }, (res) => res.length);
   }
 
   async getAccountById(userId: string, id: string): Promise<Account | null> {
     assertUserId(userId);
     const client = await this.getClient(userId);
-    const { data, error } = await client
-      .from("accounts")
-      .select("*")
-      .eq("user_id", userId)
-      .eq("id", id)
-      .maybeSingle();
+    const { data, error } = await this.executeRead(() =>
+      client
+        .from("accounts")
+        .select("*")
+        .eq("user_id", userId)
+        .eq("id", id)
+        .maybeSingle()
+    );
 
     if (error) {
-      throw new Error(`Failed to fetch account by id: ${error.message}`);
+      throw new Error(`Failed to fetch account by id: ${(error as Error).message}`);
     }
     return data ? mapAccount(data) : null;
   }
@@ -384,17 +457,26 @@ export class SupabaseDataStoreImpl implements IDataStore {
   // CATEGORIES
   async getCategories(userId: string): Promise<Category[]> {
     assertUserId(userId);
-    const client = await this.getClient(userId);
-    const { data, error } = await client
-      .from("categories")
-      .select("*")
-      .or(`user_id.eq.${userId},is_system.eq.true`)
-      .order("name", { ascending: true });
+    return getCachedCategories(this, userId);
+  }
 
-    if (error) {
-      throw new Error(`Failed to fetch categories: ${error.message}`);
-    }
-    return (data || []).map(mapCategory);
+  async fetchCategoriesDirect(userId: string): Promise<Category[]> {
+    assertUserId(userId);
+    return measurePerf("data.categories", async () => {
+      const client = await this.getClient(userId);
+      const { data, error } = await this.executeRead(() =>
+        client
+          .from("categories")
+          .select("*")
+          .or(`user_id.eq.${userId},is_system.eq.true`)
+          .order("name", { ascending: true })
+      );
+
+      if (error) {
+        throw new Error(`Failed to fetch categories: ${(error as Error).message}`);
+      }
+      return (data || []).map(mapCategory);
+    }, (res) => res.length);
   }
 
   async createCategory(
@@ -427,31 +509,42 @@ export class SupabaseDataStoreImpl implements IDataStore {
   // PEOPLE
   async getPeople(userId: string): Promise<Person[]> {
     assertUserId(userId);
-    const client = await this.getClient(userId);
-    const { data, error } = await client
-      .from("people")
-      .select("*")
-      .eq("user_id", userId)
-      .order("display_name", { ascending: true });
+    return getCachedPeople(this, userId);
+  }
 
-    if (error) {
-      throw new Error(`Failed to fetch people: ${error.message}`);
-    }
-    return (data || []).map(mapPerson);
+  async fetchPeopleDirect(userId: string): Promise<Person[]> {
+    assertUserId(userId);
+    return measurePerf("data.people", async () => {
+      const client = await this.getClient(userId);
+      const { data, error } = await this.executeRead(() =>
+        client
+          .from("people")
+          .select("*")
+          .eq("user_id", userId)
+          .order("display_name", { ascending: true })
+      );
+
+      if (error) {
+        throw new Error(`Failed to fetch people: ${(error as Error).message}`);
+      }
+      return (data || []).map(mapPerson);
+    }, (res) => res.length);
   }
 
   async getPersonById(userId: string, id: string): Promise<Person | null> {
     assertUserId(userId);
     const client = await this.getClient(userId);
-    const { data, error } = await client
-      .from("people")
-      .select("*")
-      .eq("user_id", userId)
-      .eq("id", id)
-      .maybeSingle();
+    const { data, error } = await this.executeRead(() =>
+      client
+        .from("people")
+        .select("*")
+        .eq("user_id", userId)
+        .eq("id", id)
+        .maybeSingle()
+    );
 
     if (error) {
-      throw new Error(`Failed to fetch person by id: ${error.message}`);
+      throw new Error(`Failed to fetch person by id: ${(error as Error).message}`);
     }
     return data ? mapPerson(data) : null;
   }
@@ -516,31 +609,42 @@ export class SupabaseDataStoreImpl implements IDataStore {
   // MERCHANTS
   async getMerchants(userId: string): Promise<Merchant[]> {
     assertUserId(userId);
-    const client = await this.getClient(userId);
-    const { data, error } = await client
-      .from("merchants")
-      .select("*")
-      .eq("user_id", userId)
-      .order("display_name", { ascending: true });
+    return getCachedMerchants(this, userId);
+  }
 
-    if (error) {
-      throw new Error(`Failed to fetch merchants: ${error.message}`);
-    }
-    return (data || []).map(mapMerchant);
+  async fetchMerchantsDirect(userId: string): Promise<Merchant[]> {
+    assertUserId(userId);
+    return measurePerf("data.merchants", async () => {
+      const client = await this.getClient(userId);
+      const { data, error } = await this.executeRead(() =>
+        client
+          .from("merchants")
+          .select("*")
+          .eq("user_id", userId)
+          .order("display_name", { ascending: true })
+      );
+
+      if (error) {
+        throw new Error(`Failed to fetch merchants: ${(error as Error).message}`);
+      }
+      return (data || []).map(mapMerchant);
+    }, (res) => res.length);
   }
 
   async getMerchantById(userId: string, id: string): Promise<Merchant | null> {
     assertUserId(userId);
     const client = await this.getClient(userId);
-    const { data, error } = await client
-      .from("merchants")
-      .select("*")
-      .eq("user_id", userId)
-      .eq("id", id)
-      .maybeSingle();
+    const { data, error } = await this.executeRead(() =>
+      client
+        .from("merchants")
+        .select("*")
+        .eq("user_id", userId)
+        .eq("id", id)
+        .maybeSingle()
+    );
 
     if (error) {
-      throw new Error(`Failed to fetch merchant by id: ${error.message}`);
+      throw new Error(`Failed to fetch merchant by id: ${(error as Error).message}`);
     }
     return data ? mapMerchant(data) : null;
   }
@@ -605,54 +709,183 @@ export class SupabaseDataStoreImpl implements IDataStore {
   }
 
   // TRANSACTIONS
-  async getTransactions(userId: string): Promise<TransactionWithRelations[]> {
+  async getTransactions(
+    userId: string,
+    preloadedRelations?: PreloadedRelations
+  ): Promise<TransactionWithRelations[]> {
     assertUserId(userId);
-    const client = await this.getClient(userId);
+    return measurePerf("data.transactions", async () => {
+      const client = await this.getClient(userId);
 
-    const [txsRes, accounts, categories, people, merchants] = await Promise.all([
-      client
-        .from("transactions")
-        .select("*")
-        .eq("user_id", userId)
-        .order("transaction_date", { ascending: false }),
-      this.getAccounts(userId),
-      this.getCategories(userId),
-      this.getPeople(userId),
-      this.getMerchants(userId),
-    ]);
+      const accountsPromise = preloadedRelations?.accounts
+        ? Promise.resolve(preloadedRelations.accounts)
+        : this.getAccounts(userId);
+      const categoriesPromise = preloadedRelations?.categories
+        ? Promise.resolve(preloadedRelations.categories)
+        : this.getCategories(userId);
+      const peoplePromise = preloadedRelations?.people
+        ? Promise.resolve(preloadedRelations.people)
+        : this.getPeople(userId);
+      const merchantsPromise = preloadedRelations?.merchants
+        ? Promise.resolve(preloadedRelations.merchants)
+        : this.getMerchants(userId);
 
-    if (txsRes.error) {
-      throw new Error(`Failed to fetch transactions: ${txsRes.error.message}`);
-    }
+      const [txsRes, accounts, categories, people, merchants] = await Promise.all([
+        this.executeRead(() =>
+          client
+            .from("transactions")
+            .select("*")
+            .eq("user_id", userId)
+            .order("transaction_date", { ascending: false })
+        ),
+        accountsPromise,
+        categoriesPromise,
+        peoplePromise,
+        merchantsPromise,
+      ]);
 
-    const txs = (txsRes.data || []).map(mapTransaction);
+      if (txsRes.error) {
+        throw new Error(`Failed to fetch transactions: ${(txsRes.error as Error).message}`);
+      }
 
-    return txs.map((tx) => ({
-      ...tx,
-      from_account: tx.from_account_id
-        ? accounts.find((a) => a.id === tx.from_account_id) || null
-        : null,
-      to_account: tx.to_account_id
-        ? accounts.find((a) => a.id === tx.to_account_id) || null
-        : null,
-      category: tx.category_id
-        ? categories.find((c) => c.id === tx.category_id) || null
-        : null,
-      person: tx.person_id
-        ? people.find((p) => p.id === tx.person_id) || null
-        : null,
-      merchant: tx.merchant_id
-        ? merchants.find((m) => m.id === tx.merchant_id) || null
-        : null,
-    }));
+      const txs = (txsRes.data || []).map(mapTransaction);
+
+      return txs.map((tx) => ({
+        ...tx,
+        from_account: tx.from_account_id
+          ? accounts.find((a) => a.id === tx.from_account_id) || null
+          : null,
+        to_account: tx.to_account_id
+          ? accounts.find((a) => a.id === tx.to_account_id) || null
+          : null,
+        category: tx.category_id
+          ? categories.find((c) => c.id === tx.category_id) || null
+          : null,
+        person: tx.person_id
+          ? people.find((p) => p.id === tx.person_id) || null
+          : null,
+        merchant: tx.merchant_id
+          ? merchants.find((m) => m.id === tx.merchant_id) || null
+          : null,
+      }));
+    }, (res) => res.length);
+  }
+
+  async getTransactionsPageData(userId: string): Promise<TransactionsPageData> {
+    assertUserId(userId);
+    return measurePerf("data.getTransactionsPageData", async () => {
+      const client = await this.getClient(userId);
+
+      const [accounts, categories, people, merchants, txsRes] = await Promise.all([
+        this.getAccounts(userId),
+        this.getCategories(userId),
+        this.getPeople(userId),
+        this.getMerchants(userId),
+        this.executeRead(() =>
+          client
+            .from("transactions")
+            .select("*")
+            .eq("user_id", userId)
+            .order("transaction_date", { ascending: false })
+        ),
+      ]);
+
+      if (txsRes.error) {
+        throw new Error(`Failed to fetch transactions page data: ${(txsRes.error as Error).message}`);
+      }
+
+      const txs = (txsRes.data || []).map(mapTransaction);
+      const transactions = txs.map((tx) => ({
+        ...tx,
+        from_account: tx.from_account_id
+          ? accounts.find((a) => a.id === tx.from_account_id) || null
+          : null,
+        to_account: tx.to_account_id
+          ? accounts.find((a) => a.id === tx.to_account_id) || null
+          : null,
+        category: tx.category_id
+          ? categories.find((c) => c.id === tx.category_id) || null
+          : null,
+        person: tx.person_id
+          ? people.find((p) => p.id === tx.person_id) || null
+          : null,
+        merchant: tx.merchant_id
+          ? merchants.find((m) => m.id === tx.merchant_id) || null
+          : null,
+      }));
+
+      return {
+        transactions,
+        accounts,
+        categories,
+        people,
+        merchants,
+      };
+    }, (res) => res.transactions.length);
   }
 
   async getTransactionById(
     userId: string,
-    id: string
+    id: string,
+    preloadedRelations?: PreloadedRelations
   ): Promise<TransactionWithRelations | null> {
-    const list = await this.getTransactions(userId);
-    return list.find((t) => t.id === id) || null;
+    assertUserId(userId);
+    return measurePerf("data.getTransactionById", async () => {
+      const client = await this.getClient(userId);
+
+      const accountsPromise = preloadedRelations?.accounts
+        ? Promise.resolve(preloadedRelations.accounts)
+        : this.getAccounts(userId);
+      const categoriesPromise = preloadedRelations?.categories
+        ? Promise.resolve(preloadedRelations.categories)
+        : this.getCategories(userId);
+      const peoplePromise = preloadedRelations?.people
+        ? Promise.resolve(preloadedRelations.people)
+        : this.getPeople(userId);
+      const merchantsPromise = preloadedRelations?.merchants
+        ? Promise.resolve(preloadedRelations.merchants)
+        : this.getMerchants(userId);
+
+      const [txRes, accounts, categories, people, merchants] = await Promise.all([
+        this.executeRead(() =>
+          client
+            .from("transactions")
+            .select("*")
+            .eq("user_id", userId)
+            .eq("id", id)
+            .maybeSingle()
+        ),
+        accountsPromise,
+        categoriesPromise,
+        peoplePromise,
+        merchantsPromise,
+      ]);
+
+      if (txRes.error) {
+        throw new Error(`Failed to fetch transaction by id: ${(txRes.error as Error).message}`);
+      }
+      if (!txRes.data) return null;
+
+      const tx = mapTransaction(txRes.data);
+      return {
+        ...tx,
+        from_account: tx.from_account_id
+          ? accounts.find((a) => a.id === tx.from_account_id) || null
+          : null,
+        to_account: tx.to_account_id
+          ? accounts.find((a) => a.id === tx.to_account_id) || null
+          : null,
+        category: tx.category_id
+          ? categories.find((c) => c.id === tx.category_id) || null
+          : null,
+        person: tx.person_id
+          ? people.find((p) => p.id === tx.person_id) || null
+          : null,
+        merchant: tx.merchant_id
+          ? merchants.find((m) => m.id === tx.merchant_id) || null
+          : null,
+      };
+    });
   }
 
   async createTransaction(
@@ -950,35 +1183,43 @@ export class SupabaseDataStoreImpl implements IDataStore {
   // SLIPS
   async getSlips(userId: string): Promise<Slip[]> {
     assertUserId(userId);
-    const client = await this.getClient(userId);
-    const { data, error } = await client
-      .from("slips")
-      .select("*")
-      .eq("user_id", userId)
-      .is("deleted_at", null)
-      .order("created_at", { ascending: false });
+    return measurePerf("data.slips", async () => {
+      const client = await this.getClient(userId);
+      const { data, error } = await this.executeRead(() =>
+        client
+          .from("slips")
+          .select("*")
+          .eq("user_id", userId)
+          .is("deleted_at", null)
+          .order("created_at", { ascending: false })
+      );
 
-    if (error) {
-      throw new Error(`Failed to fetch slips: ${error.message}`);
-    }
-    return (data || []).map(mapSlip);
+      if (error) {
+        throw new Error(`Failed to fetch slips: ${(error as Error).message}`);
+      }
+      return (data || []).map(mapSlip);
+    }, (res) => res.length);
   }
 
   async getSlipById(userId: string, id: string): Promise<Slip | null> {
     assertUserId(userId);
-    const client = await this.getClient(userId);
-    const { data, error } = await client
-      .from("slips")
-      .select("*")
-      .eq("user_id", userId)
-      .eq("id", id)
-      .is("deleted_at", null)
-      .maybeSingle();
+    return measurePerf("data.getSlipById", async () => {
+      const client = await this.getClient(userId);
+      const { data, error } = await this.executeRead(() =>
+        client
+          .from("slips")
+          .select("*")
+          .eq("user_id", userId)
+          .eq("id", id)
+          .is("deleted_at", null)
+          .maybeSingle()
+      );
 
-    if (error) {
-      throw new Error(`Failed to fetch slip by id: ${error.message}`);
-    }
-    return data ? mapSlip(data) : null;
+      if (error) {
+        throw new Error(`Failed to fetch slip by id: ${(error as Error).message}`);
+      }
+      return data ? mapSlip(data) : null;
+    });
   }
 
   async getSlipByIdUnscoped(id: string): Promise<Slip | null> {
@@ -1016,19 +1257,23 @@ export class SupabaseDataStoreImpl implements IDataStore {
 
   async getPendingReviewSlips(userId: string): Promise<Slip[]> {
     assertUserId(userId);
-    const client = await this.getClient(userId);
-    const { data, error } = await client
-      .from("slips")
-      .select("*")
-      .eq("user_id", userId)
-      .eq("status", "needs_review")
-      .is("deleted_at", null)
-      .order("created_at", { ascending: false });
+    return measurePerf("data.slips.pendingReview", async () => {
+      const client = await this.getClient(userId);
+      const { data, error } = await this.executeRead(() =>
+        client
+          .from("slips")
+          .select("*")
+          .eq("user_id", userId)
+          .eq("status", "needs_review")
+          .is("deleted_at", null)
+          .order("created_at", { ascending: false })
+      );
 
-    if (error) {
-      throw new Error(`Failed to fetch pending review slips: ${error.message}`);
-    }
-    return (data || []).map(mapSlip);
+      if (error) {
+        throw new Error(`Failed to fetch pending review slips: ${(error as Error).message}`);
+      }
+      return (data || []).map(mapSlip);
+    }, (res) => res.length);
   }
 
   async createSlip(userId: string, data: Partial<Slip>): Promise<Slip> {

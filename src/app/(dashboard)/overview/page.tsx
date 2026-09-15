@@ -33,14 +33,8 @@ import {
 export default async function OverviewPage() {
   const user = await requireUser();
 
-  const [accounts, categories, people, merchants, transactions] =
-    await Promise.all([
-      DataStore.getAccounts(user.id),
-      DataStore.getCategories(user.id),
-      DataStore.getPeople(user.id),
-      DataStore.getMerchants(user.id),
-      DataStore.getTransactions(user.id),
-    ]);
+  const { accounts, categories, people, merchants, transactions } =
+    await DataStore.getTransactionsPageData(user.id);
 
   const totalBalance = calculateTotalActiveBalance(accounts, transactions);
   const accountBalances = calculateAllAccountBalances(accounts, transactions);

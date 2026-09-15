@@ -218,3 +218,53 @@ To complete production configuration in the Supabase Project Dashboard:
    - `NEXT_PUBLIC_SITE_URL` = `https://finn-finance-three.vercel.app`
    - `NEXT_PUBLIC_SUPABASE_URL` = `https://<your-project-id>.supabase.co`
    - `NEXT_PUBLIC_SUPABASE_ANON_KEY` = `<your-supabase-anon-key>`
+
+---
+
+## 9. Auth JWT Clock-Skew Hardening ("JWT issued at future")
+
+### 9.1 Root Cause Analysis
+In high-concurrency or geographically distributed production deployments, Supabase GoTrue issues JWT tokens with an `iat` (issued-at) timestamp based on its server clock. When the user is immediately redirected to the dashboard (e.g. `/today` or post-recovery callback), database queries sent to PostgREST/PostgreSQL can arrive while the database host's clock is slightly behind GoTrue's clock (typically tens to hundreds of milliseconds).
+
+PostgREST rejects the token with:
+```
+JWT issued at future
+```
+Once the database clock catches up after a few hundred milliseconds, the exact same JWT session becomes perfectly valid.
+
+### 9.2 Resilience Architecture (`src/lib/server/jwt-resilience.ts`)
+A centralized resilience layer was designed to handle this transient condition without compromising security:
+
+1. **Strict Error Detection (`isTransientJwtSkewError`)**:
+   - Matches: `"JWT issued at future"`, `"jwt is not yet valid"`, `"token is not valid yet"`, `"issued in the future"`.
+   - **Fail-closed Invariant**: Returns `false` for all other errors (syntax errors, relation missing, foreign key violations, RLS permission denied, network failures).
+
+2. **Bounded Exponential Retries (`withJwtSkewRetry`)**:
+   - Maximum retries: **2 retries** (3 attempts total).
+   - Bounded timing delays: **attempt 1 → wait 300ms**, **attempt 2 → wait 700ms**.
+   - If still failing after 2 retries, fails normally without hanging or looping.
+
+3. **Centralized Query Layer Integration**:
+   - Implemented in `SupabaseDataStoreImpl.executeRead()` wrapping all central read operations (`getAccounts`, `getCategories`, `getPeople`, `getMerchants`, `getTransactions`, `getSlips`, `getPendingReviewSlips`).
+   - Implemented in `getAuthenticatedUser()` in `src/lib/server/auth.ts`.
+   - Does NOT weaken JWT verification.
+   - Does NOT bypass RLS.
+   - Does NOT create local/demo sessions.
+
+4. **Graceful User Recovery on `/today` and `/login`**:
+   - Instead of rendering an unhandled Next.js error crash screen, `/today` detects persistent session failures after all retries and redirects safely to:
+     `/login?error=session_invalid`
+   - The login page renders a user-friendly alert banner in Thai:
+     *"เซสชันการใช้งานไม่ถูกต้องหรือหมดอายุแล้ว กรุณาเข้าสู่ระบบอีกครั้ง"*
+
+### 9.3 Verification Results
+All 5 required verification commands passed cleanly:
+- `npm run typecheck`: **0 errors** (TypeScript compilation clean)
+- `npm run lint`: **0 errors, 0 warnings** (Clean ESLint run)
+- `npm test`: **10 test files passed (117 tests passed, 0 failed)**
+  - Added `tests/auth/jwt-clock-skew.test.ts` (12 tests covering detection, retry limits, bounded delays, non-retry of DB errors, and fail-closed invariants)
+- `npm run build`: **Compiled successfully in optimized production mode**
+- `npx playwright test`: **76 tests passed (100% pass rate)**
+  - Desktop Chrome: 38 passed
+  - iPhone 11 Pro Max (414×896): 38 passed
+

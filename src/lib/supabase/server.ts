@@ -1,5 +1,6 @@
 import { createServerClient, type CookieOptions } from "@supabase/ssr";
 import { cookies } from "next/headers";
+import { cache } from "react";
 
 export function isSupabaseConfigured(): boolean {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
@@ -14,7 +15,7 @@ export function isSupabaseConfigured(): boolean {
   );
 }
 
-export async function createClient() {
+export const createClient = cache(async () => {
   let cookieStore: Awaited<ReturnType<typeof cookies>> | null = null;
   try {
     cookieStore = await cookies();
@@ -52,4 +53,4 @@ export async function createClient() {
       },
     },
   });
-}
+});

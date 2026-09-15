@@ -9,11 +9,8 @@ import { User, Store } from "lucide-react";
 export default async function MerchantsPage() {
   const user = await requireUser();
 
-  const [merchants, transactions, categories] = await Promise.all([
-    DataStore.getMerchants(user.id),
-    DataStore.getTransactions(user.id),
-    DataStore.getCategories(user.id),
-  ]);
+  const { merchants, transactions, categories } =
+    await DataStore.getTransactionsPageData(user.id);
 
   const summaries = calculateAllMerchantSummaries(
     merchants,

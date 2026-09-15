@@ -23,6 +23,7 @@ import {
   SlipIngestionJob,
   SlipCorrection,
 } from "@/types/slip";
+import { PreloadedRelations, TransactionsPageData } from "./data-store-interface";
 import {
   generateIngestToken,
   hashToken,
@@ -395,25 +396,33 @@ export const MemoryDataStore: IDataStore = {
   },
 
   // TRANSACTIONS
-  async getTransactions(userId: string): Promise<TransactionWithRelations[]> {
+  async getTransactions(
+    userId: string,
+    preloadedRelations?: PreloadedRelations
+  ): Promise<TransactionWithRelations[]> {
     assertUserId(userId);
     const userTxs = dbState.transactions.filter((t) => t.user_id === userId);
 
+    const accounts = preloadedRelations?.accounts ?? dbState.accounts;
+    const people = preloadedRelations?.people ?? dbState.people;
+    const merchants = preloadedRelations?.merchants ?? dbState.merchants;
+    const categories = preloadedRelations?.categories ?? dbState.categories;
+
     return userTxs.map((tx) => {
       const fromAcc = tx.from_account_id
-        ? dbState.accounts.find((a) => a.id === tx.from_account_id) || null
+        ? accounts.find((a) => a.id === tx.from_account_id) || null
         : null;
       const toAcc = tx.to_account_id
-        ? dbState.accounts.find((a) => a.id === tx.to_account_id) || null
+        ? accounts.find((a) => a.id === tx.to_account_id) || null
         : null;
       const person = tx.person_id
-        ? dbState.people.find((p) => p.id === tx.person_id) || null
+        ? people.find((p) => p.id === tx.person_id) || null
         : null;
       const merchant = tx.merchant_id
-        ? dbState.merchants.find((m) => m.id === tx.merchant_id) || null
+        ? merchants.find((m) => m.id === tx.merchant_id) || null
         : null;
       const category = tx.category_id
-        ? dbState.categories.find((c) => c.id === tx.category_id) || null
+        ? categories.find((c) => c.id === tx.category_id) || null
         : null;
 
       return {
@@ -427,11 +436,35 @@ export const MemoryDataStore: IDataStore = {
     });
   },
 
+  async getTransactionsPageData(userId: string): Promise<TransactionsPageData> {
+    assertUserId(userId);
+    const [accounts, categories, people, merchants] = await Promise.all([
+      this.getAccounts(userId),
+      this.getCategories(userId),
+      this.getPeople(userId),
+      this.getMerchants(userId),
+    ]);
+    const transactions = await this.getTransactions(userId, {
+      accounts,
+      categories,
+      people,
+      merchants,
+    });
+    return {
+      transactions,
+      accounts,
+      categories,
+      people,
+      merchants,
+    };
+  },
+
   async getTransactionById(
     userId: string,
-    id: string
+    id: string,
+    preloadedRelations?: PreloadedRelations
   ): Promise<TransactionWithRelations | null> {
-    const list = await this.getTransactions(userId);
+    const list = await this.getTransactions(userId, preloadedRelations);
     return list.find((t) => t.id === id) || null;
   },
 

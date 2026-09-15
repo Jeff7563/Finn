@@ -16,15 +16,10 @@ export default async function TransactionsPage({
   searchParams,
 }: TransactionsPageProps) {
   const user = await requireUser();
-  const params = await searchParams;
-
-  const [transactions, accounts, categories, people, merchants] =
+  const [{ transactions, accounts, categories, people, merchants }, params] =
     await Promise.all([
-      DataStore.getTransactions(user.id),
-      DataStore.getAccounts(user.id),
-      DataStore.getCategories(user.id),
-      DataStore.getPeople(user.id),
-      DataStore.getMerchants(user.id),
+      DataStore.getTransactionsPageData(user.id),
+      searchParams,
     ]);
 
   return (

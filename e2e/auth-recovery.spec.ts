@@ -241,4 +241,16 @@ test.describe("Finn Password Recovery & Production Auth Cleanup E2E Suite", () =
     await page.waitForURL("**/login");
     await expect(page.getByRole("heading", { name: "เข้าสู่ระบบ Finn" })).toBeVisible();
   });
+
+  test("13. /login?error=session_invalid renders recoverable session error banner", async ({
+    page,
+  }) => {
+    await page.goto("/login?error=session_invalid");
+
+    await expect(
+      page.getByText(
+        "เซสชันการใช้งานไม่ถูกต้องหรือหมดอายุแล้ว กรุณาเข้าสู่ระบบอีกครั้ง"
+      )
+    ).toBeVisible();
+  });
 });

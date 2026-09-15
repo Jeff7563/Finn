@@ -16,14 +16,19 @@ export default async function TransactionPage({
   const user = await requireUser();
   const { id } = await params;
 
-  const [transaction, accounts, categories, people, merchants] =
-    await Promise.all([
-      DataStore.getTransactionById(user.id, id),
-      DataStore.getAccounts(user.id),
-      DataStore.getCategories(user.id),
-      DataStore.getPeople(user.id),
-      DataStore.getMerchants(user.id),
-    ]);
+  const [accounts, categories, people, merchants] = await Promise.all([
+    DataStore.getAccounts(user.id),
+    DataStore.getCategories(user.id),
+    DataStore.getPeople(user.id),
+    DataStore.getMerchants(user.id),
+  ]);
+
+  const transaction = await DataStore.getTransactionById(user.id, id, {
+    accounts,
+    categories,
+    people,
+    merchants,
+  });
 
   if (!transaction) {
     notFound();

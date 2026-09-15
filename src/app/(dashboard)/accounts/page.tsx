@@ -7,10 +7,8 @@ import { AccountsClient } from "@/components/accounts/AccountsClient";
 export default async function AccountsPage() {
   const user = await requireUser();
 
-  const [accounts, transactions] = await Promise.all([
-    DataStore.getAccounts(user.id),
-    DataStore.getTransactions(user.id),
-  ]);
+  const { accounts, transactions } =
+    await DataStore.getTransactionsPageData(user.id);
 
   const accountBalances = calculateAllAccountBalances(accounts, transactions);
 

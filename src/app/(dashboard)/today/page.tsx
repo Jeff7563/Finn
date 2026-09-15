@@ -1,7 +1,11 @@
 import React from "react";
 import Link from "next/link";
-import { requireUser } from "@/lib/server/auth";
+import { redirect } from "next/navigation";
+import { getAuthenticatedUser } from "@/lib/server/auth";
+import { isTransientJwtSkewError } from "@/lib/server/jwt-resilience";
 import { DataStore } from "@/lib/server/data-store";
+import { Account, TransactionWithRelations } from "@/types/finance";
+import { Slip } from "@/types/slip";
 import { calculateTotalActiveBalance } from "@/lib/finance/balances";
 import { calculateMonthSummary } from "@/lib/finance/summaries";
 import { MoneyAmount } from "@/components/ui/MoneyAmount";
@@ -22,13 +26,29 @@ import {
 } from "lucide-react";
 
 export default async function TodayPage() {
-  const user = await requireUser();
+  const user = await getAuthenticatedUser();
+  if (!user) {
+    redirect("/login?error=session_invalid");
+  }
 
-  const [accounts, allTransactions, pendingSlips] = await Promise.all([
-    DataStore.getAccounts(user.id),
-    DataStore.getTransactions(user.id),
-    DataStore.getPendingReviewSlips(user.id),
-  ]);
+  let accounts: Account[] = [];
+  let allTransactions: TransactionWithRelations[] = [];
+  let pendingSlips: Slip[] = [];
+
+  try {
+    const [pageData, fetchedSlips] = await Promise.all([
+      DataStore.getTransactionsPageData(user.id),
+      DataStore.getPendingReviewSlips(user.id),
+    ]);
+    accounts = pageData.accounts;
+    allTransactions = pageData.transactions;
+    pendingSlips = fetchedSlips;
+  } catch (err: unknown) {
+    if (isTransientJwtSkewError(err) || (err instanceof Error && err.message.includes("Authentication required"))) {
+      redirect("/login?error=session_invalid");
+    }
+    throw err;
+  }
 
   const totalBalance = calculateTotalActiveBalance(accounts, allTransactions);
   const monthSummary = calculateMonthSummary(allTransactions, new Date());

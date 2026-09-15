@@ -22,6 +22,21 @@ import {
   SlipCorrection,
 } from "@/types/slip";
 
+export interface PreloadedRelations {
+  accounts?: Account[];
+  categories?: Category[];
+  people?: Person[];
+  merchants?: Merchant[];
+}
+
+export interface TransactionsPageData {
+  transactions: TransactionWithRelations[];
+  accounts: Account[];
+  categories: Category[];
+  people: Person[];
+  merchants: Merchant[];
+}
+
 export interface IDataStore {
   // Accounts
   getAccounts(userId: string): Promise<Account[]>;
@@ -48,8 +63,9 @@ export interface IDataStore {
   updateMerchant(userId: string, id: string, data: Partial<MerchantFormData>): Promise<Merchant>;
 
   // Transactions
-  getTransactions(userId: string): Promise<TransactionWithRelations[]>;
-  getTransactionById(userId: string, id: string): Promise<TransactionWithRelations | null>;
+  getTransactions(userId: string, preloadedRelations?: PreloadedRelations): Promise<TransactionWithRelations[]>;
+  getTransactionsPageData(userId: string): Promise<TransactionsPageData>;
+  getTransactionById(userId: string, id: string, preloadedRelations?: PreloadedRelations): Promise<TransactionWithRelations | null>;
   createTransaction(userId: string, data: TransactionInput | TransactionFormData): Promise<Transaction>;
   updateTransaction(userId: string, id: string, data: Partial<TransactionFormData>): Promise<Transaction>;
   deleteTransaction(userId: string, id: string): Promise<void>;

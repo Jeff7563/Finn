@@ -1,7 +1,8 @@
 import React from "react";
 import { Sidebar } from "@/components/navigation/Sidebar";
 import { MobileBottomNav } from "@/components/navigation/MobileBottomNav";
-import { requireUser } from "@/lib/server/auth";
+import { getAuthenticatedUser } from "@/lib/server/auth";
+import { redirect } from "next/navigation";
 import Link from "next/link";
 import { Plus } from "lucide-react";
 import { ThemeQuickToggle } from "@/components/settings/ThemeSettingsControl";
@@ -13,7 +14,10 @@ export default async function DashboardLayout({
 }: {
   children: React.ReactNode;
 }) {
-  const user = await requireUser();
+  const user = await getAuthenticatedUser();
+  if (!user) {
+    redirect("/login?error=session_invalid");
+  }
 
   return (
     <div className="min-h-screen bg-bg flex">

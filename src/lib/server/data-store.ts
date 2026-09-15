@@ -21,7 +21,7 @@ import {
   SlipIngestionJob,
   SlipCorrection,
 } from "@/types/slip";
-import { IDataStore } from "./data-store-interface";
+import { IDataStore, PreloadedRelations, TransactionsPageData } from "./data-store-interface";
 import { SupabaseDataStore, SupabaseDataStoreImpl } from "./supabase-data-store";
 import { MemoryDataStore, MemoryDatabaseState } from "./memory-data-store";
 import { isSupabaseConfigured } from "../supabase/server";
@@ -169,15 +169,25 @@ export const DataStore: IDataStore = {
   },
 
   // TRANSACTIONS
-  async getTransactions(userId: string): Promise<TransactionWithRelations[]> {
-    return getActiveStore().getTransactions(userId);
+  async getTransactions(
+    userId: string,
+    preloadedRelations?: PreloadedRelations
+  ): Promise<TransactionWithRelations[]> {
+    return getActiveStore().getTransactions(userId, preloadedRelations);
+  },
+
+  async getTransactionsPageData(
+    userId: string
+  ): Promise<TransactionsPageData> {
+    return getActiveStore().getTransactionsPageData(userId);
   },
 
   async getTransactionById(
     userId: string,
-    id: string
+    id: string,
+    preloadedRelations?: PreloadedRelations
   ): Promise<TransactionWithRelations | null> {
-    return getActiveStore().getTransactionById(userId, id);
+    return getActiveStore().getTransactionById(userId, id, preloadedRelations);
   },
 
   async createTransaction(

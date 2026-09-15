@@ -4,11 +4,12 @@ import React, { Suspense, useActionState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { signInAction } from "@/app/actions/auth";
-import { Lock, Mail, ArrowRight, CheckCircle2 } from "lucide-react";
+import { Lock, Mail, ArrowRight, CheckCircle2, AlertCircle } from "lucide-react";
 
 function LoginForm() {
   const searchParams = useSearchParams();
   const resetSuccess = searchParams.get("reset") === "success";
+  const sessionInvalid = searchParams.get("error") === "session_invalid";
 
   const [state, formAction, isPending] = useActionState(signInAction, {
     success: false,
@@ -39,6 +40,17 @@ function LoginForm() {
           >
             <CheckCircle2 className="w-4 h-4 shrink-0" />
             <span>เปลี่ยนรหัสผ่านเรียบร้อยแล้ว กรุณาเข้าสู่ระบบด้วยรหัสผ่านใหม่</span>
+          </div>
+        )}
+
+        {/* Invalid / Expired Session Banner */}
+        {sessionInvalid && (
+          <div
+            role="alert"
+            className="p-3 text-xs font-medium text-expense bg-expense-soft border border-expense/30 rounded-xl flex items-center gap-2"
+          >
+            <AlertCircle className="w-4 h-4 shrink-0" />
+            <span>เซสชันการใช้งานไม่ถูกต้องหรือหมดอายุแล้ว กรุณาเข้าสู่ระบบอีกครั้ง</span>
           </div>
         )}
 

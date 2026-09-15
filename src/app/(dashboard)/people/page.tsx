@@ -9,10 +9,8 @@ import { User, Store } from "lucide-react";
 export default async function PeoplePage() {
   const user = await requireUser();
 
-  const [people, transactions] = await Promise.all([
-    DataStore.getPeople(user.id),
-    DataStore.getTransactions(user.id),
-  ]);
+  const { people, transactions } =
+    await DataStore.getTransactionsPageData(user.id);
 
   const summaries = calculateAllPeopleSummaries(people, transactions);
 
