@@ -56,10 +56,14 @@ export function formatSignedMoney(
 /**
  * Formats a date string into readable English date (preserved for backwards compatibility).
  */
-export function formatDate(dateString: string): string {
+export function formatDate(
+  dateString: string,
+  timeZone: string = "Asia/Bangkok"
+): string {
   const date = new Date(dateString);
   if (isNaN(date.getTime())) return dateString;
   return new Intl.DateTimeFormat("en-GB", {
+    timeZone,
     day: "numeric",
     month: "short",
     year: "numeric",
@@ -69,10 +73,14 @@ export function formatDate(dateString: string): string {
 /**
  * Formats a date string with time (preserved for backwards compatibility).
  */
-export function formatDateTime(dateString: string): string {
+export function formatDateTime(
+  dateString: string,
+  timeZone: string = "Asia/Bangkok"
+): string {
   const date = new Date(dateString);
   if (isNaN(date.getTime())) return dateString;
   return new Intl.DateTimeFormat("en-GB", {
+    timeZone,
     day: "numeric",
     month: "short",
     year: "numeric",
@@ -117,53 +125,91 @@ const THAI_MONTHS_FULL = [
  */
 export function formatDateThai(
   dateInput: string | Date,
-  fullMonth: boolean = false
+  fullMonth: boolean = false,
+  timeZone: string = "Asia/Bangkok"
 ): string {
   const date = typeof dateInput === "string" ? new Date(dateInput) : dateInput;
   if (isNaN(date.getTime())) return String(dateInput);
 
-  const day = date.getDate();
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    year: "numeric",
+    month: "numeric",
+    day: "numeric",
+  }).formatToParts(date);
+  const day = parseInt(parts.find((p) => p.type === "day")?.value || "0", 10);
+  const monthIdx =
+    parseInt(parts.find((p) => p.type === "month")?.value || "0", 10) - 1;
+  const year =
+    parseInt(parts.find((p) => p.type === "year")?.value || "0", 10) + 543;
+
   const month = fullMonth
-    ? THAI_MONTHS_FULL[date.getMonth()]
-    : THAI_MONTHS_SHORT[date.getMonth()];
-  const year = date.getFullYear() + 543;
+    ? THAI_MONTHS_FULL[monthIdx]
+    : THAI_MONTHS_SHORT[monthIdx];
 
   return `${day} ${month} ${year}`;
 }
 
 /**
- * Formats time into Thai format: "12:42"
+ * Formats time into Thai format: "12:42" (Asia/Bangkok by default)
  */
-export function formatTime(dateInput: string | Date): string {
+export function formatTime(
+  dateInput: string | Date,
+  timeZone: string = "Asia/Bangkok"
+): string {
   const date = typeof dateInput === "string" ? new Date(dateInput) : dateInput;
   if (isNaN(date.getTime())) return "";
-  const hours = String(date.getHours()).padStart(2, "0");
-  const minutes = String(date.getMinutes()).padStart(2, "0");
-  return `${hours}:${minutes}`;
+
+  return new Intl.DateTimeFormat("en-GB", {
+    timeZone,
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(date);
 }
 
 /**
  * Formats relative date or full date for transaction ledger:
- * "วันนี้ 12:42", "เมื่อวาน 18:15", "14 ก.ย. 12:42"
+ * "วันนี้ 12:42", "เมื่อวาน 18:15", "14 ก.ย. 12:42" (Asia/Bangkok by default)
  */
-export function formatDateTimeThai(dateInput: string | Date): string {
+export function formatDateTimeThai(
+  dateInput: string | Date,
+  timeZone: string = "Asia/Bangkok"
+): string {
   const date = typeof dateInput === "string" ? new Date(dateInput) : dateInput;
   if (isNaN(date.getTime())) return String(dateInput);
 
   const now = new Date();
-  const timeStr = formatTime(date);
+  const timeStr = formatTime(date, timeZone);
+
+  const getLocalDateParts = (d: Date) => {
+    const parts = new Intl.DateTimeFormat("en-US", {
+      timeZone,
+      year: "numeric",
+      month: "numeric",
+      day: "numeric",
+    }).formatToParts(d);
+    const day = parseInt(parts.find((p) => p.type === "day")?.value || "0", 10);
+    const month =
+      parseInt(parts.find((p) => p.type === "month")?.value || "0", 10) - 1;
+    const year = parseInt(parts.find((p) => p.type === "year")?.value || "0", 10);
+    return { day, month, year };
+  };
+
+  const dParts = getLocalDateParts(date);
+  const nowParts = getLocalDateParts(now);
 
   const isToday =
-    date.getDate() === now.getDate() &&
-    date.getMonth() === now.getMonth() &&
-    date.getFullYear() === now.getFullYear();
+    dParts.day === nowParts.day &&
+    dParts.month === nowParts.month &&
+    dParts.year === nowParts.year;
 
-  const yesterday = new Date(now);
-  yesterday.setDate(now.getDate() - 1);
-  const isYesterday =
-    date.getDate() === yesterday.getDate() &&
-    date.getMonth() === yesterday.getMonth() &&
-    date.getFullYear() === yesterday.getFullYear();
+  const nowDayEpoch = Date.UTC(nowParts.year, nowParts.month, nowParts.day);
+  const dDayEpoch = Date.UTC(dParts.year, dParts.month, dParts.day);
+  const diffDays = Math.round(
+    (nowDayEpoch - dDayEpoch) / (1000 * 60 * 60 * 24)
+  );
+  const isYesterday = diffDays === 1;
 
   if (isToday) {
     return `วันนี้ ${timeStr}`;
@@ -172,48 +218,97 @@ export function formatDateTimeThai(dateInput: string | Date): string {
     return `เมื่อวาน ${timeStr}`;
   }
 
-  return `${date.getDate()} ${THAI_MONTHS_SHORT[date.getMonth()]} ${timeStr}`;
+  return `${dParts.day} ${THAI_MONTHS_SHORT[dParts.month]} ${timeStr}`;
 }
 
 /**
  * Groups date heading: "วันนี้ · 14 ก.ย.", "เมื่อวาน · 13 ก.ย.", "10 ก.ย. 2569"
  */
-export function formatDayHeadingThai(dateInput: string | Date): string {
+export function formatDayHeadingThai(
+  dateInput: string | Date,
+  timeZone: string = "Asia/Bangkok"
+): string {
   const date = typeof dateInput === "string" ? new Date(dateInput) : dateInput;
   if (isNaN(date.getTime())) return String(dateInput);
 
   const now = new Date();
-  const day = date.getDate();
-  const monthShort = THAI_MONTHS_SHORT[date.getMonth()];
-  const yearBE = date.getFullYear() + 543;
+  const getLocalDateParts = (d: Date) => {
+    const parts = new Intl.DateTimeFormat("en-US", {
+      timeZone,
+      year: "numeric",
+      month: "numeric",
+      day: "numeric",
+    }).formatToParts(d);
+    const day = parseInt(parts.find((p) => p.type === "day")?.value || "0", 10);
+    const month =
+      parseInt(parts.find((p) => p.type === "month")?.value || "0", 10) - 1;
+    const year = parseInt(parts.find((p) => p.type === "year")?.value || "0", 10);
+    return { day, month, year };
+  };
+
+  const dParts = getLocalDateParts(date);
+  const nowParts = getLocalDateParts(now);
 
   const isToday =
-    date.getDate() === now.getDate() &&
-    date.getMonth() === now.getMonth() &&
-    date.getFullYear() === now.getFullYear();
+    dParts.day === nowParts.day &&
+    dParts.month === nowParts.month &&
+    dParts.year === nowParts.year;
 
-  const yesterday = new Date(now);
-  yesterday.setDate(now.getDate() - 1);
-  const isYesterday =
-    date.getDate() === yesterday.getDate() &&
-    date.getMonth() === yesterday.getMonth() &&
-    date.getFullYear() === yesterday.getFullYear();
+  const nowDayEpoch = Date.UTC(nowParts.year, nowParts.month, nowParts.day);
+  const dDayEpoch = Date.UTC(dParts.year, dParts.month, dParts.day);
+  const diffDays = Math.round(
+    (nowDayEpoch - dDayEpoch) / (1000 * 60 * 60 * 24)
+  );
+  const isYesterday = diffDays === 1;
+
+  const monthShort = THAI_MONTHS_SHORT[dParts.month];
+  const yearBE = dParts.year + 543;
 
   if (isToday) {
-    return `วันนี้ · ${day} ${monthShort}`;
+    return `วันนี้ · ${dParts.day} ${monthShort}`;
   }
   if (isYesterday) {
-    return `เมื่อวาน · ${day} ${monthShort}`;
+    return `เมื่อวาน · ${dParts.day} ${monthShort}`;
   }
 
-  return `${day} ${monthShort} ${yearBE}`;
+  return `${dParts.day} ${monthShort} ${yearBE}`;
 }
 
 /**
- * Thai greeting based on current hour
+ * Formats a date into `YYYY-MM-DDTHH:mm` format suitable for `<input type="datetime-local">` in Asia/Bangkok local time.
  */
-export function getGreetingThai(): string {
-  const hour = new Date().getHours();
+export function formatDateTimeLocal(
+  dateInput: string | Date,
+  timeZone: string = "Asia/Bangkok"
+): string {
+  const date = typeof dateInput === "string" ? new Date(dateInput) : dateInput;
+  if (isNaN(date.getTime())) return "";
+
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).formatToParts(date);
+
+  const get = (type: string) =>
+    parts.find((p) => p.type === type)?.value || "00";
+  return `${get("year")}-${get("month")}-${get("day")}T${get("hour")}:${get("minute")}`;
+}
+
+/**
+ * Thai greeting based on current hour in Asia/Bangkok
+ */
+export function getGreetingThai(timeZone: string = "Asia/Bangkok"): string {
+  const hourStr = new Intl.DateTimeFormat("en-GB", {
+    timeZone,
+    hour: "numeric",
+    hour12: false,
+  }).format(new Date());
+  const hour = parseInt(hourStr, 10);
   if (hour >= 5 && hour < 12) {
     return "สวัสดีตอนเช้า";
   }

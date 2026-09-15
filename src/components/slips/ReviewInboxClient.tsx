@@ -20,7 +20,8 @@ import {
 } from "@/app/actions/slip-review";
 import { MoneyAmount } from "@/components/ui/MoneyAmount";
 import { EmptyState } from "@/components/ui/EmptyState";
-import { formatDateTimeThai } from "@/lib/finance/formatters";
+import { formatDateTimeThai, formatDateTimeLocal } from "@/lib/finance/formatters";
+import { parseThaiSlipDate } from "@/lib/slip/ocr/thai-slip-normalizer";
 import { matchOwnedAccount } from "@/lib/slip/account-match";
 import {
   Check,
@@ -193,8 +194,8 @@ export function ReviewInboxClient({
       type: isSlipIncoming ? "income" : "expense",
       amount: ext?.amount || 0,
       transaction_date: ext?.transactionDate
-        ? new Date(ext.transactionDate).toISOString().slice(0, 16)
-        : new Date().toISOString().slice(0, 16),
+        ? formatDateTimeLocal(ext.transactionDate)
+        : formatDateTimeLocal(new Date()),
       from_account_id: (isSlipIncoming ? rMatch.accountId : sMatch.accountId) || defaultAcc,
       to_account_id: "",
       category_id: "",
@@ -218,7 +219,9 @@ export function ReviewInboxClient({
         type: editFormData.type as "income" | "expense" | "transfer",
         amount: Number(editFormData.amount),
         currency: "THB",
-        transaction_date: new Date(editFormData.transaction_date).toISOString(),
+        transaction_date:
+          parseThaiSlipDate(editFormData.transaction_date) ||
+          new Date(editFormData.transaction_date).toISOString(),
         description: editFormData.description || null,
         note: editFormData.note || null,
         from_account_id: editFormData.from_account_id || null,

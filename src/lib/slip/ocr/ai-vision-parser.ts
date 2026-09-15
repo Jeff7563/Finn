@@ -19,8 +19,13 @@ Analyze the provided bank slip image carefully and extract:
    - Do NOT extract remaining balance ("ยอดเงินคงเหลือ") or account number digits.
    - If not clearly readable, return null.
 2. "currency": Always "THB".
-3. "rawDate": The exact date/time string visible on the slip (e.g. "15 ก.ย. 2569 09:25", "15 Sep 2026 09:25:00", "15/09/2569 09:25").
-4. "transactionDate": Normalized ISO 8601 string if identifiable. Note: Thai slips frequently use Buddhist Era years (พ.ศ. 2567 = 2024, 2568 = 2025, 2569 = 2026).
+3. "rawDate": The exact date/time string visible on the slip (e.g. "15 ก.ย. 2569 09:25", "15 Sep 2026 09:25:00", "15/09/2569 09:25"). CRITICAL:
+   - Must exactly preserve the visible slip date/time text without modification or omission.
+4. "transactionDate": Normalized ISO 8601 string if identifiable. CRITICAL TIMEZONE RULES:
+   - Thai bank slips display local time in Asia/Bangkok (UTC+7).
+   - If transactionDate is returned, it MUST include the "+07:00" timezone offset for Thai local slip times (e.g. "2026-09-15T09:25:00+07:00").
+   - NEVER append "Z" to a visible Thai local slip time unless the source explicitly represents UTC.
+   - Note: Thai slips frequently use Buddhist Era years (พ.ศ. 2567 = 2024, 2568 = 2025, 2569 = 2026).
 5. "sender":
    - "name": Full name of sender if visible (e.g. "นาย สมชาย ใจดี"), or null.
    - "bank": Bank name of sender (e.g. "KBANK", "SCB", "กสิกรไทย", "MAKE"), or null.
@@ -259,10 +264,11 @@ export class AiVisionSlipParser implements VisionSlipParser {
     // 1. Amount Normalization
     const cleanAmount = parseThaiSlipAmount(raw.amount);
 
-    // 2. Date Normalization (Buddhist Era BE to CE + Thai month strings)
+    // 2. Date Normalization: Prefer raw visible date/time over AI-normalized transactionDate.
+    // Thai bank slip clock times are authoritative in Asia/Bangkok local time.
     const cleanDate =
-      parseThaiSlipDate(raw.transactionDate) ||
       parseThaiSlipDate(raw.rawDate) ||
+      parseThaiSlipDate(raw.transactionDate) ||
       undefined;
 
     // 3. Bank & Account Normalization

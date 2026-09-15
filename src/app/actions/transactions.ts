@@ -4,6 +4,7 @@ import { revalidatePath } from "next/cache";
 import { requireUser } from "@/lib/server/auth";
 import { DataStore } from "@/lib/server/data-store";
 import { transactionSchema } from "@/lib/validation/schemas";
+import { parseThaiSlipDate } from "@/lib/slip/ocr/thai-slip-normalizer";
 import { ActionResult } from "./auth";
 
 export async function createTransactionAction(
@@ -14,13 +15,16 @@ export async function createTransactionAction(
     const user = await requireUser();
 
     const rawType = formData.get("type") as string;
+    const rawDateInput = formData.get("transaction_date") as string;
+    const normalizedDate =
+      parseThaiSlipDate(rawDateInput) ||
+      (rawDateInput ? new Date(rawDateInput).toISOString() : new Date().toISOString());
+
     const rawData = {
       type: rawType,
       amount: Number(formData.get("amount")),
       currency: (formData.get("currency") as string) || "THB",
-      transaction_date:
-        (formData.get("transaction_date") as string) ||
-        new Date().toISOString(),
+      transaction_date: normalizedDate,
       description: (formData.get("description") as string) || null,
       note: (formData.get("note") as string) || null,
       from_account_id: (formData.get("from_account_id") as string) || null,
@@ -68,11 +72,16 @@ export async function updateTransactionAction(
   try {
     const user = await requireUser();
 
+    const rawDateInput = formData.get("transaction_date") as string;
+    const normalizedDate =
+      parseThaiSlipDate(rawDateInput) ||
+      (rawDateInput ? new Date(rawDateInput).toISOString() : new Date().toISOString());
+
     const rawData = {
       type: formData.get("type") as string,
       amount: Number(formData.get("amount")),
       currency: (formData.get("currency") as string) || "THB",
-      transaction_date: formData.get("transaction_date") as string,
+      transaction_date: normalizedDate,
       description: (formData.get("description") as string) || null,
       note: (formData.get("note") as string) || null,
       from_account_id: (formData.get("from_account_id") as string) || null,

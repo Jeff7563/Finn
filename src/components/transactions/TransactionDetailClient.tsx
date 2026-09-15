@@ -17,7 +17,7 @@ import {
 } from "@/app/actions/transactions";
 import { MoneyAmount } from "@/components/ui/MoneyAmount";
 import { TransactionTypeBadge } from "@/components/ui/TransactionTypeBadge";
-import { formatDateTimeThai } from "@/lib/finance/formatters";
+import { formatDateTimeThai, formatDateTimeLocal } from "@/lib/finance/formatters";
 import {
   Trash2,
   Edit2,
@@ -494,7 +494,7 @@ export function TransactionDetailClient({
               <input
                 type="datetime-local"
                 name="transaction_date"
-                defaultValue={transaction.transaction_date.slice(0, 16)}
+                defaultValue={formatDateTimeLocal(transaction.transaction_date)}
                 required
                 className="w-full p-2.5 text-sm bg-surface border border-border text-text-primary rounded-xl focus:ring-1 focus:ring-primary"
               />

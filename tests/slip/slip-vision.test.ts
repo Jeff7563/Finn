@@ -11,6 +11,7 @@ import { parseSlipQrPayload } from "@/lib/slip/qr/parser";
 import { AiVisionSlipParser } from "@/lib/slip/ocr/ai-vision-parser";
 import { SlipProcessor } from "@/lib/slip/processor";
 import { DataStore } from "@/lib/server/data-store";
+import { formatTime, formatDateTimeThai } from "@/lib/finance/formatters";
 
 describe("Thai Bank Slip Vision & OCR Extraction", () => {
   // 1. Thai Amount Normalization
@@ -420,6 +421,180 @@ describe("Thai Bank Slip Vision & OCR Extraction", () => {
       expect(isValid(validAmount)).toBe(true);
       expect(isValid(zeroAmount)).toBe(false);
       expect(isValid(undefinedAmount)).toBe(false);
+    });
+  });
+
+  // 9. Thai Slip Transaction Timezone (+7 Hour Bug Regression Tests)
+  describe("Thai Slip Transaction Timezone (+7 Hour Bug Regression Tests)", () => {
+    // Regression Test Case 1: rawDate: "15 ก.ย. 2569 09:25" => Bangkok display = 09:25
+    it("interprets rawDate '15 ก.ย. 2569 09:25' as Bangkok local time (09:25) stored as UTC 02:25:00.000Z", () => {
+      const canonicalIso = parseThaiSlipDate("15 ก.ย. 2569 09:25");
+      expect(canonicalIso).toBe("2026-09-15T02:25:00.000Z");
+
+      // Verify formatting in Asia/Bangkok yields 09:25
+      const bangkokTime = formatTime(canonicalIso!);
+      expect(bangkokTime).toBe("09:25");
+      expect(formatDateTimeThai(canonicalIso!)).toContain("09:25");
+    });
+
+    // Regression Test Case 2: rawDate wins over AI-normalized transactionDate ending in 'Z'
+    // rawDate: "15 ก.ย. 2569 09:25"
+    // transactionDate: "2026-09-15T09:25:00Z"
+    // => rawDate wins => Bangkok display = 09:25, NOT 16:25
+    it("prioritizes rawDate over transactionDate with 'Z': rawDate wins, Bangkok display = 09:25, NOT 16:25", async () => {
+      process.env.GEMINI_API_KEY = "mock-gemini-key";
+
+      const mockResponse = {
+        candidates: [
+          {
+            content: {
+              parts: [
+                {
+                  text: JSON.stringify({
+                    amount: 18.0,
+                    currency: "THB",
+                    rawDate: "15 ก.ย. 2569 09:25",
+                    transactionDate: "2026-09-15T09:25:00Z", // Model incorrectly appended Z to visible local time
+                    sender: { bank: "KBANK", name: "สมชาย" },
+                    receiver: { bank: "SCB", name: "ร้านค้า" },
+                  }),
+                },
+              ],
+            },
+          },
+        ],
+      };
+
+      vi.spyOn(globalThis, "fetch").mockResolvedValueOnce({
+        ok: true,
+        json: async () => mockResponse,
+      } as Response);
+
+      const parser = new AiVisionSlipParser();
+      const result = await parser.parse({
+        imageBuffer: Buffer.from("fake-buffer"),
+        mimeType: "image/jpeg",
+      });
+
+      // rawDate wins! It should resolve to 2026-09-15T02:25:00.000Z, NOT 2026-09-15T09:25:00.000Z
+      expect(result.transactionDate).toBe("2026-09-15T02:25:00.000Z");
+      expect(result.transactionDate).not.toBe("2026-09-15T09:25:00.000Z");
+
+      // Formatted in Asia/Bangkok MUST display 09:25, NOT 16:25
+      const displayTime = formatTime(result.transactionDate!);
+      expect(displayTime).toBe("09:25");
+      expect(displayTime).not.toBe("16:25");
+      expect(formatDateTimeThai(result.transactionDate!)).toContain("09:25");
+      expect(formatDateTimeThai(result.transactionDate!)).not.toContain("16:25");
+    });
+
+    // Regression Test Case 3: transactionDate: "2026-09-15T09:25:00+07:00" => Bangkok display = 09:25
+    it("handles transactionDate with '+07:00' correctly: Bangkok display = 09:25", async () => {
+      process.env.GEMINI_API_KEY = "mock-gemini-key";
+
+      const mockResponse = {
+        candidates: [
+          {
+            content: {
+              parts: [
+                {
+                  text: JSON.stringify({
+                    amount: 18.0,
+                    currency: "THB",
+                    transactionDate: "2026-09-15T09:25:00+07:00", // Model provided valid Bangkok offset
+                    sender: { bank: "KBANK" },
+                  }),
+                },
+              ],
+            },
+          },
+        ],
+      };
+
+      vi.spyOn(globalThis, "fetch").mockResolvedValueOnce({
+        ok: true,
+        json: async () => mockResponse,
+      } as Response);
+
+      const parser = new AiVisionSlipParser();
+      const result = await parser.parse({
+        imageBuffer: Buffer.from("fake-buffer"),
+        mimeType: "image/jpeg",
+      });
+
+      expect(result.transactionDate).toBe("2026-09-15T02:25:00.000Z");
+      const displayTime = formatTime(result.transactionDate!);
+      expect(displayTime).toBe("09:25");
+      expect(formatDateTimeThai(result.transactionDate!)).toContain("09:25");
+    });
+
+    // Regression Test Case 4: Reprocessing an existing slip updates transactionDate correctly
+    it("reprocessing an existing slip updates transactionDate to the corrected Bangkok time", async () => {
+      const userId = "reprocess-tz-user";
+
+      // 1. Existing slip stored with the old +7 hour buggy UTC timestamp (16:25 in Bangkok)
+      const slip = await DataStore.createSlip(userId, {
+        storage_path: "reprocess-tz/slip.jpg",
+        file_hash_sha256: "fake-hash-tz-reprocess",
+        mime_type: "image/jpeg",
+        file_size: 100,
+        source: "ios_shortcut",
+        status: "needs_review",
+        parser_version: "v1-buggy",
+        extracted_json: {
+          amount: 18.0,
+          currency: "THB",
+          transactionDate: "2026-09-15T09:25:00.000Z", // Old buggy timestamp displayed as 16:25!
+          fieldConfidence: { amount: 0.99, transactionDate: 0.99 },
+        },
+      });
+
+      // Verify the old bug: 2026-09-15T09:25:00.000Z in Bangkok displays 16:25
+      const oldBangkokDisplay = formatTime(slip.extracted_json!.transactionDate!);
+      expect(oldBangkokDisplay).toBe("16:25");
+
+      // 2. Updated Vision Parser fixes extraction using rawDate authoritative logic
+      const mockVisionParser = {
+        parse: vi.fn().mockResolvedValue({
+          amount: 18.0,
+          currency: "THB",
+          rawDate: "15 ก.ย. 2569 09:25",
+          transactionDate: "2026-09-15T02:25:00.000Z", // Corrected UTC instant
+          sender: { bank: "KBANK", name: "นาย สมชาย" },
+          receiver: { bank: "SCB", name: "ร้าน ป้าพร" },
+          reference: "REF-TZ-FIXED",
+          fieldConfidence: { amount: 0.99, transactionDate: 0.99 },
+        }),
+      };
+
+      const processor = new SlipProcessor({
+        visionParser: mockVisionParser as any,
+      });
+
+      const fakeBuffer = Buffer.alloc(100);
+      fakeBuffer[0] = 0xff;
+      fakeBuffer[1] = 0xd8;
+      fakeBuffer[2] = 0xff;
+
+      // 3. Reprocess the slip
+      const result = await processor.reprocessSlip({
+        userId,
+        slipId: slip.id,
+        buffer: fakeBuffer,
+      });
+
+      expect(result.status).toBe("needs_review");
+
+      // 4. Verify updated slip in DataStore has the corrected transactionDate
+      const updatedSlip = await DataStore.getSlipById(userId, slip.id);
+      expect(updatedSlip).not.toBeNull();
+      expect(updatedSlip?.extracted_json?.transactionDate).toBe("2026-09-15T02:25:00.000Z");
+
+      // 5. Verify the UI formatting now displays 09:25 instead of 16:25
+      const newBangkokDisplay = formatTime(updatedSlip!.extracted_json!.transactionDate!);
+      expect(newBangkokDisplay).toBe("09:25");
+      expect(newBangkokDisplay).not.toBe("16:25");
+      expect(formatDateTimeThai(updatedSlip!.extracted_json!.transactionDate!)).toContain("09:25");
     });
   });
 });
