@@ -21,7 +21,13 @@ import {
   SlipIngestionJob,
   SlipCorrection,
 } from "@/types/slip";
-import { IDataStore, PreloadedRelations, TransactionsPageData } from "./data-store-interface";
+import {
+  IDataStore,
+  PreloadedRelations,
+  TransactionsPageData,
+  ConfirmSlipTransactionInput,
+  ConfirmSlipTransactionResult,
+} from "./data-store-interface";
 import { SupabaseDataStore, SupabaseDataStoreImpl } from "./supabase-data-store";
 import { MemoryDataStore, MemoryDatabaseState } from "./memory-data-store";
 import { isSupabaseConfigured } from "../supabase/server";
@@ -293,6 +299,13 @@ export const DataStore: IDataStore = {
     return getActiveStore().createSlipCorrection(userId, data);
   },
 
+  async getSlipCorrections(
+    userId: string,
+    slipId?: string
+  ): Promise<SlipCorrection[]> {
+    return getActiveStore().getSlipCorrections(userId, slipId);
+  },
+
   // PRIVATE STORAGE
   async saveSlipFile(storagePath: string, buffer: Buffer): Promise<void> {
     return getActiveStore().saveSlipFile(storagePath, buffer);
@@ -312,6 +325,14 @@ export const DataStore: IDataStore = {
 
   verifySlipPreviewSignature(slipId: string, exp: number, sig: string): boolean {
     return getActiveStore().verifySlipPreviewSignature(slipId, exp, sig);
+  },
+
+  // Atomic Slip Confirmation
+  async confirmSlipTransaction(
+    userId: string,
+    input: ConfirmSlipTransactionInput
+  ): Promise<ConfirmSlipTransactionResult> {
+    return getActiveStore().confirmSlipTransaction(userId, input);
   },
 
   // Reset database for tests

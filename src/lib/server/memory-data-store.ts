@@ -23,7 +23,12 @@ import {
   SlipIngestionJob,
   SlipCorrection,
 } from "@/types/slip";
-import { PreloadedRelations, TransactionsPageData } from "./data-store-interface";
+import {
+  PreloadedRelations,
+  TransactionsPageData,
+  ConfirmSlipTransactionInput,
+  ConfirmSlipTransactionResult,
+} from "./data-store-interface";
 import {
   generateIngestToken,
   hashToken,
@@ -473,6 +478,16 @@ export const MemoryDataStore: IDataStore = {
     data: TransactionInput | TransactionFormData
   ): Promise<Transaction> {
     assertUserId(userId);
+
+    // Idempotency: if transaction for this source_slip_id was already created, return it
+    if (data.source_slip_id) {
+      const existing = dbState.transactions.find(
+        (t) => t.source_slip_id === data.source_slip_id && t.user_id === userId
+      );
+      if (existing) {
+        return existing;
+      }
+    }
 
     // Validate foreign references belong to authenticated user
     if (data.from_account_id) {
@@ -934,6 +949,16 @@ export const MemoryDataStore: IDataStore = {
     return correction;
   },
 
+  async getSlipCorrections(
+    userId: string,
+    slipId?: string
+  ): Promise<SlipCorrection[]> {
+    assertUserId(userId);
+    return dbState.slip_corrections.filter(
+      (c) => c.user_id === userId && (!slipId || c.slip_id === slipId)
+    );
+  },
+
   // PRIVATE STORAGE (In-memory buffer)
   async saveSlipFile(storagePath: string, buffer: Buffer): Promise<void> {
     memorySlipFiles.set(storagePath, buffer);
@@ -983,6 +1008,79 @@ export const MemoryDataStore: IDataStore = {
       return crypto.timingSafeEqual(expectedBuf, actualBuf);
     } catch {
       return false;
+    }
+  },
+
+  // Atomic Slip Confirmation
+  async confirmSlipTransaction(
+    userId: string,
+    input: ConfirmSlipTransactionInput
+  ): Promise<ConfirmSlipTransactionResult> {
+    assertUserId(userId);
+    const slip = await this.getSlipById(userId, input.slipId);
+    if (!slip) {
+      throw new Error("Slip not found or access denied");
+    }
+
+    // 1. Idempotency Tier 1: Check if slip already has linked_transaction_id
+    if (slip.linked_transaction_id) {
+      const existingTx = await this.getTransactionById(userId, slip.linked_transaction_id);
+      if (existingTx) {
+        return { transaction: existingTx, alreadyConfirmed: true };
+      }
+    }
+
+    // 2. Idempotency Tier 2: Check if transaction already exists for source_slip_id
+    const existingBySlip = dbState.transactions.find(
+      (t) => t.source_slip_id === input.slipId && t.user_id === userId
+    );
+    if (existingBySlip) {
+      slip.status = "created";
+      slip.linked_transaction_id = existingBySlip.id;
+      slip.processed_at = slip.processed_at || new Date().toISOString();
+      return { transaction: existingBySlip, alreadyConfirmed: true };
+    }
+
+    // 3. Validate status
+    if (slip.status !== "needs_review" && slip.status !== "created") {
+      throw new Error(`Slip status is ${slip.status}; only slips in needs_review can be confirmed`);
+    }
+
+    // 4. Create transaction
+    const newTx = await this.createTransaction(userId, {
+      type: input.type,
+      amount: input.amount,
+      currency: input.currency || "THB",
+      transaction_date: input.transaction_date,
+      description: input.description || null,
+      note: input.note || null,
+      from_account_id: input.from_account_id || null,
+      to_account_id: input.to_account_id || null,
+      category_id: input.category_id || null,
+      merchant_id: input.merchant_id || null,
+      person_id: input.person_id || null,
+      source: "slip",
+      source_slip_id: input.slipId,
+      reference_number: input.reference_number || null,
+      confidence: input.confidence !== undefined ? input.confidence : 1.0,
+      review_status: input.review_status || "confirmed",
+    });
+
+    // 5. Update slip atomically (with rollback safeguard)
+    try {
+      await this.updateSlip(userId, input.slipId, {
+        status: "created",
+        linked_transaction_id: newTx.id,
+        processed_at: new Date().toISOString(),
+      });
+      return { transaction: newTx, alreadyConfirmed: false };
+    } catch (err) {
+      // Rollback inserted transaction so no orphaned transaction exists
+      const txIdx = dbState.transactions.findIndex((t) => t.id === newTx.id);
+      if (txIdx !== -1) {
+        dbState.transactions.splice(txIdx, 1);
+      }
+      throw err;
     }
   },
 

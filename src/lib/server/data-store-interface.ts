@@ -95,6 +95,7 @@ export interface IDataStore {
 
   // Slip Corrections
   createSlipCorrection(userId: string, data: Partial<SlipCorrection>): Promise<SlipCorrection>;
+  getSlipCorrections(userId: string, slipId?: string): Promise<SlipCorrection[]>;
 
   // Storage
   saveSlipFile(storagePath: string, buffer: Buffer): Promise<void>;
@@ -102,6 +103,35 @@ export interface IDataStore {
   createSignedSlipUrl(userId: string, slipId: string, expiresInSeconds?: number): Promise<string>;
   verifySlipPreviewSignature(slipId: string, exp: number, sig: string): boolean;
 
+  // Atomic Slip Confirmation
+  confirmSlipTransaction(
+    userId: string,
+    input: ConfirmSlipTransactionInput
+  ): Promise<ConfirmSlipTransactionResult>;
+
   // Test reset helper
   reset(initialState?: unknown): void;
+}
+
+export interface ConfirmSlipTransactionInput {
+  slipId: string;
+  type: import("@/types/finance").TransactionType;
+  amount: number;
+  currency?: string;
+  transaction_date: string;
+  description?: string | null;
+  note?: string | null;
+  from_account_id?: string | null;
+  to_account_id?: string | null;
+  category_id?: string | null;
+  merchant_id?: string | null;
+  person_id?: string | null;
+  reference_number?: string | null;
+  confidence?: number;
+  review_status?: import("@/types/finance").ReviewStatus;
+}
+
+export interface ConfirmSlipTransactionResult {
+  transaction: Transaction;
+  alreadyConfirmed: boolean;
 }

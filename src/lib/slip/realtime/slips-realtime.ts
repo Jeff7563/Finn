@@ -1,3 +1,5 @@
+"use client";
+
 import { useEffect, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
@@ -135,4 +137,108 @@ export function useSlipsRealtime(options: UseSlipsRealtimeOptions = {}) {
   }, [userId, debounceMs, onRefresh, router, supabaseClient]);
 
   return { justUpdated };
+}
+
+export interface FinancialRealtimeOptions {
+  supabase?: SlipsRealtimeClient | SupabaseClient;
+  userId?: string;
+  onRefresh: () => void;
+  debounceMs?: number;
+}
+
+/**
+ * Subscribes to financial changes across slips, transactions, and accounts.
+ * Debounces rapid updates to trigger a smooth UI refresh.
+ */
+export function subscribeToFinancialChanges(options: FinancialRealtimeOptions): () => void {
+  const {
+    supabase = createClient(),
+    userId,
+    onRefresh,
+    debounceMs = 200,
+  } = options;
+
+  let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const triggerDebouncedRefresh = () => {
+    if (debounceTimer) {
+      clearTimeout(debounceTimer);
+    }
+    debounceTimer = setTimeout(() => {
+      onRefresh();
+    }, debounceMs);
+  };
+
+  const channelName = `financial-realtime-${userId || "auth"}`;
+  const filter = userId ? `user_id=eq.${userId}` : undefined;
+
+  const channel: RealtimeChannel = supabase
+    .channel(channelName)
+    .on(
+      "postgres_changes",
+      {
+        event: "*",
+        schema: "public",
+        table: "slips",
+        ...(filter ? { filter } : {}),
+      },
+      () => triggerDebouncedRefresh()
+    )
+    .on(
+      "postgres_changes",
+      {
+        event: "*",
+        schema: "public",
+        table: "transactions",
+        ...(filter ? { filter } : {}),
+      },
+      () => triggerDebouncedRefresh()
+    )
+    .on(
+      "postgres_changes",
+      {
+        event: "*",
+        schema: "public",
+        table: "accounts",
+        ...(filter ? { filter } : {}),
+      },
+      () => triggerDebouncedRefresh()
+    )
+    .subscribe();
+
+  return () => {
+    if (debounceTimer) {
+      clearTimeout(debounceTimer);
+      debounceTimer = null;
+    }
+    supabase.removeChannel(channel);
+  };
+}
+
+/**
+ * Global Realtime component mounted in DashboardLayout.
+ * Synchronizes Today, Transactions, Accounts, and Review automatically when data changes.
+ */
+export function RealtimeDashboardSync({ userId }: { userId?: string }) {
+  const router = useRouter();
+  const [, startTransition] = useTransition();
+
+  useEffect(() => {
+    if (!userId) return;
+
+    const cleanup = subscribeToFinancialChanges({
+      userId,
+      onRefresh: () => {
+        startTransition(() => {
+          router.refresh();
+        });
+      },
+    });
+
+    return () => {
+      cleanup();
+    };
+  }, [userId, router]);
+
+  return null;
 }

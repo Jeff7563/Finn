@@ -6,6 +6,7 @@ import { redirect } from "next/navigation";
 import Link from "next/link";
 import { Plus } from "lucide-react";
 import { ThemeQuickToggle } from "@/components/settings/ThemeSettingsControl";
+import { RealtimeDashboardSync } from "@/lib/slip/realtime/slips-realtime";
 
 export const dynamic = "force-dynamic";
 
@@ -21,6 +22,9 @@ export default async function DashboardLayout({
 
   return (
     <div className="min-h-screen bg-bg flex">
+      {/* Realtime synchronization across slips, transactions, and accounts */}
+      <RealtimeDashboardSync userId={user.id} />
+
       {/* Desktop Sidebar */}
       <Sidebar />
 

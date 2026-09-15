@@ -7,6 +7,11 @@ import { defaultSlipProcessor } from "@/lib/slip/processor";
 import { SlipProcessingResult } from "@/types/slip";
 import { revalidatePath } from "next/cache";
 
+import { matchOwnedAccount } from "@/lib/slip/account-match";
+import { classifyDirection } from "@/lib/slip/direction";
+import { matchCounterparty } from "@/lib/slip/counterparty-match";
+import { suggestCategory } from "@/lib/slip/category-suggest";
+
 export interface ReviewActionResult {
   success: boolean;
   transactionId?: string;
@@ -15,6 +20,7 @@ export interface ReviewActionResult {
 
 /**
  * Confirms a pending slip directly as a transaction without edits.
+ * Enforces strict financial classification rules and idempotent execution.
  */
 export async function confirmSlipAction(
   slipId: string
@@ -30,6 +36,14 @@ export async function confirmSlipAction(
       return { success: false, error: "ไม่พบข้อมูลสลิปหรือคุณไม่มีสิทธิ์เข้าถึง" };
     }
 
+    // Idempotency: if already confirmed or linked, return existing transaction
+    if (slip.linked_transaction_id) {
+      return { success: true, transactionId: slip.linked_transaction_id };
+    }
+    if (slip.status === "created" && slip.linked_transaction_id) {
+      return { success: true, transactionId: slip.linked_transaction_id };
+    }
+
     if (slip.status !== "needs_review") {
       return { success: false, error: `สถานะของสลิปไม่อยู่ในขั้นตอนรอตรวจสอบ (${slip.status})` };
     }
@@ -39,51 +53,109 @@ export async function confirmSlipAction(
       return { success: false, error: "สลิปนี้ไม่มีจำนวนเงินที่ถูกต้อง กรุณาแก้ไขก่อนยืนยัน" };
     }
 
-    // Match accounts if not yet set
+    // Match accounts against user's owned accounts
     const accounts = await DataStore.getAccounts(user.id);
+    const sMatch = matchOwnedAccount(ext.sender, accounts);
+    const rMatch = matchOwnedAccount(ext.receiver, accounts);
+    const directionClass = classifyDirection(sMatch.accountId, rMatch.accountId);
+
     let fromAccountId: string | null = null;
     let toAccountId: string | null = null;
-    let txType: "income" | "expense" | "transfer" = "expense";
+    const txType = directionClass.suggestedType;
 
-    // If incoming was detected, confirm as income
-    if (ext.receiver?.bank && !ext.sender?.bank) {
-      txType = "income";
-      const toAcc = accounts.find((a) => a.active);
-      toAccountId = toAcc?.id || null;
+    // Strict Account Ownership & Invariant Verification:
+    // Never guess account ownership; require user selection if not matched!
+    if (txType === "expense") {
+      if (!sMatch.accountId) {
+        return {
+          success: false,
+          error: "ไม่พบบัญชีต้นทางของท่านที่ตรงกับสลิปนี้ กรุณากดแก้ไขเพื่อเลือกบัญชีก่อนยืนยัน",
+        };
+      }
+      fromAccountId = sMatch.accountId;
+    } else if (txType === "income") {
+      if (!rMatch.accountId) {
+        return {
+          success: false,
+          error: "ไม่พบบัญชีปลายทางของท่านที่ตรงกับสลิปนี้ กรุณากดแก้ไขเพื่อเลือกบัญชีก่อนยืนยัน",
+        };
+      }
+      toAccountId = rMatch.accountId;
+    } else if (txType === "transfer") {
+      if (!sMatch.accountId || !rMatch.accountId) {
+        return {
+          success: false,
+          error: "การโอนเงินระหว่างบัญชีต้องระบุทั้งบัญชีต้นทางและปลายทาง กรุณากดแก้ไขเพื่อเลือกบัญชี",
+        };
+      }
+      if (sMatch.accountId === rMatch.accountId) {
+        return {
+          success: false,
+          error: "บัญชีต้นทางและปลายทางต้องไม่เป็นบัญชีเดียวกัน",
+        };
+      }
+      fromAccountId = sMatch.accountId;
+      toAccountId = rMatch.accountId;
     } else {
-      const fromAcc = accounts.find((a) => a.active);
-      fromAccountId = fromAcc?.id || null;
+      return {
+        success: false,
+        error: "ไม่สามารถระบุทิศทางของรายการได้ กรุณากดแก้ไขเพื่อเลือกประเภทรายการและบัญชี",
+      };
     }
 
-    const newTx = await DataStore.createTransaction(user.id, {
+    // Safe counterparty and category suggestions
+    const merchants = await DataStore.getMerchants(user.id);
+    const people = await DataStore.getPeople(user.id);
+    const counterpartyName =
+      txType === "income" ? ext.sender?.name : ext.receiver?.name;
+    const cpMatch = matchCounterparty(counterpartyName, merchants, people);
+
+    const categories = await DataStore.getCategories(user.id);
+    const matchedMerchant = cpMatch.merchantId
+      ? merchants.find((m) => m.id === cpMatch.merchantId)
+      : null;
+    const catSuggest = suggestCategory({
+      merchant: matchedMerchant,
+      counterpartyName,
+      userTransactions: [],
+      categories,
+    });
+
+    let description = "บันทึกจากสลิป";
+    if (txType === "transfer") {
+      description = "โอนเงินระหว่างบัญชี";
+    } else if (txType === "income") {
+      description = counterpartyName ? `รับเงินจาก ${counterpartyName}` : "เงินโอนเข้า";
+    } else {
+      description = counterpartyName ? `ชำระให้ ${counterpartyName}` : "ชำระเงิน";
+    }
+
+    // Atomically create transaction and update slip status to 'created'
+    const confirmRes = await DataStore.confirmSlipTransaction(user.id, {
+      slipId: slip.id,
       type: txType,
       amount: ext.amount,
       currency: ext.currency || "THB",
       transaction_date: ext.transactionDate || new Date().toISOString(),
-      description: ext.receiver?.name
-        ? `ชำระให้ ${ext.receiver.name}`
-        : (ext.sender?.name ? `รับเงินจาก ${ext.sender.name}` : "บันทึกจากสลิป"),
+      description,
+      note: null,
       from_account_id: fromAccountId,
       to_account_id: toAccountId,
-      source: "slip",
+      category_id: catSuggest.categoryId || null,
+      merchant_id: cpMatch.merchantId || null,
+      person_id: cpMatch.personId || null,
       reference_number: ext.reference || null,
       confidence: slip.overall_confidence || 1.0,
       review_status: "confirmed",
     });
 
-    // Link slip
-    await DataStore.updateSlip(user.id, slip.id, {
-      status: "created",
-      linked_transaction_id: newTx.id,
-      processed_at: new Date().toISOString(),
-    });
-
     revalidatePath("/review");
     revalidatePath("/today");
     revalidatePath("/transactions");
+    revalidatePath("/accounts");
     revalidatePath("/overview");
 
-    return { success: true, transactionId: newTx.id };
+    return { success: true, transactionId: confirmRes.transaction.id };
   } catch (err: unknown) {
     return {
       success: false,
@@ -111,6 +183,33 @@ export async function editAndConfirmSlipAction(
       return { success: false, error: "ไม่พบข้อมูลสลิปหรือคุณไม่มีสิทธิ์เข้าถึง" };
     }
 
+    // Idempotency: if already confirmed or linked, return existing transaction
+    if (slip.linked_transaction_id) {
+      return { success: true, transactionId: slip.linked_transaction_id };
+    }
+
+    // Invariant checks for transaction type & accounts
+    if (data.type === "expense" && !data.from_account_id) {
+      return { success: false, error: "กรุณาระบุบัญชีต้นทางสำหรับรายจ่าย" };
+    }
+    if (data.type === "income" && !data.to_account_id) {
+      return { success: false, error: "กรุณาระบุบัญชีปลายทางสำหรับรายรับ" };
+    }
+    if (data.type === "transfer") {
+      if (!data.from_account_id || !data.to_account_id) {
+        return {
+          success: false,
+          error: "การโอนเงินต้องระบุทั้งบัญชีต้นทางและปลายทาง",
+        };
+      }
+      if (data.from_account_id === data.to_account_id) {
+        return {
+          success: false,
+          error: "บัญชีต้นทางและปลายทางต้องไม่เป็นบัญชีเดียวกัน",
+        };
+      }
+    }
+
     const ext = slip.extracted_json;
 
     // Track user corrections for audit and future intelligence
@@ -131,27 +230,42 @@ export async function editAndConfirmSlipAction(
           corrected_value: data.reference_number,
         });
       }
+      if (data.transaction_date && ext.transactionDate !== data.transaction_date) {
+        await DataStore.createSlipCorrection(user.id, {
+          slip_id: slip.id,
+          field_name: "transaction_date",
+          extracted_value: ext.transactionDate,
+          corrected_value: data.transaction_date,
+        });
+      }
     }
 
-    const newTx = await DataStore.createTransaction(user.id, {
-      ...data,
-      source: "slip",
+    // Atomically create transaction and update slip status to 'created'
+    const confirmRes = await DataStore.confirmSlipTransaction(user.id, {
+      slipId: slip.id,
+      type: data.type,
+      amount: Number(data.amount),
+      currency: data.currency || "THB",
+      transaction_date: data.transaction_date,
+      description: data.description || null,
+      note: data.note || null,
+      from_account_id: data.type === "income" ? null : data.from_account_id || null,
+      to_account_id: data.type === "expense" ? null : data.to_account_id || null,
+      category_id: data.category_id || null,
+      merchant_id: data.merchant_id || null,
+      person_id: data.person_id || null,
+      reference_number: data.reference_number || null,
       confidence: 1.0,
       review_status: "corrected",
-    });
-
-    await DataStore.updateSlip(user.id, slip.id, {
-      status: "created",
-      linked_transaction_id: newTx.id,
-      processed_at: new Date().toISOString(),
     });
 
     revalidatePath("/review");
     revalidatePath("/today");
     revalidatePath("/transactions");
+    revalidatePath("/accounts");
     revalidatePath("/overview");
 
-    return { success: true, transactionId: newTx.id };
+    return { success: true, transactionId: confirmRes.transaction.id };
   } catch (err: unknown) {
     return {
       success: false,

@@ -23,6 +23,9 @@ import { EmptyState } from "@/components/ui/EmptyState";
 import { formatDateTimeThai, formatDateTimeLocal } from "@/lib/finance/formatters";
 import { parseThaiSlipDate } from "@/lib/slip/ocr/thai-slip-normalizer";
 import { matchOwnedAccount } from "@/lib/slip/account-match";
+import { classifyDirection } from "@/lib/slip/direction";
+import { matchCounterparty } from "@/lib/slip/counterparty-match";
+import { suggestCategory } from "@/lib/slip/category-suggest";
 import { useSlipsRealtime } from "@/lib/slip/realtime/slips-realtime";
 import {
   Check,
@@ -31,6 +34,9 @@ import {
   Copy,
   Eye,
   ArrowRight,
+  ArrowDownLeft,
+  ArrowUpRight,
+  ArrowLeftRight,
   ShieldCheck,
   ShieldAlert,
   AlertCircle,
@@ -152,6 +158,32 @@ export function ReviewInboxClient({
 
   // Direct Confirm
   const handleConfirm = async (slipId: string) => {
+    const targetSlip = slips.find((s) => s.id === slipId);
+    if (!targetSlip) return;
+
+    const ext = targetSlip.extracted_json;
+    const sMatch = matchOwnedAccount(ext?.sender, accounts);
+    const rMatch = matchOwnedAccount(ext?.receiver, accounts);
+    const dir = classifyDirection(sMatch.accountId, rMatch.accountId);
+
+    // If an account is required but not matched, open edit modal so user can choose account
+    if (dir.suggestedType === "expense" && !sMatch.accountId) {
+      openEditModal(targetSlip);
+      return;
+    }
+    if (dir.suggestedType === "income" && !rMatch.accountId) {
+      openEditModal(targetSlip);
+      return;
+    }
+    if (dir.suggestedType === "transfer" && (!sMatch.accountId || !rMatch.accountId)) {
+      openEditModal(targetSlip);
+      return;
+    }
+    if (dir.direction === "unknown") {
+      openEditModal(targetSlip);
+      return;
+    }
+
     setActiveActionId(slipId);
     try {
       const res = await confirmSlipAction(slipId);
@@ -160,6 +192,9 @@ export function ReviewInboxClient({
         router.refresh();
       } else {
         alert(res.error || "ไม่สามารถยืนยันสลิปได้");
+        if (res.error?.includes("เลือกบัญชี")) {
+          openEditModal(targetSlip);
+        }
       }
     } finally {
       setActiveActionId(null);
@@ -204,26 +239,52 @@ export function ReviewInboxClient({
   // Open Edit Form
   const openEditModal = (slip: Slip) => {
     const ext = slip.extracted_json;
-    const defaultAcc = accounts.find((a) => a.active)?.id || "";
     const sMatch = matchOwnedAccount(ext?.sender, accounts);
     const rMatch = matchOwnedAccount(ext?.receiver, accounts);
-    const isSlipIncoming = Boolean(rMatch.accountId && !sMatch.accountId);
+    const directionClass = classifyDirection(sMatch.accountId, rMatch.accountId);
+
+    let defaultType: "expense" | "income" | "transfer" = "expense";
+    if (directionClass.direction === "internal_transfer") {
+      defaultType = "transfer";
+    } else if (directionClass.direction === "incoming") {
+      defaultType = "income";
+    } else if (directionClass.direction === "outgoing") {
+      defaultType = "expense";
+    } else {
+      defaultType = ext?.receiver?.bank && !ext?.sender?.bank ? "income" : "expense";
+    }
+
+    const counterpartyName =
+      defaultType === "income" ? ext?.sender?.name : ext?.receiver?.name;
+    const cpMatch = matchCounterparty(counterpartyName, merchants, people);
+    const matchedMerchant = cpMatch.merchantId
+      ? merchants.find((m) => m.id === cpMatch.merchantId)
+      : null;
+    const catSuggest = suggestCategory({
+      merchant: matchedMerchant,
+      counterpartyName,
+      userTransactions: [],
+      categories,
+    });
 
     setEditingSlip(slip);
     setEditFormData({
-      type: isSlipIncoming ? "income" : "expense",
+      type: defaultType,
       amount: ext?.amount || 0,
       transaction_date: ext?.transactionDate
         ? formatDateTimeLocal(ext.transactionDate)
         : formatDateTimeLocal(new Date()),
-      from_account_id: (isSlipIncoming ? rMatch.accountId : sMatch.accountId) || defaultAcc,
-      to_account_id: "",
-      category_id: "",
-      merchant_id: "",
-      person_id: "",
-      description: isSlipIncoming
-        ? (ext?.sender?.name ? `รับจาก ${ext.sender.name}` : "เงินโอนเข้า")
-        : (ext?.receiver?.name ? `ชำระให้ ${ext.receiver.name}` : ""),
+      from_account_id: sMatch.accountId || "",
+      to_account_id: rMatch.accountId || "",
+      category_id: catSuggest.categoryId || "",
+      merchant_id: cpMatch.merchantId || "",
+      person_id: cpMatch.personId || "",
+      description:
+        defaultType === "transfer"
+          ? "โอนเงินระหว่างบัญชี"
+          : defaultType === "income"
+          ? (counterpartyName ? `รับเงินจาก ${counterpartyName}` : "เงินโอนเข้า")
+          : (counterpartyName ? `ชำระให้ ${counterpartyName}` : "ชำระเงิน"),
       note: "",
     });
   };
@@ -232,6 +293,25 @@ export function ReviewInboxClient({
   const handleSaveEdit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!editingSlip) return;
+
+    if (editFormData.type === "expense" && !editFormData.from_account_id) {
+      alert("กรุณาระบุบัญชีต้นทางสำหรับรายจ่าย");
+      return;
+    }
+    if (editFormData.type === "income" && !editFormData.to_account_id) {
+      alert("กรุณาระบุบัญชีปลายทางสำหรับรายรับ");
+      return;
+    }
+    if (editFormData.type === "transfer") {
+      if (!editFormData.from_account_id || !editFormData.to_account_id) {
+        alert("การโอนเงินต้องระบุทั้งบัญชีต้นทางและปลายทาง");
+        return;
+      }
+      if (editFormData.from_account_id === editFormData.to_account_id) {
+        alert("บัญชีต้นทางและปลายทางต้องไม่เป็นบัญชีเดียวกัน");
+        return;
+      }
+    }
 
     setActiveActionId(editingSlip.id);
     try {
@@ -244,8 +324,10 @@ export function ReviewInboxClient({
           new Date(editFormData.transaction_date).toISOString(),
         description: editFormData.description || null,
         note: editFormData.note || null,
-        from_account_id: editFormData.from_account_id || null,
-        to_account_id: editFormData.to_account_id || null,
+        from_account_id:
+          editFormData.type === "income" ? null : editFormData.from_account_id || null,
+        to_account_id:
+          editFormData.type === "expense" ? null : editFormData.to_account_id || null,
         category_id: editFormData.category_id || null,
         merchant_id: editFormData.merchant_id || null,
         person_id: editFormData.person_id || null,
@@ -324,7 +406,17 @@ export function ReviewInboxClient({
 
             const senderMatch = matchOwnedAccount(ext?.sender, accounts);
             const receiverMatch = matchOwnedAccount(ext?.receiver, accounts);
-            const isIncoming = Boolean(receiverMatch.accountId && !senderMatch.accountId);
+            const directionClass = classifyDirection(senderMatch.accountId, receiverMatch.accountId);
+            const senderAcc = accounts.find((a) => a.id === senderMatch.accountId);
+            const receiverAcc = accounts.find((a) => a.id === receiverMatch.accountId);
+            const isAccountResolved =
+              directionClass.direction === "internal_transfer"
+                ? Boolean(senderMatch.accountId && receiverMatch.accountId)
+                : directionClass.direction === "outgoing"
+                ? Boolean(senderMatch.accountId)
+                : directionClass.direction === "incoming"
+                ? Boolean(receiverMatch.accountId)
+                : false;
             const isActing = activeActionId === slip.id;
 
             return (
@@ -336,13 +428,23 @@ export function ReviewInboxClient({
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
                   <div>
                     <span className="text-[11px] font-semibold uppercase tracking-wider text-text-muted block mb-1">
-                      {isIncoming
-                        ? "เงินโอนเข้า (รอตรวจสอบประเภทรายรับ)"
-                        : "รายจ่ายที่คาดไว้"}
+                      {directionClass.direction === "internal_transfer"
+                        ? "โอนเงินระหว่างบัญชี (Transfer)"
+                        : directionClass.direction === "incoming"
+                        ? "เงินโอนเข้า (Income)"
+                        : directionClass.direction === "outgoing"
+                        ? "รายจ่ายที่คาดไว้ (Expense)"
+                        : "รอระบุประเภทและบัญชี"}
                     </span>
                     <MoneyAmount
                       amount={amount}
-                      type={isIncoming ? "income" : "expense"}
+                      type={
+                        directionClass.direction === "internal_transfer"
+                          ? "transfer"
+                          : directionClass.direction === "incoming"
+                          ? "income"
+                          : "expense"
+                      }
                       currency={ext?.currency || "THB"}
                       size="xl"
                     />
@@ -430,6 +532,48 @@ export function ReviewInboxClient({
                     </div>
                   )}
                 </div>
+
+                {/* Account Identification Row */}
+                {isAccountResolved ? (
+                  <div className="p-2.5 rounded-xl bg-surface-soft border border-border text-xs flex items-center gap-2 text-text-secondary">
+                    {directionClass.direction === "internal_transfer" ? (
+                      <>
+                        <ArrowLeftRight className="w-3.5 h-3.5 text-primary flex-shrink-0" />
+                        <span>
+                          โอนเงินภายใน: <strong>{senderAcc?.name}</strong> ➔ <strong>{receiverAcc?.name}</strong> (ไม่นับเป็นรายรับ-รายจ่าย)
+                        </span>
+                      </>
+                    ) : directionClass.direction === "incoming" ? (
+                      <>
+                        <ArrowDownLeft className="w-3.5 h-3.5 text-income flex-shrink-0" />
+                        <span>
+                          โอนเข้าบัญชี: <strong>{receiverAcc?.name}</strong>
+                        </span>
+                      </>
+                    ) : (
+                      <>
+                        <ArrowUpRight className="w-3.5 h-3.5 text-expense flex-shrink-0" />
+                        <span>
+                          หักจากบัญชี: <strong>{senderAcc?.name}</strong>
+                        </span>
+                      </>
+                    )}
+                  </div>
+                ) : (
+                  <div className="p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/20 text-xs text-amber-700 dark:text-amber-300 flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <AlertCircle className="w-4 h-4 flex-shrink-0 text-amber-500" />
+                      <span>ยังไม่พบบัญชีของคุณที่ตรงกับสลิป (กรุณาเลือกบัญชีก่อนยืนยัน)</span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => openEditModal(slip)}
+                      className="px-2.5 py-1 bg-amber-500/20 hover:bg-amber-500/30 rounded-lg font-medium text-[11px] whitespace-nowrap transition-colors"
+                    >
+                      เลือกบัญชี
+                    </button>
+                  </div>
+                )}
 
                 {/* Actions Row */}
                 <div className="space-y-2 pt-2 border-t border-border">
@@ -594,75 +738,183 @@ export function ReviewInboxClient({
 
               <div>
                 <label className="font-medium text-text-muted block mb-1">
-                  บัญชี
+                  วันที่และเวลาทำรายการ *
                 </label>
-                <select
-                  name="from_account_id"
-                  value={editFormData.from_account_id}
+                <input
+                  type="datetime-local"
+                  required
+                  value={editFormData.transaction_date}
                   onChange={(e) =>
                     setEditFormData({
                       ...editFormData,
-                      from_account_id: e.target.value,
+                      transaction_date: e.target.value,
                     })
                   }
                   className="w-full px-3 py-2 rounded-xl bg-surface-soft border border-border text-text-primary focus:outline-hidden focus:ring-1 focus:ring-primary"
-                >
-                  <option value="">เลือกบัญชี</option>
-                  {accounts.map((acc) => (
-                    <option key={acc.id} value={acc.id}>
-                      {acc.name} ({acc.institution || acc.type})
-                    </option>
-                  ))}
-                </select>
+                />
               </div>
 
-              <div>
-                <label className="font-medium text-text-muted block mb-1">
-                  หมวดหมู่
-                </label>
-                <select
-                  name="category_id"
-                  value={editFormData.category_id}
-                  onChange={(e) =>
-                    setEditFormData({
-                      ...editFormData,
-                      category_id: e.target.value,
-                    })
-                  }
-                  className="w-full px-3 py-2 rounded-xl bg-surface-soft border border-border text-text-primary focus:outline-hidden focus:ring-1 focus:ring-primary"
-                >
-                  <option value="">ไม่มีหมวดหมู่</option>
-                  {categories.map((c) => (
-                    <option key={c.id} value={c.id}>
-                      {c.name} ({c.type})
-                    </option>
-                  ))}
-                </select>
-              </div>
+              {/* Dynamic Account Selectors */}
+              {editFormData.type === "expense" && (
+                <div>
+                  <label className="font-medium text-text-muted block mb-1">
+                    เงินออกจากบัญชี (ต้นทาง) *
+                  </label>
+                  <select
+                    name="from_account_id"
+                    required
+                    value={editFormData.from_account_id}
+                    onChange={(e) =>
+                      setEditFormData({
+                        ...editFormData,
+                        from_account_id: e.target.value,
+                      })
+                    }
+                    className="w-full px-3 py-2 rounded-xl bg-surface-soft border border-border text-text-primary focus:outline-hidden focus:ring-1 focus:ring-primary"
+                  >
+                    <option value="">เลือกบัญชีที่ตัดเงิน</option>
+                    {accounts.map((acc) => (
+                      <option key={acc.id} value={acc.id}>
+                        {acc.name} ({acc.institution || acc.type})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
 
-              <div>
-                <label className="font-medium text-text-muted block mb-1">
-                  ร้านค้า / ผู้รับเงิน (ถ้ามี)
-                </label>
-                <select
-                  name="merchant_id"
-                  value={editFormData.merchant_id}
-                  onChange={(e) =>
-                    setEditFormData({
-                      ...editFormData,
-                      merchant_id: e.target.value,
-                    })
-                  }
-                  className="w-full px-3 py-2 rounded-xl bg-surface-soft border border-border text-text-primary focus:outline-hidden focus:ring-1 focus:ring-primary"
-                >
-                  <option value="">ไม่มีร้านค้า</option>
-                  {merchants.map((m) => (
-                    <option key={m.id} value={m.id}>
-                      {m.display_name}
-                    </option>
-                  ))}
-                </select>
-              </div>
+              {editFormData.type === "income" && (
+                <div>
+                  <label className="font-medium text-text-muted block mb-1">
+                    เงินเข้าบัญชี (ปลายทาง) *
+                  </label>
+                  <select
+                    name="to_account_id"
+                    required
+                    value={editFormData.to_account_id}
+                    onChange={(e) =>
+                      setEditFormData({
+                        ...editFormData,
+                        to_account_id: e.target.value,
+                      })
+                    }
+                    className="w-full px-3 py-2 rounded-xl bg-surface-soft border border-border text-text-primary focus:outline-hidden focus:ring-1 focus:ring-primary"
+                  >
+                    <option value="">เลือกบัญชีที่รับเงิน</option>
+                    {accounts.map((acc) => (
+                      <option key={acc.id} value={acc.id}>
+                        {acc.name} ({acc.institution || acc.type})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
+              {editFormData.type === "transfer" && (
+                <div className="space-y-3">
+                  <div>
+                    <label className="font-medium text-text-muted block mb-1">
+                      เงินออกจากบัญชี (ต้นทาง) *
+                    </label>
+                    <select
+                      name="from_account_id"
+                      required
+                      value={editFormData.from_account_id}
+                      onChange={(e) =>
+                        setEditFormData({
+                          ...editFormData,
+                          from_account_id: e.target.value,
+                        })
+                      }
+                      className="w-full px-3 py-2 rounded-xl bg-surface-soft border border-border text-text-primary focus:outline-hidden focus:ring-1 focus:ring-primary"
+                    >
+                      <option value="">เลือกบัญชีต้นทาง</option>
+                      {accounts.map((acc) => (
+                        <option key={acc.id} value={acc.id}>
+                          {acc.name} ({acc.institution || acc.type})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="font-medium text-text-muted block mb-1">
+                      เงินเข้าบัญชี (ปลายทาง) *
+                    </label>
+                    <select
+                      name="to_account_id"
+                      required
+                      value={editFormData.to_account_id}
+                      onChange={(e) =>
+                        setEditFormData({
+                          ...editFormData,
+                          to_account_id: e.target.value,
+                        })
+                      }
+                      className="w-full px-3 py-2 rounded-xl bg-surface-soft border border-border text-text-primary focus:outline-hidden focus:ring-1 focus:ring-primary"
+                    >
+                      <option value="">เลือกบัญชีปลายทาง</option>
+                      {accounts.map((acc) => (
+                        <option key={acc.id} value={acc.id}>
+                          {acc.name} ({acc.institution || acc.type})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+              )}
+
+              {editFormData.type !== "transfer" && (
+                <div>
+                  <label className="font-medium text-text-muted block mb-1">
+                    หมวดหมู่
+                  </label>
+                  <select
+                    name="category_id"
+                    value={editFormData.category_id}
+                    onChange={(e) =>
+                      setEditFormData({
+                        ...editFormData,
+                        category_id: e.target.value,
+                      })
+                    }
+                    className="w-full px-3 py-2 rounded-xl bg-surface-soft border border-border text-text-primary focus:outline-hidden focus:ring-1 focus:ring-primary"
+                  >
+                    <option value="">ไม่มีหมวดหมู่</option>
+                    {categories
+                      .filter((c) => c.type === editFormData.type)
+                      .map((c) => (
+                        <option key={c.id} value={c.id}>
+                          {c.name}
+                        </option>
+                      ))}
+                  </select>
+                </div>
+              )}
+
+              {editFormData.type === "expense" && (
+                <div>
+                  <label className="font-medium text-text-muted block mb-1">
+                    ร้านค้า / ผู้รับเงิน (ถ้ามี)
+                  </label>
+                  <select
+                    name="merchant_id"
+                    value={editFormData.merchant_id}
+                    onChange={(e) =>
+                      setEditFormData({
+                        ...editFormData,
+                        merchant_id: e.target.value,
+                      })
+                    }
+                    className="w-full px-3 py-2 rounded-xl bg-surface-soft border border-border text-text-primary focus:outline-hidden focus:ring-1 focus:ring-primary"
+                  >
+                    <option value="">ไม่มีร้านค้า</option>
+                    {merchants.map((m) => (
+                      <option key={m.id} value={m.id}>
+                        {m.display_name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
 
               <div>
                 <label className="font-medium text-text-muted block mb-1">
@@ -703,6 +955,24 @@ export function ReviewInboxClient({
                     })
                   }
                   className="w-full px-3 py-2 rounded-xl bg-surface-soft border border-border text-text-primary focus:outline-hidden focus:ring-1 focus:ring-primary"
+                />
+              </div>
+
+              <div>
+                <label className="font-medium text-text-muted block mb-1">
+                  บันทึกช่วยจำ (Note)
+                </label>
+                <textarea
+                  rows={2}
+                  name="note"
+                  value={editFormData.note}
+                  onChange={(e) =>
+                    setEditFormData({
+                      ...editFormData,
+                      note: e.target.value,
+                    })
+                  }
+                  className="w-full px-3 py-2 rounded-xl bg-surface-soft border border-border text-text-primary focus:outline-hidden focus:ring-1 focus:ring-primary resize-none"
                 />
               </div>
 
