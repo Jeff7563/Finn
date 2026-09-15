@@ -141,5 +141,7 @@ export interface IngestApiResponse {
   amount?: number;
   currency: "THB";
   reviewUrl?: string;
+  warning?: string;
   error?: string;
 }
+

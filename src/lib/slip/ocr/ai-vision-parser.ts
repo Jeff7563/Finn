@@ -73,14 +73,159 @@ interface RawVisionExtraction {
   fieldConfidence?: Partial<FieldConfidence> | null;
 }
 
+export interface VisionProviderDiagnostics {
+  provider: string;
+  primaryModel?: string;
+  fallbackModel?: string;
+  model?: string;
+  httpStatus?: number | null;
+  attemptCount?: number;
+  fallbackModelUsed?: boolean;
+  timeout?: boolean;
+  totalDurationMs?: number;
+  errorCode?: string;
+  safeErrorMessage?: string;
+}
+
+export class VisionError extends Error {
+  code: string;
+  httpStatus?: number | null;
+  diagnostics?: VisionProviderDiagnostics;
+
+  constructor(
+    message: string,
+    code: string,
+    httpStatus?: number | null,
+    diagnostics?: VisionProviderDiagnostics
+  ) {
+    super(message);
+    this.name = "VisionError";
+    this.code = code;
+    this.httpStatus = httpStatus;
+    this.diagnostics = diagnostics;
+  }
+}
+
+/**
+ * Sanitizes error messages by redacting any API keys or tokens.
+ */
+export function sanitizeVisionErrorMessage(
+  msg: string,
+  keysToRedact: Array<string | undefined | null> = []
+): string {
+  let safe = msg;
+  for (const key of keysToRedact) {
+    if (key && key.length > 3) {
+      safe = safe.replaceAll(key, "[REDACTED]");
+    }
+  }
+  // Strip ?key=... or &key=... from URLs
+  safe = safe.replace(/([?&]key=)[^&\s]+/gi, "$1[REDACTED]");
+  // Strip Bearer tokens
+  safe = safe.replace(/(Bearer\s+)[a-zA-Z0-9_\-\.]+/gi, "$1[REDACTED]");
+  // Redact any Google API key pattern (AIzaSy...)
+  safe = safe.replace(/AIzaSy[a-zA-Z0-9_\-]{33}/g, "[REDACTED]");
+  return safe;
+}
+
+/**
+ * Checks if an HTTP status is considered a transient failure that should be retried.
+ */
+export function isTransientVisionStatus(status: number): boolean {
+  return (
+    status === 429 ||
+    status === 500 ||
+    status === 502 ||
+    status === 503 ||
+    status === 504
+  );
+}
+
+/**
+ * Classifies HTTP status code into typed error codes.
+ */
+export function classifyVisionErrorCode(
+  status: number | null | undefined,
+  errorText?: string
+): string {
+  if (errorText && errorText.toLowerCase().includes("timed out")) {
+    return "VISION_PROVIDER_TIMEOUT";
+  }
+  if (status === 503 || (errorText && errorText.toLowerCase().includes("overloaded"))) {
+    return "VISION_PROVIDER_OVERLOADED";
+  }
+  if (status === 429) {
+    return "VISION_RATE_LIMITED";
+  }
+  if (status === 401 || status === 403) {
+    return "VISION_AUTH_FAILED";
+  }
+  if (status === 500 || status === 502 || status === 504) {
+    return "VISION_PROVIDER_UNAVAILABLE";
+  }
+  return "VISION_PROVIDER_UNAVAILABLE";
+}
+
+export interface AiVisionParserOptions {
+  primaryModel?: string;
+  fallbackModel?: string;
+  geminiModel?: string;
+  geminiFallbackModel?: string;
+  maxAttempts?: number;
+  baseDelays?: number[];
+  primaryRetryDelayMs?: number;
+  fallbackRetryDelayMs?: number;
+  attemptTimeoutMs?: number;
+  totalDeadlineMs?: number;
+  sleepFn?: (ms: number) => Promise<void>;
+}
+
 export class AiVisionSlipParser implements VisionSlipParser {
+  private primaryModel: string;
+  private fallbackModel: string;
+  private maxAttempts: number;
+  private primaryRetryDelayMs: number;
+  private fallbackRetryDelayMs: number;
+  private attemptTimeoutMs: number;
+  private totalDeadlineMs: number;
+  private sleepFn: (ms: number) => Promise<void>;
+
+  constructor(options?: AiVisionParserOptions) {
+    this.primaryModel =
+      options?.primaryModel ||
+      options?.geminiModel ||
+      process.env.GEMINI_MODEL ||
+      "gemini-3.8-flash";
+    this.fallbackModel =
+      options?.fallbackModel ||
+      options?.geminiFallbackModel ||
+      process.env.GEMINI_FALLBACK_MODEL ||
+      "gemini-3.6-flash";
+    this.maxAttempts = options?.maxAttempts ?? 2;
+    const isTest =
+      process.env.VITEST === "true" ||
+      process.env.NODE_ENV === "test" ||
+      process.env.PLAYWRIGHT_TEST === "1";
+    this.primaryRetryDelayMs =
+      options?.primaryRetryDelayMs ?? (isTest ? 5 : 350);
+    this.fallbackRetryDelayMs =
+      options?.fallbackRetryDelayMs ?? (isTest ? 5 : 500);
+    this.attemptTimeoutMs = options?.attemptTimeoutMs ?? 5000;
+    this.totalDeadlineMs = options?.totalDeadlineMs ?? 12000;
+    this.sleepFn =
+      options?.sleepFn ||
+      ((ms: number) => new Promise((resolve) => setTimeout(resolve, ms)));
+  }
+
   async parse(input: SlipVisionInput): Promise<SlipExtraction> {
     const geminiKey = process.env.GEMINI_API_KEY;
     const openaiKey = process.env.OPENAI_API_KEY;
 
     if (!geminiKey && !openaiKey) {
-      const err = new Error("Vision provider credentials are not configured");
-      (err as unknown as { code: string }).code = "PROVIDER_NOT_CONFIGURED";
+      const err = new VisionError(
+        "Vision provider credentials are not configured",
+        "PROVIDER_NOT_CONFIGURED"
+      );
       throw err;
     }
 
@@ -93,15 +238,19 @@ export class AiVisionSlipParser implements VisionSlipParser {
         rawOutput = await this.callGeminiVision(input, geminiKey);
         providerUsed = "gemini";
       } catch (geminiErr: unknown) {
+        // If authentication error (401/403): do NOT fallback to OpenAI, throw immediately
+        if ((geminiErr as VisionError).code === "VISION_AUTH_FAILED") {
+          throw geminiErr;
+        }
+
         // If OpenAI key is available, attempt fallback
         if (openaiKey) {
           try {
             rawOutput = await this.callOpenAiVision(input, openaiKey);
             providerUsed = "openai";
-          } catch (openaiErr: unknown) {
-            throw new Error(
-              `Vision extraction failed on both Gemini (${geminiErr instanceof Error ? geminiErr.message : "error"}) and OpenAI (${openaiErr instanceof Error ? openaiErr.message : "error"})`
-            );
+          } catch {
+            // Rethrow Gemini error with attached diagnostics
+            throw geminiErr;
           }
         } else {
           throw geminiErr;
@@ -114,7 +263,10 @@ export class AiVisionSlipParser implements VisionSlipParser {
     }
 
     if (!rawOutput) {
-      throw new Error("No data returned from vision provider");
+      throw new VisionError(
+        "No data returned from vision provider",
+        "VISION_EMPTY_EXTRACTION"
+      );
     }
 
     // 3. Post-process & Normalize Output with strict Thai banking logic
@@ -122,8 +274,10 @@ export class AiVisionSlipParser implements VisionSlipParser {
 
     // 4. Extraction Quality Gate: ensure response contains usable data
     if (isMateriallyUnusable(extraction)) {
-      const err = new Error("Vision extraction returned no usable financial data (empty response)");
-      (err as unknown as { code: string }).code = "VISION_EMPTY_EXTRACTION";
+      const err = new VisionError(
+        "Vision extraction returned no usable financial data (empty response)",
+        "VISION_EMPTY_EXTRACTION"
+      );
       throw err;
     }
 
@@ -131,13 +285,127 @@ export class AiVisionSlipParser implements VisionSlipParser {
   }
 
   /**
-   * Calls Google Gemini Vision API via REST
+   * Calls Google Gemini Vision API with model fallback and transient error retry logic
    */
   private async callGeminiVision(
     input: SlipVisionInput,
     apiKey: string
   ): Promise<RawVisionExtraction> {
-    const model = process.env.GEMINI_MODEL || "gemini-2.0-flash";
+    const startTime = Date.now();
+    let lastError: VisionError | null = null;
+    let totalAttemptsCount = 0;
+
+    // 1. Try Primary Model (gemini-3.8-flash) with retry for transient errors
+    try {
+      const result = await this.callGeminiModel({
+        model: this.primaryModel,
+        input,
+        apiKey,
+        isFallback: false,
+        retryDelayMs: this.primaryRetryDelayMs,
+        startTime,
+      });
+      totalAttemptsCount += result.attempts;
+      return result.data;
+    } catch (err: unknown) {
+      if (err instanceof VisionError) {
+        lastError = err;
+        totalAttemptsCount += err.diagnostics?.attemptCount ?? 1;
+        // Never fallback to another model for authentication/permission errors (401/403)
+        if (err.code === "VISION_AUTH_FAILED") {
+          throw err;
+        }
+        // Never fallback on client error 400
+        if (err.httpStatus === 400) {
+          throw err;
+        }
+      } else {
+        const safeMsg = sanitizeVisionErrorMessage(
+          err instanceof Error ? err.message : "Gemini error",
+          [apiKey]
+        );
+        lastError = new VisionError(safeMsg, "VISION_PROVIDER_UNAVAILABLE");
+      }
+    }
+
+    // Check if total deadline exceeded before trying fallback model
+    const elapsedBeforeFallback = Date.now() - startTime;
+    if (
+      elapsedBeforeFallback >= this.totalDeadlineMs ||
+      this.totalDeadlineMs - elapsedBeforeFallback < 500
+    ) {
+      const diag: VisionProviderDiagnostics = {
+        provider: "gemini",
+        primaryModel: this.primaryModel,
+        fallbackModel: this.fallbackModel,
+        model: this.primaryModel,
+        httpStatus: lastError?.httpStatus ?? null,
+        attemptCount: totalAttemptsCount,
+        fallbackModelUsed: false,
+        timeout: lastError?.code === "VISION_PROVIDER_TIMEOUT",
+        totalDurationMs: elapsedBeforeFallback,
+        errorCode: "VISION_PROVIDER_UNAVAILABLE",
+        safeErrorMessage: "Overall vision deadline reached before fallback could be attempted",
+      };
+      throw new VisionError(
+        "Vision request deadline exceeded",
+        "VISION_PROVIDER_UNAVAILABLE",
+        lastError?.httpStatus ?? null,
+        diag
+      );
+    }
+
+    // 2. Try Fallback Model (gemini-3.6-flash) if primary model was unavailable
+    if (this.fallbackModel && this.fallbackModel !== this.primaryModel) {
+      try {
+        const result = await this.callGeminiModel({
+          model: this.fallbackModel,
+          input,
+          apiKey,
+          isFallback: true,
+          retryDelayMs: this.fallbackRetryDelayMs,
+          startTime,
+        });
+        return result.data;
+      } catch (err: unknown) {
+        if (err instanceof VisionError) {
+          lastError = err;
+          if (err.code === "VISION_AUTH_FAILED") {
+            throw err;
+          }
+        } else {
+          const safeMsg = sanitizeVisionErrorMessage(
+            err instanceof Error ? err.message : "Gemini fallback error",
+            [apiKey]
+          );
+          lastError = new VisionError(safeMsg, "VISION_PROVIDER_UNAVAILABLE");
+        }
+      }
+    }
+
+    // Both primary and fallback Gemini attempts failed
+    const finalElapsed = Date.now() - startTime;
+    if (lastError?.diagnostics) {
+      lastError.diagnostics.totalDurationMs = finalElapsed;
+    }
+    throw (
+      lastError ||
+      new VisionError("All Gemini models failed", "VISION_PROVIDER_UNAVAILABLE")
+    );
+  }
+
+  /**
+   * Calls a specific Gemini model with up to maxAttempts retry attempts on transient errors.
+   */
+  private async callGeminiModel(params: {
+    model: string;
+    input: SlipVisionInput;
+    apiKey: string;
+    isFallback: boolean;
+    retryDelayMs: number;
+    startTime: number;
+  }): Promise<{ data: RawVisionExtraction; attempts: number }> {
+    const { model, input, apiKey, isFallback, retryDelayMs, startTime } = params;
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
 
     const base64Data = input.imageBuffer.toString("base64");
@@ -162,32 +430,236 @@ export class AiVisionSlipParser implements VisionSlipParser {
       },
     };
 
-    const res = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
+    let lastStatus: number | null = null;
+    let lastErrorText = "";
+    let isTimeout = false;
 
-    if (!res.ok) {
-      const errText = await res.text().catch(() => "");
-      // If 2.0-flash not found or quota, try 1.5-flash
-      if (res.status === 404 && model !== "gemini-1.5-flash") {
-        const fallbackUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`;
-        const fallbackRes = await fetch(fallbackUrl, {
+    for (let attempt = 1; attempt <= this.maxAttempts; attempt++) {
+      const elapsedBefore = Date.now() - startTime;
+      const remainingTotal = this.totalDeadlineMs - elapsedBefore;
+      if (remainingTotal <= 100) {
+        const diag: VisionProviderDiagnostics = {
+          provider: "gemini",
+          primaryModel: this.primaryModel,
+          fallbackModel: this.fallbackModel,
+          model,
+          httpStatus: lastStatus,
+          attemptCount: attempt,
+          fallbackModelUsed: isFallback,
+          timeout: isTimeout,
+          totalDurationMs: elapsedBefore,
+          errorCode: "VISION_PROVIDER_UNAVAILABLE",
+          safeErrorMessage: "Overall vision deadline reached",
+        };
+        throw new VisionError(
+          `Gemini request deadline exceeded on model ${model}`,
+          "VISION_PROVIDER_UNAVAILABLE",
+          lastStatus,
+          diag
+        );
+      }
+
+      const timeoutMs = Math.min(this.attemptTimeoutMs, remainingTotal);
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => {
+        controller.abort();
+      }, timeoutMs);
+
+      let res: Response;
+      try {
+        res = await fetch(url, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload),
+          signal: controller.signal,
         });
-        if (fallbackRes.ok) {
-          const fallbackData = await fallbackRes.json();
-          return this.extractGeminiJson(fallbackData);
+      } catch (fetchErr: unknown) {
+        clearTimeout(timeoutId);
+        const isAbort =
+          controller.signal.aborted ||
+          (fetchErr instanceof Error && fetchErr.name === "AbortError");
+
+        if (isAbort) {
+          isTimeout = true;
+          lastErrorText = `Request timed out after ${timeoutMs}ms`;
+        } else {
+          const rawMsg =
+            fetchErr instanceof Error ? fetchErr.message : "Network fetch failed";
+          lastErrorText = sanitizeVisionErrorMessage(rawMsg, [apiKey]);
         }
+
+        const elapsedNow = Date.now() - startTime;
+
+        if (
+          attempt < this.maxAttempts &&
+          this.totalDeadlineMs - elapsedNow > retryDelayMs + 200
+        ) {
+          const jitter = Math.floor(Math.random() * (retryDelayMs * 0.2));
+          await this.sleepFn(retryDelayMs + jitter);
+          continue;
+        }
+
+        const errCode = isTimeout
+          ? "VISION_PROVIDER_TIMEOUT"
+          : "VISION_PROVIDER_UNAVAILABLE";
+        const diag: VisionProviderDiagnostics = {
+          provider: "gemini",
+          primaryModel: this.primaryModel,
+          fallbackModel: this.fallbackModel,
+          model,
+          httpStatus: null,
+          attemptCount: attempt,
+          fallbackModelUsed: isFallback,
+          timeout: isTimeout,
+          totalDurationMs: elapsedNow,
+          errorCode: errCode,
+          safeErrorMessage: lastErrorText,
+        };
+        throw new VisionError(
+          isTimeout
+            ? `Gemini request timed out on model ${model} after ${timeoutMs}ms`
+            : `Gemini network error on model ${model}: ${lastErrorText}`,
+          errCode,
+          null,
+          diag
+        );
+      } finally {
+        clearTimeout(timeoutId);
       }
-      throw new Error(`Gemini API error (${res.status}): ${errText.slice(0, 200)}`);
+
+      const elapsedNow = Date.now() - startTime;
+
+      if (res.ok) {
+        const data = await res.json();
+        return {
+          data: this.extractGeminiJson(data),
+          attempts: attempt,
+        };
+      }
+
+      // Handle non-OK HTTP status
+      lastStatus = res.status;
+      const rawText = await res.text().catch(() => "");
+      lastErrorText = sanitizeVisionErrorMessage(rawText.slice(0, 200), [apiKey]);
+
+      // 1. Auth errors (401, 403): FAIL IMMEDIATELY (no retry, no model fallback)
+      if (res.status === 401 || res.status === 403) {
+        const diag: VisionProviderDiagnostics = {
+          provider: "gemini",
+          primaryModel: this.primaryModel,
+          fallbackModel: this.fallbackModel,
+          model,
+          httpStatus: res.status,
+          attemptCount: attempt,
+          fallbackModelUsed: isFallback,
+          timeout: false,
+          totalDurationMs: elapsedNow,
+          errorCode: "VISION_AUTH_FAILED",
+          safeErrorMessage: `Authentication failed (${res.status})`,
+        };
+        throw new VisionError(
+          `Gemini authentication failed (${res.status}): ${lastErrorText}`,
+          "VISION_AUTH_FAILED",
+          res.status,
+          diag
+        );
+      }
+
+      // 2. Model not found (404): permanent for this model, do not waste retries
+      if (res.status === 404) {
+        const diag: VisionProviderDiagnostics = {
+          provider: "gemini",
+          primaryModel: this.primaryModel,
+          fallbackModel: this.fallbackModel,
+          model,
+          httpStatus: 404,
+          attemptCount: attempt,
+          fallbackModelUsed: isFallback,
+          timeout: false,
+          totalDurationMs: elapsedNow,
+          errorCode: "VISION_PROVIDER_UNAVAILABLE",
+          safeErrorMessage: `Model ${model} not found (404)`,
+        };
+        throw new VisionError(
+          `Gemini model ${model} not found (404): ${lastErrorText}`,
+          "VISION_PROVIDER_UNAVAILABLE",
+          404,
+          diag
+        );
+      }
+
+      // 3. Transient errors (429, 500, 502, 503, 504)
+      if (isTransientVisionStatus(res.status)) {
+        if (
+          attempt < this.maxAttempts &&
+          this.totalDeadlineMs - elapsedNow > retryDelayMs + 200
+        ) {
+          let delay = retryDelayMs;
+          const jitter = Math.floor(Math.random() * (retryDelayMs * 0.2));
+          delay += jitter;
+
+          const retryAfterHeader = res.headers?.get
+            ? res.headers.get("retry-after")
+            : null;
+          if (retryAfterHeader) {
+            const parsedSeconds = parseFloat(retryAfterHeader);
+            if (!isNaN(parsedSeconds) && parsedSeconds >= 0) {
+              delay = Math.min(Math.max(delay, parsedSeconds * 1000), 3000);
+            }
+          }
+
+          await this.sleepFn(delay);
+          continue;
+        }
+
+        const errorCode = classifyVisionErrorCode(res.status, lastErrorText);
+        const diag: VisionProviderDiagnostics = {
+          provider: "gemini",
+          primaryModel: this.primaryModel,
+          fallbackModel: this.fallbackModel,
+          model,
+          httpStatus: res.status,
+          attemptCount: attempt,
+          fallbackModelUsed: isFallback,
+          timeout: false,
+          totalDurationMs: elapsedNow,
+          errorCode,
+          safeErrorMessage: `Provider error (${res.status})`,
+        };
+        throw new VisionError(
+          `Gemini API transient error (${res.status}) on model ${model}: ${lastErrorText}`,
+          errorCode,
+          res.status,
+          diag
+        );
+      }
+
+      // 4. Permanent client errors (400, etc.)
+      const diag: VisionProviderDiagnostics = {
+        provider: "gemini",
+        primaryModel: this.primaryModel,
+        fallbackModel: this.fallbackModel,
+        model,
+        httpStatus: res.status,
+        attemptCount: attempt,
+        fallbackModelUsed: isFallback,
+        timeout: false,
+        totalDurationMs: elapsedNow,
+        errorCode: "VISION_PROVIDER_UNAVAILABLE",
+        safeErrorMessage: `Client error (${res.status})`,
+      };
+      throw new VisionError(
+        `Gemini API client error (${res.status}) on model ${model}: ${lastErrorText}`,
+        "VISION_PROVIDER_UNAVAILABLE",
+        res.status,
+        diag
+      );
     }
 
-    const data = await res.json();
-    return this.extractGeminiJson(data);
+    throw new VisionError(
+      `Gemini attempts exhausted on model ${model}`,
+      "VISION_PROVIDER_UNAVAILABLE"
+    );
   }
 
   private extractGeminiJson(data: unknown): RawVisionExtraction {
@@ -195,7 +667,7 @@ export class AiVisionSlipParser implements VisionSlipParser {
     const candidate = record?.candidates?.[0];
     const text = candidate?.content?.parts?.[0]?.text;
     if (!text) {
-      throw new Error("Empty candidate response from Gemini API");
+      throw new VisionError("Empty candidate response from Gemini API", "VISION_EMPTY_EXTRACTION");
     }
     try {
       return JSON.parse(text);
@@ -249,13 +721,26 @@ export class AiVisionSlipParser implements VisionSlipParser {
 
     if (!res.ok) {
       const errText = await res.text().catch(() => "");
-      throw new Error(`OpenAI API error (${res.status}): ${errText.slice(0, 200)}`);
+      const safeErrText = sanitizeVisionErrorMessage(errText.slice(0, 200), [apiKey]);
+      const errorCode = classifyVisionErrorCode(res.status, safeErrText);
+      const diag: VisionProviderDiagnostics = {
+        provider: "openai",
+        model,
+        httpStatus: res.status,
+        errorCode,
+      };
+      throw new VisionError(
+        `OpenAI API error (${res.status}): ${safeErrText}`,
+        errorCode,
+        res.status,
+        diag
+      );
     }
 
     const data = await res.json();
     const content = data.choices?.[0]?.message?.content;
     if (!content) {
-      throw new Error("Empty response from OpenAI Vision");
+      throw new VisionError("Empty response from OpenAI Vision", "VISION_EMPTY_EXTRACTION");
     }
 
     return JSON.parse(content);

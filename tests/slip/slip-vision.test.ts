@@ -8,10 +8,12 @@ import {
 } from "@/lib/slip/ocr/thai-slip-normalizer";
 import { normalizeBankName } from "@/lib/slip/bank-normalization";
 import { parseSlipQrPayload } from "@/lib/slip/qr/parser";
-import { AiVisionSlipParser } from "@/lib/slip/ocr/ai-vision-parser";
-import { SlipProcessor } from "@/lib/slip/processor";
+import { AiVisionSlipParser, VisionError } from "@/lib/slip/ocr/ai-vision-parser";
+import { SlipProcessor, defaultSlipProcessor } from "@/lib/slip/processor";
 import { DataStore } from "@/lib/server/data-store";
 import { formatTime, formatDateTimeThai } from "@/lib/finance/formatters";
+import { POST as handleSlipIngest } from "@/app/api/ingest/slip/route";
+import { NextRequest } from "next/server";
 
 describe("Thai Bank Slip Vision & OCR Extraction", () => {
   // 1. Thai Amount Normalization
@@ -961,5 +963,498 @@ describe("Thai Bank Slip Vision & OCR Extraction", () => {
       expect(dbSlip?.extracted_json?.reference).toBe("REF-7");
     });
   });
+
+  // 12. Gemini Vision 503 Retry, Timeout & iOS Shortcut Resilience Tests (All 10 Requirements)
+  describe("Gemini Vision 503 Retry, Timeout & iOS Shortcut Resilience", () => {
+    const fakeBuffer = Buffer.alloc(100);
+    fakeBuffer[0] = 0xff;
+    fakeBuffer[1] = 0xd8;
+    fakeBuffer[2] = 0xff;
+
+    const mockValidGeminiOutput = {
+      candidates: [
+        {
+          content: {
+            parts: [
+              {
+                text: JSON.stringify({
+                  amount: 18.0,
+                  currency: "THB",
+                  rawDate: "15 ก.ย. 2569 09:25",
+                  transactionDate: "2026-09-15T02:25:00.000Z",
+                  sender: { name: "สมชาย", bank: "KBANK", accountMasked: "xxx-1234" },
+                  receiver: { name: "ป้าพร", bank: "SCB", accountMasked: "xxx-5678" },
+                  reference: "REF-20260915",
+                  fieldConfidence: { amount: 0.99, transactionDate: 0.99 },
+                }),
+              },
+            ],
+          },
+        },
+      ],
+    };
+
+    // Test 1: Primary 503 -> retry 1 -> fallback 200 succeeds
+    it("1. retries transient 503 on primary model (gemini-3.8-flash) then falls back to gemini-3.6-flash and succeeds", async () => {
+      process.env.GEMINI_API_KEY = "test-gemini-key";
+      const fetchSpy = vi.spyOn(globalThis, "fetch");
+
+      fetchSpy
+        .mockResolvedValueOnce({
+          ok: false,
+          status: 503,
+          headers: new Headers(),
+          text: async () => "The model gemini-3.8-flash is currently overloaded (attempt 1).",
+        } as Response)
+        .mockResolvedValueOnce({
+          ok: false,
+          status: 503,
+          headers: new Headers(),
+          text: async () => "The model gemini-3.8-flash is currently overloaded (attempt 2).",
+        } as Response)
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => mockValidGeminiOutput,
+        } as Response);
+
+      const parser = new AiVisionSlipParser({
+        primaryModel: "gemini-3.8-flash",
+        fallbackModel: "gemini-3.6-flash",
+        primaryRetryDelayMs: 5,
+        fallbackRetryDelayMs: 5,
+      });
+
+      const result = await parser.parse({
+        imageBuffer: fakeBuffer,
+        mimeType: "image/jpeg",
+      });
+
+      expect(fetchSpy).toHaveBeenCalledTimes(3);
+      expect(fetchSpy.mock.calls[0][0] as string).toContain("gemini-3.8-flash");
+      expect(fetchSpy.mock.calls[1][0] as string).toContain("gemini-3.8-flash");
+      expect(fetchSpy.mock.calls[2][0] as string).toContain("gemini-3.6-flash");
+      expect(result.amount).toBe(18.0);
+      expect(result.sender?.bank).toBe("KBANK");
+      expect(result.receiver?.bank).toBe("SCB");
+    });
+
+    // Test 2: Primary 503 -> retry 1 -> fallback 503 -> safe needs_review
+    it("2. returns safe needs_review when both primary and fallback models fail with 503", async () => {
+      process.env.GEMINI_API_KEY = "test-gemini-key";
+      const fetchSpy = vi.spyOn(globalThis, "fetch");
+
+      fetchSpy
+        .mockResolvedValueOnce({
+          ok: false,
+          status: 503,
+          headers: new Headers(),
+          text: async () => "gemini-3.8-flash overloaded attempt 1",
+        } as Response)
+        .mockResolvedValueOnce({
+          ok: false,
+          status: 503,
+          headers: new Headers(),
+          text: async () => "gemini-3.8-flash overloaded attempt 2",
+        } as Response)
+        .mockResolvedValueOnce({
+          ok: false,
+          status: 503,
+          headers: new Headers(),
+          text: async () => "gemini-3.6-flash overloaded attempt 1",
+        } as Response)
+        .mockResolvedValueOnce({
+          ok: false,
+          status: 503,
+          headers: new Headers(),
+          text: async () => "gemini-3.6-flash overloaded attempt 2",
+        } as Response);
+
+      const parser = new AiVisionSlipParser({
+        primaryModel: "gemini-3.8-flash",
+        fallbackModel: "gemini-3.6-flash",
+        primaryRetryDelayMs: 5,
+        fallbackRetryDelayMs: 5,
+      });
+
+      const userId = "user-all-503-test-2";
+      const processor = new SlipProcessor({ visionParser: parser });
+      const result = await processor.processSlip({
+        userId,
+        buffer: fakeBuffer,
+        source: "web_upload",
+      });
+
+      expect(result.status).toBe("needs_review");
+      expect(result.errorCode).toBe("VISION_PROVIDER_OVERLOADED");
+      expect(result.warningMessage).toBe("ระบบอ่านสลิปอัตโนมัติไม่พร้อมใช้งานชั่วคราว");
+      expect(result.extracted).toBeUndefined();
+
+      const dbSlip = await DataStore.getSlipById(userId, result.slipId);
+      expect(dbSlip?.status).toBe("needs_review");
+
+      const job = await DataStore.getSlipJobById(userId, result.jobId);
+      expect(job?.status).toBe("needs_review");
+      expect(job?.error_code).toBe("VISION_PROVIDER_OVERLOADED");
+      expect(job?.safe_error_message).toContain("gemini-3.8-flash");
+      expect(job?.safe_error_message).toContain("gemini-3.6-flash");
+      expect(fetchSpy).toHaveBeenCalledTimes(4);
+    });
+
+    // Test 3: Request timeout at 5s per attempt triggers AbortController
+    it("3. aborts requests exceeding attempt timeout and classifies error as VISION_PROVIDER_TIMEOUT", async () => {
+      process.env.GEMINI_API_KEY = "test-gemini-key";
+      const fetchSpy = vi.spyOn(globalThis, "fetch");
+
+      fetchSpy.mockImplementation((_url, init: any) => {
+        return new Promise((resolve, reject) => {
+          const timer = setTimeout(() => {
+            resolve({ ok: true, json: async () => mockValidGeminiOutput } as Response);
+          }, 300);
+          if (init?.signal) {
+            init.signal.addEventListener("abort", () => {
+              clearTimeout(timer);
+              const err = new Error("The operation was aborted");
+              err.name = "AbortError";
+              reject(err);
+            });
+          }
+        });
+      });
+
+      const parser = new AiVisionSlipParser({
+        primaryModel: "gemini-3.8-flash",
+        fallbackModel: "gemini-3.6-flash",
+        attemptTimeoutMs: 25,
+        primaryRetryDelayMs: 5,
+        fallbackRetryDelayMs: 5,
+      });
+
+      let caughtErr: unknown = null;
+      try {
+        await parser.parse({
+          imageBuffer: fakeBuffer,
+          mimeType: "image/jpeg",
+        });
+      } catch (err) {
+        caughtErr = err;
+      }
+
+      expect(caughtErr).toBeInstanceOf(VisionError);
+      const vErr = caughtErr as VisionError;
+      expect(vErr.code).toBe("VISION_PROVIDER_TIMEOUT");
+      expect(vErr.diagnostics?.timeout).toBe(true);
+      expect(vErr.message).toContain("timed out");
+    });
+
+    // Test 4: Overall deadline ~12s halts further attempts
+    it("4. halts all provider attempts and does not call fallback when total deadline budget is exhausted", async () => {
+      process.env.GEMINI_API_KEY = "test-gemini-key";
+      const fetchSpy = vi.spyOn(globalThis, "fetch");
+
+      fetchSpy.mockImplementation(() => {
+        return new Promise((resolve) => {
+          setTimeout(() => {
+            resolve({
+              ok: false,
+              status: 503,
+              headers: new Headers(),
+              text: async () => "503 slow response",
+            } as Response);
+          }, 30);
+        });
+      });
+
+      const parser = new AiVisionSlipParser({
+        primaryModel: "gemini-3.8-flash",
+        fallbackModel: "gemini-3.6-flash",
+        totalDeadlineMs: 45,
+        primaryRetryDelayMs: 5,
+        fallbackRetryDelayMs: 5,
+      });
+
+      let caughtErr: unknown = null;
+      try {
+        await parser.parse({
+          imageBuffer: fakeBuffer,
+          mimeType: "image/jpeg",
+        });
+      } catch (err) {
+        caughtErr = err;
+      }
+
+      expect(caughtErr).toBeInstanceOf(VisionError);
+      const fallbackCalls = fetchSpy.mock.calls.filter((c) =>
+        (c[0] as string).includes("gemini-3.6-flash")
+      );
+      expect(fallbackCalls.length).toBe(0);
+    });
+
+    // Test 5: 404 does not retry, immediately falls back
+    it("5. does not retry 404 on primary model and immediately falls back to fallback model", async () => {
+      process.env.GEMINI_API_KEY = "test-gemini-key";
+      const fetchSpy = vi.spyOn(globalThis, "fetch");
+
+      fetchSpy
+        .mockResolvedValueOnce({
+          ok: false,
+          status: 404,
+          headers: new Headers(),
+          text: async () => "Model gemini-3.8-flash is no longer available to new users",
+        } as Response)
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => mockValidGeminiOutput,
+        } as Response);
+
+      const parser = new AiVisionSlipParser({
+        primaryModel: "gemini-3.8-flash",
+        fallbackModel: "gemini-3.6-flash",
+      });
+
+      const result = await parser.parse({
+        imageBuffer: fakeBuffer,
+        mimeType: "image/jpeg",
+      });
+
+      expect(fetchSpy).toHaveBeenCalledTimes(2);
+      expect(fetchSpy.mock.calls[0][0] as string).toContain("gemini-3.8-flash");
+      expect(fetchSpy.mock.calls[1][0] as string).toContain("gemini-3.6-flash");
+      expect(result.amount).toBe(18.0);
+    });
+
+    // Test 6: 401/403 does not retry or fallback (auth error)
+    it("6. fails immediately on 401/403 without any retry or model fallback", async () => {
+      process.env.GEMINI_API_KEY = "bad-key";
+      const fetchSpy = vi.spyOn(globalThis, "fetch");
+
+      fetchSpy.mockResolvedValueOnce({
+        ok: false,
+        status: 401,
+        headers: new Headers(),
+        text: async () => "API key not valid",
+      } as Response);
+
+      const parser = new AiVisionSlipParser({
+        primaryModel: "gemini-3.8-flash",
+        fallbackModel: "gemini-3.6-flash",
+      });
+
+      let caughtErr: unknown = null;
+      try {
+        await parser.parse({
+          imageBuffer: fakeBuffer,
+          mimeType: "image/jpeg",
+        });
+      } catch (err) {
+        caughtErr = err;
+      }
+
+      expect(caughtErr).toBeInstanceOf(VisionError);
+      expect((caughtErr as VisionError).code).toBe("VISION_AUTH_FAILED");
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+    });
+
+    // Test 7: Shortcut ingest returns 200 with status 'needs_review' and warning message
+    it("7. returns HTTP 200 with status needs_review and warning message on /api/ingest/slip when provider is unavailable", async () => {
+      const userId = "shortcut-user-7";
+      const { rawToken } = await DataStore.createIngestToken(userId, { label: "My iPhone" });
+
+      const mockProcessResult = {
+        jobId: "job-shortcut-overloaded",
+        slipId: "slip-shortcut-overloaded",
+        status: "needs_review" as const,
+        currency: "THB" as const,
+        reviewUrl: "/review?slipId=slip-shortcut-overloaded",
+        warningMessage: "ระบบอ่านสลิปอัตโนมัติไม่พร้อมใช้งานชั่วคราว",
+        errorCode: "VISION_PROVIDER_OVERLOADED",
+        errorMessage: "Gemini API transient error (503)",
+      };
+
+      const processorSpy = vi
+        .spyOn(defaultSlipProcessor, "processSlip")
+        .mockResolvedValueOnce(mockProcessResult);
+
+      const formData = new FormData();
+      formData.append(
+        "file",
+        new Blob([fakeBuffer], { type: "image/jpeg" }),
+        "slip.jpg"
+      );
+
+      const req = new NextRequest("http://localhost:3000/api/ingest/slip", {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${rawToken}`,
+        },
+        body: formData,
+      });
+
+      const response = await handleSlipIngest(req);
+      expect(response.status).toBe(200);
+
+      const body = await response.json();
+      expect(body.status).toBe("needs_review");
+      expect(body.warning).toBe("ระบบอ่านสลิปอัตโนมัติไม่พร้อมใช้งานชั่วคราว");
+      expect(body.jobId).toBe("job-shortcut-overloaded");
+      expect(body.reviewUrl).toBe("/review?slipId=slip-shortcut-overloaded");
+      processorSpy.mockRestore();
+    });
+
+    // Test 8: Reprocess quality gate preserves previous good extraction on 503/timeout
+    it("8. preserves previous valid extraction when all Gemini models return 503 during reprocess", async () => {
+      const userId = "reprocess-503-user-8";
+      const slip = await DataStore.createSlip(userId, {
+        storage_path: "503/slip.jpg",
+        file_hash_sha256: "hash-503-reprocess-8",
+        mime_type: "image/jpeg",
+        file_size: 100,
+        source: "web_upload",
+        status: "needs_review",
+        parser_version: "v2-vision",
+        overall_confidence: 0.65,
+        extracted_json: {
+          amount: 18.0,
+          currency: "THB",
+          transactionDate: "2026-09-15T02:25:00.000Z",
+          sender: { name: "สมชาย", bank: "KBANK", accountMasked: "xxx-1234" },
+          receiver: { name: "ป้าพร", bank: "SCB", accountMasked: "xxx-5678" },
+          reference: "REF-PRESERVED-503",
+          fieldConfidence: { amount: 0.95 },
+        },
+      });
+
+      const mockVision = {
+        parse: vi.fn().mockRejectedValue(
+          new VisionError(
+            "Gemini API transient error (503): Model overloaded",
+            "VISION_PROVIDER_OVERLOADED",
+            503,
+            {
+              provider: "gemini",
+              primaryModel: "gemini-3.8-flash",
+              fallbackModel: "gemini-3.6-flash",
+              httpStatus: 503,
+              attemptCount: 2,
+              fallbackModelUsed: true,
+              timeout: false,
+              errorCode: "VISION_PROVIDER_OVERLOADED",
+            }
+          )
+        ),
+      };
+
+      const processor = new SlipProcessor({ visionParser: mockVision as any });
+      const result = await processor.reprocessSlip({
+        userId,
+        slipId: slip.id,
+        buffer: fakeBuffer,
+      });
+
+      expect(result.status).toBe("needs_review");
+      expect(result.preservedPrevious).toBe(true);
+      expect(result.amount).toBe(18.0);
+      expect(result.extracted?.reference).toBe("REF-PRESERVED-503");
+      expect(result.warningMessage).toBe("การประมวลผลใหม่อ่านข้อมูลได้ไม่ครบ จึงคงข้อมูลเดิมไว้");
+      expect(result.errorCode).toBe("VISION_PROVIDER_OVERLOADED");
+
+      const dbSlip = await DataStore.getSlipById(userId, slip.id);
+      expect(dbSlip?.extracted_json?.amount).toBe(18.0);
+      expect(dbSlip?.overall_confidence).toBe(0.65);
+
+      const job = await DataStore.getSlipJobById(userId, result.jobId);
+      expect(job?.error_code).toBe("VISION_PROVIDER_OVERLOADED");
+      expect(job?.safe_error_message).toContain("gemini-3.8-flash");
+      expect(job?.safe_error_message).toContain("gemini-3.6-flash");
+      expect(job?.safe_error_message).toContain("preservedPrevious");
+    });
+
+    // Test 9: Diagnostics contain safe fields (httpStatus, duration, timeout, attempts, no secret keys)
+    it("9. guarantees diagnostics record httpStatus, duration, timeout, attempts, and zero secret keys", async () => {
+      const secretKey = "SECRET-GEMINI-KEY-abc123xyz";
+      process.env.GEMINI_API_KEY = secretKey;
+      const fetchSpy = vi.spyOn(globalThis, "fetch");
+
+      fetchSpy.mockResolvedValue({
+        ok: false,
+        status: 503,
+        headers: new Headers(),
+        text: async () => `Error on request to url https://api.google.com/generate?key=${secretKey}: Service Unavailable`,
+      } as Response);
+
+      const parser = new AiVisionSlipParser({
+        primaryModel: "gemini-3.8-flash",
+        fallbackModel: "gemini-3.6-flash",
+        primaryRetryDelayMs: 5,
+        fallbackRetryDelayMs: 5,
+      });
+
+      let caughtErr: unknown = null;
+      try {
+        await parser.parse({
+          imageBuffer: fakeBuffer,
+          mimeType: "image/jpeg",
+        });
+      } catch (err) {
+        caughtErr = err;
+      }
+
+      expect(caughtErr).toBeDefined();
+      const errStr = (caughtErr as Error).message;
+      expect(errStr).not.toContain(secretKey);
+      expect(errStr).toContain("[REDACTED]");
+
+      // Test Processor diagnostics serialization with secret key
+      const userId = "secret-key-user-9";
+      const processor = new SlipProcessor({ visionParser: parser });
+      const result = await processor.processSlip({
+        userId,
+        buffer: fakeBuffer,
+        source: "web_upload",
+      });
+
+      const job = await DataStore.getSlipJobById(userId, result.jobId);
+      expect(job?.safe_error_message).not.toContain(secretKey);
+      expect(JSON.stringify(job)).not.toContain(secretKey);
+
+      const diagObj = JSON.parse(job?.safe_error_message || "{}");
+      expect(diagObj.provider).toBe("gemini");
+      expect(diagObj.primaryModel).toBe("gemini-3.8-flash");
+      expect(diagObj.fallbackModel).toBe("gemini-3.6-flash");
+      expect(diagObj.timeout).toBe(false);
+      expect(typeof diagObj.totalDurationMs).toBe("number");
+      expect(diagObj.attemptCount).toBeDefined();
+    });
+
+    // Test 10: gemini-1.5-flash and gemini-2.5-flash are not used
+    it("10. guarantees gemini-1.5-flash and gemini-2.5-flash are never used by default", async () => {
+      delete process.env.GEMINI_MODEL;
+      delete process.env.GEMINI_FALLBACK_MODEL;
+      process.env.GEMINI_API_KEY = "test-gemini-key";
+
+      const parser = new AiVisionSlipParser();
+      expect((parser as any).primaryModel).toBe("gemini-3.8-flash");
+      expect((parser as any).fallbackModel).toBe("gemini-3.6-flash");
+      expect((parser as any).primaryModel).not.toContain("1.5");
+      expect((parser as any).primaryModel).not.toContain("2.5");
+      expect((parser as any).fallbackModel).not.toContain("1.5");
+      expect((parser as any).fallbackModel).not.toContain("2.5");
+
+      const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue({
+        ok: true,
+        json: async () => mockValidGeminiOutput,
+      } as Response);
+
+      await parser.parse({
+        imageBuffer: fakeBuffer,
+        mimeType: "image/jpeg",
+      });
+
+      const calledUrl = fetchSpy.mock.calls[0][0] as string;
+      expect(calledUrl).toContain("gemini-3.8-flash");
+      expect(calledUrl).not.toContain("gemini-1.5-flash");
+      expect(calledUrl).not.toContain("gemini-2.5-flash");
+    });
+  });
 });
+
 

@@ -13,7 +13,7 @@ import {
 } from "./validation";
 import { DefaultQrDecoder, QrDecoder } from "./qr/decoder";
 import { parseSlipQrPayload } from "./qr/parser";
-import { CompositeSlipParser, VisionSlipParser } from "./ocr";
+import { CompositeSlipParser, VisionSlipParser, VisionProviderDiagnostics } from "./ocr";
 import { normalizeBankName } from "./bank-normalization";
 import { matchOwnedAccount } from "./account-match";
 import { matchCounterparty } from "./counterparty-match";
@@ -202,6 +202,7 @@ export class SlipProcessor {
       let newExtractionFailed = false;
       let extractionErrorCode: string | null = null;
       let extractionErrorMessage: string | null = null;
+      let extractionDiagnostics: VisionProviderDiagnostics | undefined = undefined;
 
       try {
         rawExtraction = await this.visionParser.parse({
@@ -221,6 +222,8 @@ export class SlipProcessor {
           (err as { code?: string })?.code || "VISION_EXTRACTION_FAILED";
         extractionErrorMessage =
           err instanceof Error ? err.message : "Slip extraction failed";
+        extractionDiagnostics =
+          (err as { diagnostics?: VisionProviderDiagnostics })?.diagnostics;
       }
 
       // Handle failed or materially unusable provider response
@@ -229,7 +232,15 @@ export class SlipProcessor {
           // Reprocess Quality Gate: Preserve existing extraction completely
           const diagJson = JSON.stringify({
             parser: slip.parser_version || "v2-vision",
-            provider: "ai-vision",
+            provider: extractionDiagnostics?.provider || "gemini",
+            primaryModel: extractionDiagnostics?.primaryModel || process.env.GEMINI_MODEL || "gemini-3.8-flash",
+            fallbackModel: extractionDiagnostics?.fallbackModel || process.env.GEMINI_FALLBACK_MODEL || "gemini-3.6-flash",
+            model: extractionDiagnostics?.model,
+            httpStatus: extractionDiagnostics?.httpStatus ?? null,
+            attemptCount: extractionDiagnostics?.attemptCount,
+            timeout: extractionDiagnostics?.timeout ?? false,
+            fallbackModelUsed: extractionDiagnostics?.fallbackModelUsed ?? false,
+            totalDurationMs: extractionDiagnostics?.totalDurationMs,
             errorCode: extractionErrorCode || "VISION_EMPTY_EXTRACTION",
             safeErrorMessage: "การประมวลผลใหม่อ่านข้อมูลได้ไม่ครบ จึงคงข้อมูลเดิมไว้",
             preservedPrevious: true,
@@ -271,13 +282,29 @@ export class SlipProcessor {
         } else {
           // Initial first-time ingestion failure
           const safeError = extractionErrorMessage || "Slip extraction failed";
+          const firstTimeDiag = JSON.stringify({
+            parser: slip.parser_version || "v2-vision",
+            provider: extractionDiagnostics?.provider || "gemini",
+            primaryModel: extractionDiagnostics?.primaryModel || process.env.GEMINI_MODEL || "gemini-3.8-flash",
+            fallbackModel: extractionDiagnostics?.fallbackModel || process.env.GEMINI_FALLBACK_MODEL || "gemini-3.6-flash",
+            model: extractionDiagnostics?.model,
+            httpStatus: extractionDiagnostics?.httpStatus ?? null,
+            attemptCount: extractionDiagnostics?.attemptCount,
+            timeout: extractionDiagnostics?.timeout ?? false,
+            fallbackModelUsed: extractionDiagnostics?.fallbackModelUsed ?? false,
+            totalDurationMs: extractionDiagnostics?.totalDurationMs,
+            errorCode: extractionErrorCode || "VISION_EXTRACTION_FAILED",
+            safeErrorMessage: safeError,
+            preservedPrevious: false,
+          });
+
           await DataStore.updateSlip(userId, slip.id, {
             status: "needs_review",
           });
           await DataStore.updateSlipJob(userId, job.id, {
             status: "needs_review",
             error_code: extractionErrorCode || "VISION_EXTRACTION_FAILED",
-            safe_error_message: safeError,
+            safe_error_message: firstTimeDiag,
             finished_at: new Date().toISOString(),
           });
 
@@ -287,6 +314,7 @@ export class SlipProcessor {
             status: "needs_review",
             currency: "THB",
             reviewUrl: `/review?slipId=${slip.id}`,
+            warningMessage: "ระบบอ่านสลิปอัตโนมัติไม่พร้อมใช้งานชั่วคราว",
             errorCode: extractionErrorCode || "VISION_EXTRACTION_FAILED",
             errorMessage: safeError,
           };
@@ -347,7 +375,9 @@ export class SlipProcessor {
 
       const jobDiagnostics = JSON.stringify({
         parser: slip.parser_version || "v2-vision",
-        provider: "ai-vision",
+        provider: "gemini",
+        primaryModel: process.env.GEMINI_MODEL || "gemini-3.8-flash",
+        fallbackModel: process.env.GEMINI_FALLBACK_MODEL || "gemini-3.6-flash",
         errorCode: preservedPrevious ? "QUALITY_GATE_RETAINED_PREVIOUS" : null,
         safeErrorMessage: warningMessage || null,
         preservedPrevious,

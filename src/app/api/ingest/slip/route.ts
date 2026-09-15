@@ -149,6 +149,7 @@ export async function POST(req: NextRequest) {
         amount: result.amount,
         currency: result.currency || "THB",
         reviewUrl: result.reviewUrl,
+        warning: result.warningMessage,
       },
       { status: httpStatus }
     );
