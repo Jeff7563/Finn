@@ -88,6 +88,12 @@ export function ReviewInboxClient({
     try {
       const res = await reprocessSlipAction(slipId);
       if (res.success && res.result) {
+        if (res.result.preservedPrevious) {
+          alert(
+            res.result.warningMessage ||
+              "ประมวลผลใหม่ไม่สำเร็จ — ระบบคงข้อมูลเดิมไว้แล้ว"
+          );
+        }
         if (res.result.status === "created") {
           // Auto created, remove from review inbox
           setSlips(slips.filter((s) => s.id !== slipId));
@@ -99,7 +105,10 @@ export function ReviewInboxClient({
                 ? {
                     ...s,
                     extracted_json: res.result!.extracted,
-                    overall_confidence: res.result!.overallConfidence,
+                    overall_confidence:
+                      res.result!.overallConfidence !== undefined
+                        ? res.result!.overallConfidence
+                        : s.overall_confidence,
                     status: "needs_review",
                   }
                 : s

@@ -597,5 +597,369 @@ describe("Thai Bank Slip Vision & OCR Extraction", () => {
       expect(formatDateTimeThai(updatedSlip!.extracted_json!.transactionDate!)).toContain("09:25");
     });
   });
+
+  // 11. Quality Gate & Non-Destructive Reprocessing Regression Tests
+  describe("Quality Gate & Non-Destructive Reprocessing", () => {
+    const fakeBuffer = Buffer.alloc(100);
+    fakeBuffer[0] = 0xff;
+    fakeBuffer[1] = 0xd8;
+    fakeBuffer[2] = 0xff;
+
+    // Test 1: Existing good extraction + new empty extraction => keeps existing
+    it("preserves existing extraction when reprocess returns materially unusable / empty extraction", async () => {
+      const userId = "user-qg-test-1";
+      const initialSlip = await DataStore.createSlip(userId, {
+        storage_path: "qg/slip1.jpg",
+        file_hash_sha256: "hash-qg-1",
+        mime_type: "image/jpeg",
+        file_size: 100,
+        source: "web_upload",
+        status: "needs_review",
+        parser_version: "v2-vision",
+        overall_confidence: 0.65,
+        extracted_json: {
+          amount: 18.0,
+          currency: "THB",
+          transactionDate: "2026-09-15T02:25:00.000Z",
+          sender: { name: "สมชาย", bank: "KBANK", accountMasked: "xxx-1-23456-x" },
+          receiver: { name: "ร้าน ป้าพร", bank: "SCB", accountMasked: "xxx-9-87654-x" },
+          reference: "REF-GOOD-1",
+          fieldConfidence: { amount: 0.95, transactionDate: 0.9, reference: 0.9 },
+        },
+      });
+
+      // New vision parser returns empty / unusable extraction
+      const mockVision = {
+        parse: vi.fn().mockResolvedValue({
+          amount: null,
+          transactionDate: null,
+          sender: { name: null, bank: null, accountMasked: null },
+          receiver: { name: null, bank: null, accountMasked: null },
+          reference: null,
+          currency: "THB",
+          fieldConfidence: {},
+        }),
+      };
+
+      const processor = new SlipProcessor({ visionParser: mockVision as any });
+      const result = await processor.reprocessSlip({
+        userId,
+        slipId: initialSlip.id,
+        buffer: fakeBuffer,
+      });
+
+      expect(result.status).toBe("needs_review");
+      expect(result.preservedPrevious).toBe(true);
+      expect(result.warningMessage).toBe("การประมวลผลใหม่อ่านข้อมูลได้ไม่ครบ จึงคงข้อมูลเดิมไว้");
+      expect(result.amount).toBe(18.0);
+      expect(result.extracted?.sender?.name).toBe("สมชาย");
+      expect(result.extracted?.receiver?.name).toBe("ร้าน ป้าพร");
+      expect(result.extracted?.reference).toBe("REF-GOOD-1");
+
+      const dbSlip = await DataStore.getSlipById(userId, initialSlip.id);
+      expect(dbSlip?.extracted_json?.amount).toBe(18.0);
+      expect(dbSlip?.extracted_json?.sender?.name).toBe("สมชาย");
+      expect(dbSlip?.overall_confidence).toBe(0.65);
+
+      const job = await DataStore.getSlipJobById(userId, result.jobId);
+      expect(job?.error_code).toBe("VISION_EMPTY_EXTRACTION");
+      expect(job?.safe_error_message).toContain("preservedPrevious");
+      expect(job?.safe_error_message).toContain("completenessScore");
+    });
+
+    // Test 2: Existing amount 18 + new amount undefined => amount remains 18
+    it("retains existing amount 18 when incoming extraction has undefined/null amount", async () => {
+      const userId = "user-qg-test-2";
+      const initialSlip = await DataStore.createSlip(userId, {
+        storage_path: "qg/slip2.jpg",
+        file_hash_sha256: "hash-qg-2",
+        mime_type: "image/jpeg",
+        file_size: 100,
+        source: "web_upload",
+        status: "needs_review",
+        parser_version: "v2-vision",
+        extracted_json: {
+          amount: 18.0,
+          currency: "THB",
+          transactionDate: "2026-09-15T02:25:00.000Z",
+          sender: { name: "สมชาย", bank: "KBANK" },
+          receiver: { name: "ป้าพร", bank: "SCB" },
+          fieldConfidence: { amount: 0.95 },
+        },
+      });
+
+      // New parser extracted other fields but missed the amount
+      const mockVision = {
+        parse: vi.fn().mockResolvedValue({
+          amount: undefined,
+          currency: "THB",
+          transactionDate: "2026-09-15T02:25:00.000Z",
+          sender: { name: "สมชาย สุขใจ", bank: "KBANK" },
+          receiver: { name: "ป้าพร", bank: "SCB" },
+          reference: "REF-2",
+          fieldConfidence: { transactionDate: 0.9 },
+        }),
+      };
+
+      const processor = new SlipProcessor({ visionParser: mockVision as any });
+      const result = await processor.reprocessSlip({
+        userId,
+        slipId: initialSlip.id,
+        buffer: fakeBuffer,
+      });
+
+      expect(result.amount).toBe(18.0);
+      expect(result.extracted?.amount).toBe(18.0);
+      expect(result.preservedPrevious).toBe(true);
+      expect(result.warningMessage).toBe("การประมวลผลใหม่อ่านข้อมูลได้ไม่ครบ จึงคงข้อมูลเดิมไว้");
+
+      const dbSlip = await DataStore.getSlipById(userId, initialSlip.id);
+      expect(dbSlip?.extracted_json?.amount).toBe(18.0);
+    });
+
+    // Test 3: Existing sender/receiver/reference + new null values => existing values remain intact
+    it("retains existing parties and reference when incoming extraction returns null for them", async () => {
+      const userId = "user-qg-test-3";
+      const initialSlip = await DataStore.createSlip(userId, {
+        storage_path: "qg/slip3.jpg",
+        file_hash_sha256: "hash-qg-3",
+        mime_type: "image/jpeg",
+        file_size: 100,
+        source: "web_upload",
+        status: "needs_review",
+        parser_version: "v2-vision",
+        extracted_json: {
+          amount: 500.0,
+          currency: "THB",
+          transactionDate: "2026-09-15T02:25:00.000Z",
+          sender: { name: "สมชาย นามสมมุติ", bank: "KBANK", accountMasked: "123-x-xxxx-4" },
+          receiver: { name: "บริษัท เทส จำกัด", bank: "BBL", accountMasked: "987-x-xxxx-6" },
+          reference: "TX-ORIGINAL-999",
+          fieldConfidence: { amount: 0.95 },
+        },
+      });
+
+      // New parser only read amount, but parties and reference are null
+      const mockVision = {
+        parse: vi.fn().mockResolvedValue({
+          amount: 500.0,
+          currency: "THB",
+          transactionDate: "2026-09-15T02:25:00.000Z",
+          sender: { name: null, bank: null, accountMasked: null },
+          receiver: { name: null, bank: null, accountMasked: null },
+          reference: null,
+          fieldConfidence: { amount: 0.99 },
+        }),
+      };
+
+      const processor = new SlipProcessor({ visionParser: mockVision as any });
+      const result = await processor.reprocessSlip({
+        userId,
+        slipId: initialSlip.id,
+        buffer: fakeBuffer,
+      });
+
+      expect(result.extracted?.sender?.name).toBe("สมชาย นามสมมุติ");
+      expect(result.extracted?.sender?.bank).toBe("KBANK");
+      expect(result.extracted?.receiver?.name).toBe("บริษัท เทส จำกัด");
+      expect(result.extracted?.receiver?.bank).toBe("BBL");
+      expect(result.extracted?.reference).toBe("TX-ORIGINAL-999");
+      expect(result.preservedPrevious).toBe(true);
+
+      const dbSlip = await DataStore.getSlipById(userId, initialSlip.id);
+      expect(dbSlip?.extracted_json?.sender?.name).toBe("สมชาย นามสมมุติ");
+      expect(dbSlip?.extracted_json?.receiver?.name).toBe("บริษัท เทส จำกัด");
+      expect(dbSlip?.extracted_json?.reference).toBe("TX-ORIGINAL-999");
+    });
+
+    // Test 4: Existing wrong date + corrected date => only date updates while other fields remain
+    it("updates only transactionDate to corrected Bangkok time while preserving other existing fields", async () => {
+      const userId = "user-qg-test-4";
+      const initialSlip = await DataStore.createSlip(userId, {
+        storage_path: "qg/slip4.jpg",
+        file_hash_sha256: "hash-qg-4",
+        mime_type: "image/jpeg",
+        file_size: 100,
+        source: "web_upload",
+        status: "needs_review",
+        parser_version: "v2-vision",
+        extracted_json: {
+          amount: 18.0,
+          currency: "THB",
+          transactionDate: "2026-09-15T09:25:00.000Z", // Wrong +7 UTC offset (displays 16:25 in Bangkok)
+          sender: { name: "สมชาย", bank: "KBANK", accountMasked: "xxx-1-23456-x" },
+          receiver: { name: "ป้าพร", bank: "SCB", accountMasked: "xxx-9-87654-x" },
+          reference: "REF-PRESERVED",
+          fieldConfidence: { amount: 0.99, transactionDate: 0.99 },
+        },
+      });
+
+      const mockVision = {
+        parse: vi.fn().mockResolvedValue({
+          amount: 18.0,
+          currency: "THB",
+          rawDate: "15 ก.ย. 2569 09:25",
+          transactionDate: "2026-09-15T02:25:00.000Z", // Corrected UTC instant (displays 09:25 in Bangkok)
+          sender: { name: "สมชาย", bank: "KBANK", accountMasked: "xxx-1-23456-x" },
+          receiver: { name: "ป้าพร", bank: "SCB", accountMasked: "xxx-9-87654-x" },
+          reference: "REF-PRESERVED",
+          fieldConfidence: { amount: 0.99, transactionDate: 0.99 },
+        }),
+      };
+
+      const processor = new SlipProcessor({ visionParser: mockVision as any });
+      const result = await processor.reprocessSlip({
+        userId,
+        slipId: initialSlip.id,
+        buffer: fakeBuffer,
+      });
+
+      expect(result.extracted?.transactionDate).toBe("2026-09-15T02:25:00.000Z");
+      expect(result.extracted?.amount).toBe(18.0);
+      expect(result.extracted?.sender?.name).toBe("สมชาย");
+      expect(result.extracted?.receiver?.name).toBe("ป้าพร");
+      expect(result.extracted?.reference).toBe("REF-PRESERVED");
+      expect(result.preservedPrevious).toBe(false);
+
+      const dbSlip = await DataStore.getSlipById(userId, initialSlip.id);
+      expect(dbSlip?.extracted_json?.transactionDate).toBe("2026-09-15T02:25:00.000Z");
+    });
+
+    // Test 5: Provider error / rate limit => existing extraction preserved
+    it("preserves existing extraction when provider throws rate limit or network error", async () => {
+      const userId = "user-qg-test-5";
+      const initialSlip = await DataStore.createSlip(userId, {
+        storage_path: "qg/slip5.jpg",
+        file_hash_sha256: "hash-qg-5",
+        mime_type: "image/jpeg",
+        file_size: 100,
+        source: "web_upload",
+        status: "needs_review",
+        parser_version: "v2-vision",
+        overall_confidence: 0.70,
+        extracted_json: {
+          amount: 250.0,
+          currency: "THB",
+          transactionDate: "2026-09-15T02:25:00.000Z",
+          sender: { name: "สมชาย", bank: "KBANK" },
+          receiver: { name: "ร้าน กาแฟ", bank: "KTB" },
+          reference: "REF-BEFORE-ERROR",
+          fieldConfidence: { amount: 0.9 },
+        },
+      });
+
+      const rateLimitErr = new Error("429 Too Many Requests: Rate limit exceeded");
+      (rateLimitErr as any).code = "RATE_LIMIT_EXCEEDED";
+
+      const mockVision = {
+        parse: vi.fn().mockRejectedValue(rateLimitErr),
+      };
+
+      const processor = new SlipProcessor({ visionParser: mockVision as any });
+      const result = await processor.reprocessSlip({
+        userId,
+        slipId: initialSlip.id,
+        buffer: fakeBuffer,
+      });
+
+      expect(result.status).toBe("needs_review");
+      expect(result.preservedPrevious).toBe(true);
+      expect(result.warningMessage).toBe("การประมวลผลใหม่อ่านข้อมูลได้ไม่ครบ จึงคงข้อมูลเดิมไว้");
+      expect(result.amount).toBe(250.0);
+      expect(result.extracted?.reference).toBe("REF-BEFORE-ERROR");
+
+      const dbSlip = await DataStore.getSlipById(userId, initialSlip.id);
+      expect(dbSlip?.extracted_json?.amount).toBe(250.0);
+      expect(dbSlip?.extracted_json?.reference).toBe("REF-BEFORE-ERROR");
+      expect(dbSlip?.overall_confidence).toBe(0.70);
+
+      const job = await DataStore.getSlipJobById(userId, result.jobId);
+      expect(job?.error_code).toBe("RATE_LIMIT_EXCEEDED");
+      expect(job?.safe_error_message).toContain("preservedPrevious");
+    });
+
+    // Test 6: Initial first-time extraction with all-null response => needs_review with VISION_EMPTY_EXTRACTION
+    it("routes to needs_review with VISION_EMPTY_EXTRACTION on initial all-null provider extraction", async () => {
+      const userId = "user-qg-test-6";
+      const emptyErr = new Error("Vision extraction returned no usable financial data (empty response)");
+      (emptyErr as any).code = "VISION_EMPTY_EXTRACTION";
+
+      const mockVision = {
+        parse: vi.fn().mockRejectedValue(emptyErr),
+      };
+
+      const processor = new SlipProcessor({ visionParser: mockVision as any });
+      const result = await processor.processSlip({
+        userId,
+        buffer: fakeBuffer,
+        source: "web_upload",
+      });
+
+      expect(result.status).toBe("needs_review");
+      expect(result.errorCode).toBe("VISION_EMPTY_EXTRACTION");
+      expect(result.errorMessage).toContain("Vision extraction returned no usable financial data");
+
+      const dbSlip = await DataStore.getSlipById(userId, result.slipId);
+      expect(dbSlip?.status).toBe("needs_review");
+      expect(dbSlip?.extracted_json == null).toBe(true);
+
+      const job = await DataStore.getSlipJobById(userId, result.jobId);
+      expect(job?.status).toBe("needs_review");
+      expect(job?.error_code).toBe("VISION_EMPTY_EXTRACTION");
+    });
+
+    // Test 7: Reprocess never downgrades extraction completeness score
+    it("never downgrades completeness score during reprocess", async () => {
+      const userId = "user-qg-test-7";
+      const initialSlip = await DataStore.createSlip(userId, {
+        storage_path: "qg/slip7.jpg",
+        file_hash_sha256: "hash-qg-7",
+        mime_type: "image/jpeg",
+        file_size: 100,
+        source: "web_upload",
+        status: "needs_review",
+        parser_version: "v2-vision",
+        extracted_json: {
+          amount: 100.0,
+          currency: "THB",
+          transactionDate: "2026-09-15T02:25:00.000Z",
+          sender: { name: "สมชาย", bank: "KBANK", accountMasked: "xxx-1-23456-x" },
+          receiver: { name: "ป้าพร", bank: "SCB", accountMasked: "xxx-9-87654-x" },
+          reference: "REF-7",
+          fieldConfidence: { amount: 0.95 },
+        },
+      });
+
+      // Incoming degraded extraction: only amount is detected, rest missing
+      const mockVision = {
+        parse: vi.fn().mockResolvedValue({
+          amount: 100.0,
+          currency: "THB",
+          transactionDate: null,
+          sender: null,
+          receiver: null,
+          reference: null,
+          fieldConfidence: { amount: 0.5 },
+        }),
+      };
+
+      const processor = new SlipProcessor({ visionParser: mockVision as any });
+      const result = await processor.reprocessSlip({
+        userId,
+        slipId: initialSlip.id,
+        buffer: fakeBuffer,
+      });
+
+      // Initial completeness score: amount(0.35) + date(0.25) + sender(0.15) + receiver(0.15) + ref(0.10) = 1.00
+      expect(result.completenessScore).toBe(1.0);
+      expect(result.preservedPrevious).toBe(true);
+
+      const dbSlip = await DataStore.getSlipById(userId, initialSlip.id);
+      expect(dbSlip?.extracted_json?.transactionDate).toBe("2026-09-15T02:25:00.000Z");
+      expect(dbSlip?.extracted_json?.sender?.name).toBe("สมชาย");
+      expect(dbSlip?.extracted_json?.receiver?.name).toBe("ป้าพร");
+      expect(dbSlip?.extracted_json?.reference).toBe("REF-7");
+    });
+  });
 });
 

@@ -125,6 +125,9 @@ export interface SlipProcessingResult {
   duplicateOfSlipId?: string;
   errorCode?: string;
   errorMessage?: string;
+  warningMessage?: string;
+  preservedPrevious?: boolean;
+  completenessScore?: number;
   extracted?: SlipExtraction;
   overallConfidence?: number;
   direction?: Direction;

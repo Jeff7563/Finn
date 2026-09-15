@@ -21,6 +21,12 @@ import { suggestCategory } from "./category-suggest";
 import { detectDuplicate } from "./duplicate";
 import { classifyDirection } from "./direction";
 import { evaluateConfidence } from "./confidence";
+import {
+  isMateriallyUnusable,
+  calculateCompletenessScore,
+  mergeSlipExtractions,
+  isAmountValid,
+} from "./quality-gate";
 
 export interface ProcessSlipOptions {
   userId: string;
@@ -115,6 +121,7 @@ export class SlipProcessor {
       mime: validation.mime,
       fileHash,
       source,
+      isReprocess: false,
     });
   }
 
@@ -160,6 +167,7 @@ export class SlipProcessor {
       mime: validation.mime,
       fileHash: slip.file_hash_sha256,
       source: slip.source,
+      isReprocess: true,
     });
   }
 
@@ -174,8 +182,11 @@ export class SlipProcessor {
     mime: string;
     fileHash: string;
     source: SlipSource;
+    isReprocess?: boolean;
   }): Promise<SlipProcessingResult> {
-    const { userId, slip, job, buffer, mime, fileHash, source } = params;
+    const { userId, slip, job, buffer, mime, fileHash, source, isReprocess = false } = params;
+    const existingExtraction = slip.extracted_json || null;
+    const prevScore = calculateCompletenessScore(existingExtraction);
 
     try {
       // 6. QR Code Decoding
@@ -187,59 +198,166 @@ export class SlipProcessor {
       }
 
       // 7. OCR / Vision Extraction
-      let extraction: SlipExtraction;
+      let rawExtraction: SlipExtraction | null = null;
+      let newExtractionFailed = false;
+      let extractionErrorCode: string | null = null;
+      let extractionErrorMessage: string | null = null;
+
       try {
-        extraction = await this.visionParser.parse({
+        rawExtraction = await this.visionParser.parse({
           imageBuffer: buffer,
           mimeType: mime,
           qrPayload,
         });
+        if (isMateriallyUnusable(rawExtraction)) {
+          newExtractionFailed = true;
+          extractionErrorCode = "VISION_EMPTY_EXTRACTION";
+          extractionErrorMessage =
+            "Vision extraction returned no usable financial data (empty response)";
+        }
       } catch (err: unknown) {
-        // Safe error handling for unconfigured providers or unreadable slips
-        const safeError = err instanceof Error ? err.message : "Slip extraction failed";
-        await DataStore.updateSlip(userId, slip.id, {
-          status: "needs_review",
-        });
-        await DataStore.updateSlipJob(userId, job.id, {
-          status: "needs_review",
-          safe_error_message: safeError,
-          finished_at: new Date().toISOString(),
-        });
+        newExtractionFailed = true;
+        extractionErrorCode =
+          (err as { code?: string })?.code || "VISION_EXTRACTION_FAILED";
+        extractionErrorMessage =
+          err instanceof Error ? err.message : "Slip extraction failed";
+      }
 
-        return {
-          jobId: job.id,
-          slipId: slip.id,
-          status: "needs_review",
-          currency: "THB",
-          reviewUrl: `/review?slipId=${slip.id}`,
-          errorMessage: safeError,
-        };
+      // Handle failed or materially unusable provider response
+      if (newExtractionFailed || !rawExtraction) {
+        if (isReprocess && existingExtraction) {
+          // Reprocess Quality Gate: Preserve existing extraction completely
+          const diagJson = JSON.stringify({
+            parser: slip.parser_version || "v2-vision",
+            provider: "ai-vision",
+            errorCode: extractionErrorCode || "VISION_EMPTY_EXTRACTION",
+            safeErrorMessage: "การประมวลผลใหม่อ่านข้อมูลได้ไม่ครบ จึงคงข้อมูลเดิมไว้",
+            preservedPrevious: true,
+            completenessScore: {
+              previous: prevScore,
+              new: 0,
+              merged: prevScore,
+            },
+            fieldMergeOccurred: false,
+          });
+
+          await DataStore.updateSlipJob(userId, job.id, {
+            status: "needs_review",
+            error_code: extractionErrorCode || "VISION_EMPTY_EXTRACTION",
+            safe_error_message: diagJson,
+            finished_at: new Date().toISOString(),
+          });
+
+          await DataStore.updateSlip(userId, slip.id, {
+            status: "needs_review",
+            processed_at: new Date().toISOString(),
+          });
+
+          return {
+            jobId: job.id,
+            slipId: slip.id,
+            status: "needs_review",
+            currency: "THB",
+            amount: existingExtraction.amount ?? undefined,
+            reviewUrl: `/review?slipId=${slip.id}`,
+            extracted: existingExtraction,
+            overallConfidence: slip.overall_confidence ?? undefined,
+            warningMessage: "การประมวลผลใหม่อ่านข้อมูลได้ไม่ครบ จึงคงข้อมูลเดิมไว้",
+            preservedPrevious: true,
+            completenessScore: prevScore,
+            errorCode: extractionErrorCode || "VISION_EMPTY_EXTRACTION",
+            errorMessage: "การประมวลผลใหม่อ่านข้อมูลได้ไม่ครบ จึงคงข้อมูลเดิมไว้",
+          };
+        } else {
+          // Initial first-time ingestion failure
+          const safeError = extractionErrorMessage || "Slip extraction failed";
+          await DataStore.updateSlip(userId, slip.id, {
+            status: "needs_review",
+          });
+          await DataStore.updateSlipJob(userId, job.id, {
+            status: "needs_review",
+            error_code: extractionErrorCode || "VISION_EXTRACTION_FAILED",
+            safe_error_message: safeError,
+            finished_at: new Date().toISOString(),
+          });
+
+          return {
+            jobId: job.id,
+            slipId: slip.id,
+            status: "needs_review",
+            currency: "THB",
+            reviewUrl: `/review?slipId=${slip.id}`,
+            errorCode: extractionErrorCode || "VISION_EXTRACTION_FAILED",
+            errorMessage: safeError,
+          };
+        }
       }
 
       // 7b. QR and Vision Cross-Check & Corroboration
       let qrMismatch = false;
       if (qrPayload) {
         const qrParsed = parseSlipQrPayload(qrPayload);
-        if (qrParsed?.amount != null && extraction.amount != null) {
-          if (Math.abs(qrParsed.amount - extraction.amount) > 0.01) {
+        if (qrParsed?.amount != null && rawExtraction.amount != null) {
+          if (Math.abs(qrParsed.amount - rawExtraction.amount) > 0.01) {
             qrMismatch = true;
-            extraction.fieldConfidence.amount = Math.min(
-              extraction.fieldConfidence.amount || 0.5,
+            rawExtraction.fieldConfidence.amount = Math.min(
+              rawExtraction.fieldConfidence.amount || 0.5,
               0.4
             );
           } else {
-            extraction.fieldConfidence.amount = 0.99;
+            rawExtraction.fieldConfidence.amount = 0.99;
           }
-        } else if (extraction.amount == null && qrParsed?.amount != null) {
-          extraction.amount = qrParsed.amount;
-          extraction.fieldConfidence.amount = qrParsed.fieldConfidence?.amount || 0.95;
+        } else if (rawExtraction.amount == null && qrParsed?.amount != null) {
+          rawExtraction.amount = qrParsed.amount;
+          rawExtraction.fieldConfidence.amount = qrParsed.fieldConfidence?.amount || 0.95;
         }
 
-        if (qrParsed?.reference && !extraction.reference) {
-          extraction.reference = qrParsed.reference;
-          extraction.fieldConfidence.reference = qrParsed.fieldConfidence?.reference || 0.95;
+        if (qrParsed?.reference && !rawExtraction.reference) {
+          rawExtraction.reference = qrParsed.reference;
+          rawExtraction.fieldConfidence.reference = qrParsed.fieldConfidence?.reference || 0.95;
         }
       }
+
+      // 7c. Extraction Quality Gate & Merging
+      let extraction: SlipExtraction = rawExtraction;
+      let preservedPrevious = false;
+      let fieldMergeOccurred = false;
+      const newScore = calculateCompletenessScore(rawExtraction);
+      let mergedScore = newScore;
+
+      if (isReprocess && existingExtraction) {
+        const mergeResult = mergeSlipExtractions(existingExtraction, rawExtraction);
+        extraction = mergeResult.merged;
+        mergedScore = calculateCompletenessScore(extraction);
+        fieldMergeOccurred = mergeResult.fieldMergeOccurred;
+
+        const isIncomingDegraded =
+          newScore < prevScore ||
+          (!isAmountValid(rawExtraction.amount) && isAmountValid(existingExtraction.amount)) ||
+          mergeResult.preservedFields.length > 0;
+
+        if (isIncomingDegraded) {
+          preservedPrevious = true;
+        }
+      }
+
+      const warningMessage = preservedPrevious
+        ? "การประมวลผลใหม่อ่านข้อมูลได้ไม่ครบ จึงคงข้อมูลเดิมไว้"
+        : undefined;
+
+      const jobDiagnostics = JSON.stringify({
+        parser: slip.parser_version || "v2-vision",
+        provider: "ai-vision",
+        errorCode: preservedPrevious ? "QUALITY_GATE_RETAINED_PREVIOUS" : null,
+        safeErrorMessage: warningMessage || null,
+        preservedPrevious,
+        completenessScore: {
+          previous: prevScore,
+          new: newScore,
+          merged: mergedScore,
+        },
+        fieldMergeOccurred,
+      });
 
       // 8. Bank Normalization
       const normalizedSenderBank = normalizeBankName(extraction.sender?.bank);
@@ -355,8 +473,14 @@ export class SlipProcessor {
         );
       }
 
+      const effectiveConfidence =
+        preservedPrevious && slip.overall_confidence != null
+          ? Math.max(slip.overall_confidence, confidenceDecision.overallConfidence)
+          : confidenceDecision.overallConfidence;
+
       // 15. Execution: Auto-Create OR Review Inbox
-      if (confidenceDecision.canAutoCreate) {
+      // Note: If previous was preserved due to degraded reprocess, NEVER auto-create.
+      if (confidenceDecision.canAutoCreate && !preservedPrevious) {
         // Auto-Create Transaction
         const newTx = await DataStore.createTransaction(userId, {
           type: directionClass.suggestedType,
@@ -382,7 +506,7 @@ export class SlipProcessor {
         await DataStore.updateSlip(userId, slip.id, {
           status: "created",
           linked_transaction_id: newTx.id,
-          qr_payload: qrPayload,
+          qr_payload: qrPayload || slip.qr_payload,
           extracted_json: extraction,
           overall_confidence: confidenceDecision.overallConfidence,
           parser_version: "v2-vision",
@@ -391,6 +515,7 @@ export class SlipProcessor {
 
         await DataStore.updateSlipJob(userId, job.id, {
           status: "created",
+          safe_error_message: isReprocess ? jobDiagnostics : null,
           finished_at: new Date().toISOString(),
         });
 
@@ -406,20 +531,24 @@ export class SlipProcessor {
           direction: directionClass.direction,
           matchedFromAccountId: senderMatch.accountId,
           matchedToAccountId: receiverMatch.accountId,
+          preservedPrevious: false,
+          completenessScore: mergedScore,
         };
       } else {
         // Send to Review Inbox
         await DataStore.updateSlip(userId, slip.id, {
           status: "needs_review",
-          qr_payload: qrPayload,
+          qr_payload: qrPayload || slip.qr_payload,
           extracted_json: extraction,
-          overall_confidence: confidenceDecision.overallConfidence,
+          overall_confidence: effectiveConfidence,
           parser_version: "v2-vision",
           processed_at: new Date().toISOString(),
         });
 
         await DataStore.updateSlipJob(userId, job.id, {
           status: "needs_review",
+          error_code: preservedPrevious ? "QUALITY_GATE_RETAINED_PREVIOUS" : null,
+          safe_error_message: isReprocess ? jobDiagnostics : (confidenceDecision.reasons.join(", ") || null),
           finished_at: new Date().toISOString(),
         });
 
@@ -431,15 +560,57 @@ export class SlipProcessor {
           currency: "THB",
           reviewUrl: `/review?slipId=${slip.id}`,
           extracted: extraction,
-          overallConfidence: confidenceDecision.overallConfidence,
+          overallConfidence: effectiveConfidence,
           direction: directionClass.direction,
           matchedFromAccountId: senderMatch.accountId,
           matchedToAccountId: receiverMatch.accountId,
-          errorMessage: confidenceDecision.reasons.join(", "),
+          errorMessage: warningMessage || confidenceDecision.reasons.join(", "),
+          warningMessage,
+          preservedPrevious,
+          completenessScore: mergedScore,
         };
       }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "Processing error";
+      if (isReprocess && existingExtraction) {
+        const diagJson = JSON.stringify({
+          parser: slip.parser_version || "v2-vision",
+          provider: "ai-vision",
+          errorCode: "PROCESSING_ERROR",
+          safeErrorMessage: msg,
+          preservedPrevious: true,
+          completenessScore: {
+            previous: prevScore,
+            new: 0,
+            merged: prevScore,
+          },
+          fieldMergeOccurred: false,
+        });
+        await DataStore.updateSlip(userId, slip.id, { status: "needs_review" });
+        await DataStore.updateSlipJob(userId, job.id, {
+          status: "needs_review",
+          error_code: "PROCESSING_ERROR",
+          safe_error_message: diagJson,
+          finished_at: new Date().toISOString(),
+        });
+
+        return {
+          jobId: job.id,
+          slipId: slip.id,
+          status: "needs_review",
+          currency: "THB",
+          amount: existingExtraction.amount ?? undefined,
+          reviewUrl: `/review?slipId=${slip.id}`,
+          extracted: existingExtraction,
+          overallConfidence: slip.overall_confidence ?? undefined,
+          warningMessage: "การประมวลผลใหม่อ่านข้อมูลได้ไม่ครบ จึงคงข้อมูลเดิมไว้",
+          preservedPrevious: true,
+          completenessScore: prevScore,
+          errorCode: "PROCESSING_ERROR",
+          errorMessage: "การประมวลผลใหม่อ่านข้อมูลได้ไม่ครบ จึงคงข้อมูลเดิมไว้",
+        };
+      }
+
       await DataStore.updateSlip(userId, slip.id, { status: "failed" });
       await DataStore.updateSlipJob(userId, job.id, {
         status: "failed",

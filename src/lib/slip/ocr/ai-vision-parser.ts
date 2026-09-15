@@ -8,6 +8,7 @@ import {
 } from "./thai-slip-normalizer";
 import { normalizeBankName } from "../bank-normalization";
 import { parseSlipQrPayload } from "../qr/parser";
+import { isMateriallyUnusable } from "../quality-gate";
 
 const THAI_SLIP_SYSTEM_PROMPT = `You are an expert AI vision system specialized in extracting structured data from Thai bank transfer slips (สลิปโอนเงินธนาคาร).
 Supported banks include: KBank (K PLUS, MAKE by KBank), SCB (SCB EASY), Krungthai (Krungthai NEXT, Paotang), Bangkok Bank (Bualuang mBanking), TTB (TTB Touch), Krungsri (KMA), GSB (MyMo), BAAC, CIMB, UOB, PromptPay, etc.
@@ -117,7 +118,16 @@ export class AiVisionSlipParser implements VisionSlipParser {
     }
 
     // 3. Post-process & Normalize Output with strict Thai banking logic
-    return this.postProcessExtraction(rawOutput, input, providerUsed);
+    const extraction = this.postProcessExtraction(rawOutput, input, providerUsed);
+
+    // 4. Extraction Quality Gate: ensure response contains usable data
+    if (isMateriallyUnusable(extraction)) {
+      const err = new Error("Vision extraction returned no usable financial data (empty response)");
+      (err as unknown as { code: string }).code = "VISION_EMPTY_EXTRACTION";
+      throw err;
+    }
+
+    return extraction;
   }
 
   /**
