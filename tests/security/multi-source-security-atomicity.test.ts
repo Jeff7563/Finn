@@ -950,6 +950,14 @@ describe("Phase 3 Multi-Source Atomicity & Cross-User Security Suite", () => {
       expect(sql).toMatch(
         /ingestion_item_id\s+UUID\s+NULL\s+REFERENCES\s+public\.ingestion_items\(id\)\s+ON\s+DELETE\s+RESTRICT/i
       );
+      // Transaction evidence cannot be cascade-deleted by deleting the transaction
+      expect(sql).toMatch(
+        /transaction_id\s+UUID\s+NOT\s+NULL\s+REFERENCES\s+public\.transactions\(id\)\s+ON\s+DELETE\s+RESTRICT/i
+      );
+      // Reconciliation runs cannot be cascade-deleted by deleting the account
+      expect(sql).toMatch(
+        /account_id\s+UUID\s+NOT\s+NULL\s+REFERENCES\s+public\.accounts\(id\)\s+ON\s+DELETE\s+RESTRICT/i
+      );
     });
 
     function evaluateDirectClientTableMutation(
@@ -1003,12 +1011,13 @@ describe("Phase 3 Multi-Source Atomicity & Cross-User Security Suite", () => {
   // ==========================================================================
   describe("11. Cascade Delete Protection & Foreign Key Restrict", () => {
     function simulateDeleteWithForeignKeyCheck(
-      targetEntity: "source_document" | "ingestion_item" | "slip",
+      targetEntity: "source_document" | "ingestion_item" | "slip" | "transaction" | "account",
       targetId: string,
       state: {
         documents: { id: string }[];
         items: { id: string; source_document_id: string }[];
-        evidence: { id: string; ingestion_item_id?: string | null; slip_id?: string | null }[];
+        evidence: { id: string; ingestion_item_id?: string | null; slip_id?: string | null; transaction_id?: string | null }[];
+        reconciliation_runs?: { id: string; account_id: string }[];
       }
     ): { deleted: boolean; error?: string } {
       if (targetEntity === "source_document") {
@@ -1033,6 +1042,24 @@ describe("Phase 3 Multi-Source Atomicity & Cross-User Security Suite", () => {
           return {
             deleted: false,
             error: `foreign key constraint violation: transaction_evidence references slip ${targetId} (ON DELETE RESTRICT)`,
+          };
+        }
+      } else if (targetEntity === "transaction") {
+        const hasDependentEvidence = state.evidence.some((e) => e.transaction_id === targetId);
+        if (hasDependentEvidence) {
+          return {
+            deleted: false,
+            error: `foreign key constraint violation: transaction_evidence references transaction ${targetId} (ON DELETE RESTRICT)`,
+          };
+        }
+      } else if (targetEntity === "account") {
+        const hasDependentReconciliation = (state.reconciliation_runs || []).some(
+          (r) => r.account_id === targetId
+        );
+        if (hasDependentReconciliation) {
+          return {
+            deleted: false,
+            error: `foreign key constraint violation: reconciliation_runs reference account ${targetId} (ON DELETE RESTRICT)`,
           };
         }
       }
@@ -1073,6 +1100,114 @@ describe("Phase 3 Multi-Source Atomicity & Cross-User Security Suite", () => {
       const res = simulateDeleteWithForeignKeyCheck("slip", "slip-test-1", state);
       expect(res.deleted).toBe(false);
       expect(res.error).toContain("ON DELETE RESTRICT");
+    });
+
+    it("blocks transaction deletion when linked transaction_evidence exists (ON DELETE RESTRICT)", async () => {
+      // 1. Static simulation check
+      const state = {
+        documents: [],
+        items: [],
+        evidence: [{ id: "ev-tx-1", transaction_id: "tx-with-evidence" }],
+      };
+      const res = simulateDeleteWithForeignKeyCheck("transaction", "tx-with-evidence", state);
+      expect(res.deleted).toBe(false);
+      expect(res.error).toContain("ON DELETE RESTRICT");
+
+      // 2. Live DataStore check
+      const [item] = await MemoryDataStore.createIngestionItems(userAlice, [
+        {
+          source_document_id: aliceDoc.id,
+          item_type: "statement_row",
+          status: "pending",
+          raw_data: { line: "tx evidence item" },
+        },
+      ]);
+
+      const tx = await MemoryDataStore.createTransaction(userAlice, {
+        type: "expense",
+        amount: 250,
+        currency: "THB",
+        transaction_date: "2026-09-10T07:30:00.000Z",
+        from_account_id: aliceAccount.id,
+        source: "manual",
+        tax_deductible: false,
+      });
+
+      await MemoryDataStore.createTransactionEvidence(userAlice, {
+        transaction_id: tx.id,
+        evidence_type: "statement_row",
+        ingestion_item_id: item.id,
+      });
+
+      // Attempting to delete transaction must fail closed because evidence exists
+      await expect(
+        MemoryDataStore.deleteTransaction(userAlice, tx.id)
+      ).rejects.toThrow("associated transaction evidence exists (foreign key constraint ON DELETE RESTRICT)");
+
+      // Transaction remains in store
+      const txs = await MemoryDataStore.getTransactions(userAlice);
+      expect(txs.some((t) => t.id === tx.id)).toBe(true);
+    });
+
+    it("blocks account deletion when reconciliation history exists (ON DELETE RESTRICT)", async () => {
+      // 1. Static simulation check
+      const state = {
+        documents: [],
+        items: [],
+        evidence: [],
+        reconciliation_runs: [{ id: "rec-run-1", account_id: aliceAccount.id }],
+      };
+      const res = simulateDeleteWithForeignKeyCheck("account", aliceAccount.id, state);
+      expect(res.deleted).toBe(false);
+      expect(res.error).toContain("ON DELETE RESTRICT");
+      expect(res.error).toContain("reconciliation_runs reference account");
+    });
+
+    it("allows unrelated/manual transaction with no evidence to be deleted (existing deletion behavior)", async () => {
+      const manualTx = await MemoryDataStore.createTransaction(userAlice, {
+        type: "expense",
+        amount: 75,
+        currency: "THB",
+        transaction_date: "2026-09-10T07:30:00.000Z",
+        from_account_id: aliceAccount.id,
+        source: "manual",
+        tax_deductible: false,
+      });
+
+      // Transaction with no evidence: deletion succeeds
+      await expect(
+        MemoryDataStore.deleteTransaction(userAlice, manualTx.id)
+      ).resolves.not.toThrow();
+
+      const txs = await MemoryDataStore.getTransactions(userAlice);
+      expect(txs.some((t) => t.id === manualTx.id)).toBe(false);
+    });
+
+    it("allows account with no reconciliation history to follow existing deletion/archival behavior", async () => {
+      const emptyAccount = await MemoryDataStore.createAccount(userAlice, {
+        name: "Temporary Account",
+        type: "cash",
+        currency: "THB",
+        opening_balance: 0,
+      });
+
+      // Foreign key check passes for account without reconciliation
+      const state = {
+        documents: [],
+        items: [],
+        evidence: [],
+        reconciliation_runs: [],
+      };
+      const res = simulateDeleteWithForeignKeyCheck("account", emptyAccount.id, state);
+      expect(res.deleted).toBe(true);
+
+      // Existing archival behavior succeeds
+      await expect(
+        MemoryDataStore.archiveAccount(userAlice, emptyAccount.id)
+      ).resolves.not.toThrow();
+
+      const refreshed = await MemoryDataStore.getAccountById(userAlice, emptyAccount.id);
+      expect(refreshed?.active).toBe(false);
     });
   });
 

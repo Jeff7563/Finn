@@ -194,6 +194,10 @@ During operator review of commit `4723f69120a23aff25e7639b8e1f85a61874c970`, 11 
 | 60 | Binary retention preserves metadata & evidence intact | `tests/security/multi-source-security-atomicity.test.ts` | `prunes binary storage path while keeping source_document, ingestion item, and evidence intact` | **PASS** |
 | 61 | Transfer Inbox creation validation (both accounts, distinct, owned) | `tests/security/multi-source-security-atomicity.test.ts` | `rejects transfer creation when toAccountId is missing / identical / foreign` | **PASS** |
 | 62 | Transfer creation succeeds with distinct accounts & links evidence | `tests/security/multi-source-security-atomicity.test.ts` | `successfully creates transfer transaction with two distinct owned accounts and records evidence link` | **PASS** |
+| 63 | Transaction with evidence blocked from deletion (RESTRICT) | `tests/security/multi-source-security-atomicity.test.ts` | `blocks transaction deletion when linked transaction_evidence exists (ON DELETE RESTRICT)` | **PASS** |
+| 64 | Account with reconciliation history blocked from deletion (RESTRICT) | `tests/security/multi-source-security-atomicity.test.ts` | `blocks account deletion when reconciliation history exists (ON DELETE RESTRICT)` | **PASS** |
+| 65 | Unrelated manual transaction without evidence follows existing deletion | `tests/security/multi-source-security-atomicity.test.ts` | `allows unrelated/manual transaction with no evidence to be deleted (existing deletion behavior)` | **PASS** |
+| 66 | Account without reconciliation history follows existing deletion/archival | `tests/security/multi-source-security-atomicity.test.ts` | `allows account with no reconciliation history to follow existing deletion/archival behavior` | **PASS** |
 
 ---
 
@@ -204,7 +208,7 @@ All 5 verification gates have passed completely:
 ```
 [Gate 1: ESLint]          ──► PASS  (0 errors, 0 warnings)
 [Gate 2: TypeScript]      ──► PASS  (tsc --noEmit exited 0)
-[Gate 3: Vitest Unit]     ──► PASS  (28 test files, 386 tests passed)
+[Gate 3: Vitest Unit]     ──► PASS  (28 test files, 390 tests passed)
 [Gate 4: Next.js Build]   ──► PASS  (Compiled 24 routes + dynamic inbox route)
 [Gate 5: Playwright E2E]  ──► PASS  (78 tests passed on Desktop & Mobile)
 ```
@@ -220,7 +224,7 @@ All 5 verification gates have passed completely:
    - Exit code: 0
 
 3. **Unit & Integration Test Suite (`npm test`)**:
-   - Result: 28 test files passed, 386 tests passed (0 failed).
+   - Result: 28 test files passed, 390 tests passed (0 failed).
    - Exit code: 0
 
 4. **Production Build (`npm run build`)**:

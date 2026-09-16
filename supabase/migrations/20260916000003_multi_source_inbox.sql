@@ -201,7 +201,7 @@ REVOKE DELETE ON public.ingestion_items FROM authenticated, anon;
 CREATE TABLE IF NOT EXISTS public.transaction_evidence (
     id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id             UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
-    transaction_id      UUID NOT NULL REFERENCES public.transactions(id) ON DELETE CASCADE,
+    transaction_id      UUID NOT NULL REFERENCES public.transactions(id) ON DELETE RESTRICT,
     slip_id             UUID NULL REFERENCES public.slips(id) ON DELETE RESTRICT,
     ingestion_item_id   UUID NULL REFERENCES public.ingestion_items(id) ON DELETE RESTRICT,
     evidence_type       TEXT NOT NULL CHECK (evidence_type IN ('slip', 'email_notification', 'statement_row', 'api_import')),
@@ -389,7 +389,7 @@ CREATE TRIGGER trg_validate_transaction_evidence_ownership
 CREATE TABLE IF NOT EXISTS public.reconciliation_runs (
     id                      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id                 UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
-    account_id              UUID NOT NULL REFERENCES public.accounts(id) ON DELETE CASCADE,
+    account_id              UUID NOT NULL REFERENCES public.accounts(id) ON DELETE RESTRICT,
     target_instant          TIMESTAMPTZ NOT NULL,
     authoritative_balance   BIGINT NOT NULL, -- Satang integer
     calculated_balance      BIGINT NULL,     -- Satang integer (NULL if cannot calculate safely)

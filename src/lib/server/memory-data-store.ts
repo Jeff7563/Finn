@@ -728,6 +728,14 @@ export const MemoryDataStore: IDataStore = {
     );
     if (idx === -1) throw new Error("Transaction not found or access denied");
 
+    // Foreign key constraint: transaction_evidence(transaction_id) ON DELETE RESTRICT
+    const hasEvidence = dbState.transaction_evidence.some((e) => e.transaction_id === id);
+    if (hasEvidence) {
+      throw new Error(
+        `Cannot delete transaction ${id}: associated transaction evidence exists (foreign key constraint ON DELETE RESTRICT)`
+      );
+    }
+
     dbState.transactions.splice(idx, 1);
   },
 
