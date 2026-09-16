@@ -16,6 +16,7 @@ import {
   LogOut,
   X,
   FileCheck,
+  Inbox,
 } from "lucide-react";
 import { signOutAction } from "@/app/actions/auth";
 
@@ -28,6 +29,7 @@ export function MobileBottomNav() {
     pathname.startsWith("/transactions") && pathname !== "/transactions/new";
   const isOverview = pathname.startsWith("/overview");
   const isMoreActive =
+    pathname.startsWith("/inbox") ||
     pathname.startsWith("/accounts") ||
     pathname.startsWith("/people") ||
     pathname.startsWith("/merchants") ||
@@ -85,6 +87,14 @@ export function MobileBottomNav() {
               >
                 <Tag className="w-4 h-4 text-text-secondary" />
                 <span>หมวดหมู่</span>
+              </Link>
+              <Link
+                href="/inbox"
+                onClick={() => setShowMore(false)}
+                className="flex items-center gap-3 p-3.5 rounded-xl bg-surface-soft hover:bg-surface-muted text-text-primary font-medium text-sm border border-border transition-colors min-h-[44px]"
+              >
+                <Inbox className="w-4 h-4 text-text-secondary" />
+                <span>กล่องข้อความ</span>
               </Link>
               <Link
                 href="/review"

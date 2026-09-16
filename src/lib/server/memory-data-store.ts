@@ -24,6 +24,14 @@ import {
   SlipCorrection,
   AccountMatchAlias,
 } from "@/types/slip";
+import {
+  SourceConnection,
+  SourceDocument,
+  ImportBatch,
+  IngestionItem,
+  TransactionEvidence,
+  ReconciliationRun,
+} from "@/types/multi-source";
 import { normalizeBankName } from "../slip/bank-normalization";
 import {
   countVisibleDigits,
@@ -93,6 +101,12 @@ export interface MemoryDatabaseState {
   slip_ingestion_jobs: SlipIngestionJob[];
   slip_corrections: SlipCorrection[];
   account_match_aliases: AccountMatchAlias[];
+  source_connections: SourceConnection[];
+  source_documents: SourceDocument[];
+  import_batches: ImportBatch[];
+  ingestion_items: IngestionItem[];
+  transaction_evidence: TransactionEvidence[];
+  reconciliation_runs: ReconciliationRun[];
 }
 
 function getInitialState(): MemoryDatabaseState {
@@ -114,6 +128,12 @@ function getInitialState(): MemoryDatabaseState {
     slip_ingestion_jobs: [],
     slip_corrections: [],
     account_match_aliases: [],
+    source_connections: [],
+    source_documents: [],
+    import_batches: [],
+    ingestion_items: [],
+    transaction_evidence: [],
+    reconciliation_runs: [],
   };
 }
 
@@ -1394,6 +1414,392 @@ export const MemoryDataStore: IDataStore = {
       }
       throw err;
     }
+  },
+
+  // ============================================================================
+  // Source Connections
+  // ============================================================================
+  async getSourceConnections(userId: string): Promise<SourceConnection[]> {
+    return getDbState().source_connections.filter((c) => c.user_id === userId);
+  },
+
+  async getSourceConnectionById(userId: string, id: string): Promise<SourceConnection | null> {
+    return (
+      getDbState().source_connections.find((c) => c.user_id === userId && c.id === id) || null
+    );
+  },
+
+  async createSourceConnection(
+    userId: string,
+    data: Partial<SourceConnection>
+  ): Promise<SourceConnection> {
+    const dbState = getDbState();
+    if (data.provider && data.provider_account_id) {
+      const exists = dbState.source_connections.some(
+        (c) =>
+          c.user_id === userId &&
+          c.provider === data.provider &&
+          c.provider_account_id === data.provider_account_id
+      );
+      if (exists) {
+        throw new Error(
+          `Unique constraint violation: connection already exists for provider ${data.provider} and account ${data.provider_account_id}`
+        );
+      }
+    }
+
+    const newConnection: SourceConnection = {
+      id: data.id || crypto.randomUUID(),
+      user_id: userId,
+      provider: data.provider || "manual",
+      label: data.label || null,
+      status: data.status || "active",
+      provider_account_id: data.provider_account_id || null,
+      last_synced_at: data.last_synced_at || null,
+      config: data.config || {},
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+
+    dbState.source_connections.push(newConnection);
+    return newConnection;
+  },
+
+  async updateSourceConnection(
+    userId: string,
+    id: string,
+    data: Partial<SourceConnection>
+  ): Promise<SourceConnection> {
+    const dbState = getDbState();
+    const idx = dbState.source_connections.findIndex(
+      (c) => c.user_id === userId && c.id === id
+    );
+    if (idx === -1) throw new Error("Source connection not found");
+
+    const updated: SourceConnection = {
+      ...dbState.source_connections[idx],
+      ...data,
+      updated_at: new Date().toISOString(),
+    };
+    dbState.source_connections[idx] = updated;
+    return updated;
+  },
+
+  async deleteSourceConnection(userId: string, id: string): Promise<void> {
+    const dbState = getDbState();
+    dbState.source_connections = dbState.source_connections.filter(
+      (c) => !(c.user_id === userId && c.id === id)
+    );
+  },
+
+  // ============================================================================
+  // Source Documents
+  // ============================================================================
+  async getSourceDocuments(userId: string): Promise<SourceDocument[]> {
+    return getDbState().source_documents.filter((d) => d.user_id === userId);
+  },
+
+  async getSourceDocumentById(userId: string, id: string): Promise<SourceDocument | null> {
+    return (
+      getDbState().source_documents.find((d) => d.user_id === userId && d.id === id) || null
+    );
+  },
+
+  async createSourceDocument(
+    userId: string,
+    data: Partial<SourceDocument>
+  ): Promise<SourceDocument> {
+    const dbState = getDbState();
+    const newDoc: SourceDocument = {
+      id: data.id || crypto.randomUUID(),
+      user_id: userId,
+      connection_id: data.connection_id || null,
+      document_type: data.document_type || "csv_statement",
+      storage_path: data.storage_path || null,
+      original_filename: data.original_filename || null,
+      file_hash: data.file_hash || null,
+      file_size: data.file_size || null,
+      status: data.status || "received",
+      provider_metadata: data.provider_metadata || {},
+      received_at: data.received_at || new Date().toISOString(),
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+
+    dbState.source_documents.push(newDoc);
+    return newDoc;
+  },
+
+  // ============================================================================
+  // Import Batches
+  // ============================================================================
+  async getImportBatches(userId: string): Promise<ImportBatch[]> {
+    return getDbState().import_batches.filter((b) => b.user_id === userId);
+  },
+
+  async getImportBatchById(userId: string, id: string): Promise<ImportBatch | null> {
+    return (
+      getDbState().import_batches.find((b) => b.user_id === userId && b.id === id) || null
+    );
+  },
+
+  async createImportBatch(
+    userId: string,
+    data: Partial<ImportBatch>
+  ): Promise<ImportBatch> {
+    const dbState = getDbState();
+    const newBatch: ImportBatch = {
+      id: data.id || crypto.randomUUID(),
+      user_id: userId,
+      connection_id: data.connection_id || null,
+      source_document_id: data.source_document_id || null,
+      batch_type: data.batch_type || "csv_statement",
+      status: data.status || "pending",
+      total_items: data.total_items || 0,
+      success_count: data.success_count || 0,
+      error_count: data.error_count || 0,
+      duplicate_count: data.duplicate_count || 0,
+      metadata: data.metadata || {},
+      started_at: data.started_at || new Date().toISOString(),
+      completed_at: data.completed_at || null,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+
+    dbState.import_batches.push(newBatch);
+    return newBatch;
+  },
+
+  async updateImportBatch(
+    userId: string,
+    id: string,
+    data: Partial<ImportBatch>
+  ): Promise<ImportBatch> {
+    const dbState = getDbState();
+    const idx = dbState.import_batches.findIndex((b) => b.user_id === userId && b.id === id);
+    if (idx === -1) throw new Error("Import batch not found");
+
+    const updated: ImportBatch = {
+      ...dbState.import_batches[idx],
+      ...data,
+      updated_at: new Date().toISOString(),
+    };
+    dbState.import_batches[idx] = updated;
+    return updated;
+  },
+
+  // ============================================================================
+  // Ingestion Items
+  // ============================================================================
+  async getIngestionItems(
+    userId: string,
+    filter?: { status?: string; sourceDocumentId?: string }
+  ): Promise<IngestionItem[]> {
+    return getDbState().ingestion_items.filter((item) => {
+      if (item.user_id !== userId) return false;
+      if (filter?.status && item.status !== filter.status) return false;
+      if (filter?.sourceDocumentId && item.source_document_id !== filter.sourceDocumentId)
+        return false;
+      return true;
+    });
+  },
+
+  async getIngestionItemById(userId: string, id: string): Promise<IngestionItem | null> {
+    return (
+      getDbState().ingestion_items.find((i) => i.user_id === userId && i.id === id) || null
+    );
+  },
+
+  async createIngestionItems(
+    userId: string,
+    items: Array<Partial<IngestionItem>>
+  ): Promise<IngestionItem[]> {
+    const dbState = getDbState();
+    const created: IngestionItem[] = [];
+
+    for (const item of items) {
+      const newItem: IngestionItem = {
+        id: item.id || crypto.randomUUID(),
+        user_id: userId,
+        source_document_id: item.source_document_id || "unknown-doc",
+        connection_id: item.connection_id || null,
+        item_type: item.item_type || "statement_row",
+        status: item.status || "pending",
+        raw_data: item.raw_data || null,
+        parsed_data: item.parsed_data || null,
+        fingerprint: item.fingerprint || null,
+        provider_external_id: item.provider_external_id || null,
+        reference_number: item.reference_number || null,
+        match_class: item.match_class || null,
+        matched_transaction_id: item.matched_transaction_id || null,
+        confidence_score: item.confidence_score !== undefined ? item.confidence_score : null,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      };
+      dbState.ingestion_items.push(newItem);
+      created.push(newItem);
+    }
+
+    return created;
+  },
+
+  async updateIngestionItem(
+    userId: string,
+    id: string,
+    data: Partial<IngestionItem>
+  ): Promise<IngestionItem> {
+    const dbState = getDbState();
+    const idx = dbState.ingestion_items.findIndex((i) => i.user_id === userId && i.id === id);
+    if (idx === -1) throw new Error("Ingestion item not found");
+
+    const updated: IngestionItem = {
+      ...dbState.ingestion_items[idx],
+      ...data,
+      updated_at: new Date().toISOString(),
+    };
+    dbState.ingestion_items[idx] = updated;
+    return updated;
+  },
+
+  // ============================================================================
+  // Transaction Evidence Bridge (Decision 1)
+  // Enforces:
+  // - Exactly one of slip_id or ingestion_item_id is non-null
+  // - Slip evidence can link to at most one transaction
+  // - Ingestion item can link to at most one transaction
+  // - All linked records must belong to the same user (cross-user ownership integrity)
+  // ============================================================================
+  async getTransactionEvidence(
+    userId: string,
+    transactionId: string
+  ): Promise<TransactionEvidence[]> {
+    return getDbState().transaction_evidence.filter(
+      (e) => e.user_id === userId && e.transaction_id === transactionId
+    );
+  },
+
+  async createTransactionEvidence(
+    userId: string,
+    data: Partial<TransactionEvidence>
+  ): Promise<TransactionEvidence> {
+    const dbState = getDbState();
+
+    // 1. Constraint: Exactly one of slip_id or ingestion_item_id must be non-null
+    const hasSlip = Boolean(data.slip_id);
+    const hasItem = Boolean(data.ingestion_item_id);
+    if ((hasSlip ? 1 : 0) + (hasItem ? 1 : 0) !== 1) {
+      throw new Error(
+        "Constraint violation: Exactly one of slip_id or ingestion_item_id must be provided."
+      );
+    }
+
+    if (!data.transaction_id) {
+      throw new Error("transaction_id is required for evidence");
+    }
+
+    // 2. Cross-user integrity checks:
+    // a. Transaction must exist and belong to user
+    const tx = dbState.transactions.find((t) => t.id === data.transaction_id);
+    if (!tx || tx.user_id !== userId) {
+      throw new Error(
+        `Cross-user integrity violation: transaction ${data.transaction_id} does not belong to user ${userId}`
+      );
+    }
+
+    // b. If slip_id: slip must exist and belong to user
+    if (data.slip_id) {
+      const slip = dbState.slips.find((s) => s.id === data.slip_id);
+      if (!slip || slip.user_id !== userId) {
+        throw new Error(
+          `Cross-user integrity violation: slip ${data.slip_id} does not belong to user ${userId}`
+        );
+      }
+      // Single-transaction uniqueness for slip
+      const alreadyLinked = dbState.transaction_evidence.some(
+        (e) => e.slip_id === data.slip_id
+      );
+      if (alreadyLinked) {
+        throw new Error(
+          `Unique constraint violation: slip ${data.slip_id} is already linked to a transaction via evidence`
+        );
+      }
+    }
+
+    // c. If ingestion_item_id: item must exist and belong to user
+    if (data.ingestion_item_id) {
+      const item = dbState.ingestion_items.find((i) => i.id === data.ingestion_item_id);
+      if (!item || item.user_id !== userId) {
+        throw new Error(
+          `Cross-user integrity violation: ingestion item ${data.ingestion_item_id} does not belong to user ${userId}`
+        );
+      }
+      // Single-transaction uniqueness for ingestion item
+      const alreadyLinked = dbState.transaction_evidence.some(
+        (e) => e.ingestion_item_id === data.ingestion_item_id
+      );
+      if (alreadyLinked) {
+        throw new Error(
+          `Unique constraint violation: ingestion item ${data.ingestion_item_id} is already linked to a transaction via evidence`
+        );
+      }
+    }
+
+    const evidence: TransactionEvidence = {
+      id: data.id || crypto.randomUUID(),
+      user_id: userId,
+      transaction_id: data.transaction_id,
+      slip_id: data.slip_id || null,
+      ingestion_item_id: data.ingestion_item_id || null,
+      evidence_type: data.evidence_type || (hasSlip ? "slip" : "statement_row"),
+      created_at: new Date().toISOString(),
+    };
+
+    dbState.transaction_evidence.push(evidence);
+    return evidence;
+  },
+
+  // ============================================================================
+  // Reconciliation Runs (Decision 4 - Immutable Audit Snapshots)
+  // ============================================================================
+  async getReconciliationRuns(
+    userId: string,
+    accountId?: string
+  ): Promise<ReconciliationRun[]> {
+    return getDbState()
+      .reconciliation_runs.filter((r) => {
+        if (r.user_id !== userId) return false;
+        if (accountId && r.account_id !== accountId) return false;
+        return true;
+      })
+      .sort((a, b) => new Date(b.target_instant).getTime() - new Date(a.target_instant).getTime());
+  },
+
+  async createReconciliationRun(
+    userId: string,
+    data: Partial<ReconciliationRun>
+  ): Promise<ReconciliationRun> {
+    const dbState = getDbState();
+    if (!data.account_id || !data.target_instant || data.authoritative_balance === undefined) {
+      throw new Error("Missing required reconciliation run parameters");
+    }
+
+    const run: ReconciliationRun = {
+      id: data.id || crypto.randomUUID(),
+      user_id: userId,
+      account_id: data.account_id,
+      target_instant: data.target_instant,
+      authoritative_balance: data.authoritative_balance,
+      calculated_balance: data.calculated_balance !== undefined ? data.calculated_balance : null,
+      difference: data.difference !== undefined ? data.difference : null,
+      status: data.status || "cannot_calculate_safely",
+      source_document_id: data.source_document_id || null,
+      calculation_version: data.calculation_version || 1,
+      note: data.note || null,
+      created_at: new Date().toISOString(),
+    };
+
+    dbState.reconciliation_runs.push(run);
+    return run;
   },
 
   // Reset database for tests

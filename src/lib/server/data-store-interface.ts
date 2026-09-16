@@ -21,6 +21,14 @@ import {
   SlipIngestionJob,
   SlipCorrection,
 } from "@/types/slip";
+import {
+  SourceConnection,
+  SourceDocument,
+  ImportBatch,
+  IngestionItem,
+  TransactionEvidence,
+  ReconciliationRun,
+} from "@/types/multi-source";
 
 export interface PreloadedRelations {
   accounts?: Account[];
@@ -123,6 +131,38 @@ export interface IDataStore {
     userId: string,
     input: ConfirmSlipTransactionInput
   ): Promise<ConfirmSlipTransactionResult>;
+
+  // Source Connections
+  getSourceConnections(userId: string): Promise<SourceConnection[]>;
+  getSourceConnectionById(userId: string, id: string): Promise<SourceConnection | null>;
+  createSourceConnection(userId: string, data: Partial<SourceConnection>): Promise<SourceConnection>;
+  updateSourceConnection(userId: string, id: string, data: Partial<SourceConnection>): Promise<SourceConnection>;
+  deleteSourceConnection(userId: string, id: string): Promise<void>;
+
+  // Source Documents
+  getSourceDocuments(userId: string): Promise<SourceDocument[]>;
+  getSourceDocumentById(userId: string, id: string): Promise<SourceDocument | null>;
+  createSourceDocument(userId: string, data: Partial<SourceDocument>): Promise<SourceDocument>;
+
+  // Import Batches
+  getImportBatches(userId: string): Promise<ImportBatch[]>;
+  getImportBatchById(userId: string, id: string): Promise<ImportBatch | null>;
+  createImportBatch(userId: string, data: Partial<ImportBatch>): Promise<ImportBatch>;
+  updateImportBatch(userId: string, id: string, data: Partial<ImportBatch>): Promise<ImportBatch>;
+
+  // Ingestion Items
+  getIngestionItems(userId: string, filter?: { status?: string; sourceDocumentId?: string }): Promise<IngestionItem[]>;
+  getIngestionItemById(userId: string, id: string): Promise<IngestionItem | null>;
+  createIngestionItems(userId: string, items: Array<Partial<IngestionItem>>): Promise<IngestionItem[]>;
+  updateIngestionItem(userId: string, id: string, data: Partial<IngestionItem>): Promise<IngestionItem>;
+
+  // Transaction Evidence Bridge
+  getTransactionEvidence(userId: string, transactionId: string): Promise<TransactionEvidence[]>;
+  createTransactionEvidence(userId: string, data: Partial<TransactionEvidence>): Promise<TransactionEvidence>;
+
+  // Reconciliation Runs (Audit Snapshots - Append Only)
+  getReconciliationRuns(userId: string, accountId?: string): Promise<ReconciliationRun[]>;
+  createReconciliationRun(userId: string, data: Partial<ReconciliationRun>): Promise<ReconciliationRun>;
 
   // Test reset helper
   reset(initialState?: unknown): void;

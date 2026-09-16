@@ -14,6 +14,7 @@ import {
   LogOut,
   Plus,
   FileCheck,
+  Inbox,
 } from "lucide-react";
 import { signOutAction } from "@/app/actions/auth";
 import { ThemeQuickToggle } from "@/components/settings/ThemeSettingsControl";
@@ -32,6 +33,7 @@ const PRIMARY_NAV = [
 ];
 
 const SECONDARY_NAV = [
+  { href: "/inbox", label: "กล่องข้อความ", icon: Inbox },
   { href: "/review", label: "รอตรวจสอบ", icon: FileCheck },
   { href: "/categories", label: "หมวดหมู่", icon: Tag },
 ];
