@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { parseStrictBaselineInstant } from "../finance/formatters";
 
 export const MAX_MONEY_AMOUNT = 999_999_999_999.99;
 export const MIN_MONEY_AMOUNT = -999_999_999_999.99;
@@ -21,8 +22,11 @@ export const accountSchema = z.object({
     .optional()
     .nullable()
     .refine(
-      (v) => !v || !isNaN(Date.parse(v)),
-      "Balance as of must be a valid timestamp"
+      (v) => {
+        if (!v) return true;
+        return parseStrictBaselineInstant(v).success;
+      },
+      "Balance as of must be a valid ISO timestamp or Bangkok datetime"
     ),
 });
 

@@ -26,8 +26,12 @@ export function doesTransactionAffectAccountBalance(
   const txTime = new Date(transaction.transaction_date).getTime();
   const baselineTime = new Date(account.balance_as_of).getTime();
 
+  // Fail closed: If either timestamp is invalid/unparseable, do NOT include in current balance
   if (isNaN(txTime) || isNaN(baselineTime)) {
-    return true;
+    console.warn(
+      `[balances] Invalid timestamp encountered for account ${account.id} (baseline: ${account.balance_as_of}) or transaction ${transaction.id} (txDate: ${transaction.transaction_date}). Failing closed (excluded from current balance).`
+    );
+    return false;
   }
 
   // Strictly after baseline

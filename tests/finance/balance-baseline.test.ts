@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, beforeEach, vi } from "vitest";
 import {
   calculateAccountBalance,
   calculateAllAccountBalances,
@@ -12,10 +12,27 @@ import {
 import {
   bangkokDateTimeLocalToCanonicalInstant,
   canonicalInstantToBangkokDateTimeLocal,
+  parseStrictBaselineInstant,
 } from "@/lib/finance/formatters";
 import { accountSchema } from "@/lib/validation/schemas";
 import { Account, Category, Transaction } from "@/types/finance";
 import { MemoryDataStore } from "@/lib/server/memory-data-store";
+import {
+  createAccountAction,
+  updateAccountAction,
+} from "@/app/actions/accounts";
+
+// Mock next/cache
+vi.mock("next/cache", () => ({
+  revalidatePath: vi.fn(),
+}));
+
+// Mock auth
+const testUser = { id: "user-1", email: "user@test.local" };
+vi.mock("@/lib/server/auth", () => ({
+  requireUser: vi.fn(async () => testUser),
+  getAuthenticatedUser: vi.fn(async () => testUser),
+}));
 
 describe("Finn — Balance Baseline / As-Of Balance Architecture (22 Required Scenarios)", () => {
   // Helper to construct sample accounts
@@ -231,9 +248,10 @@ describe("Finn — Balance Baseline / As-Of Balance Architecture (22 Required Sc
       id: "cat-food",
       user_id: "user-1",
       name: "Food",
+      type: "expense",
       color: "#ff0000",
       icon: "utensils",
-      is_default: true,
+      is_system: true,
       created_at: "",
       updated_at: "",
     };
@@ -675,5 +693,206 @@ describe("Finn — Balance Baseline / As-Of Balance Architecture (22 Required Sc
       balance_as_of: null,
     });
     expect(cleared.balance_as_of).toBeNull();
+  });
+});
+
+describe("Finn — Balance Baseline Final Fail-Closed Validation Suite", () => {
+  beforeEach(() => {
+    MemoryDataStore.reset();
+  });
+
+  it("1. non-empty malformed balance_as_of submitted to create action => rejected with validation error", async () => {
+    const fd = new FormData();
+    fd.set("name", "SCB Fail Closed");
+    fd.set("type", "bank");
+    fd.set("opening_balance", "1000");
+    fd.set("balance_as_of", "not-a-valid-date");
+
+    const res = await createAccountAction(null, fd);
+    expect(res.success).toBe(false);
+    expect(res.error).toBeDefined();
+
+    // Verify no account was created in the database
+    const accounts = await MemoryDataStore.getAccounts("user-1");
+    expect(accounts.find((a) => a.name === "SCB Fail Closed")).toBeUndefined();
+  });
+
+  it("2. non-empty malformed balance_as_of submitted to update action => rejected, baseline NOT silently cleared", async () => {
+    // Existing account with active baseline
+    const existing = await MemoryDataStore.createAccount("user-1", {
+      name: "Existing KBank",
+      type: "bank",
+      currency: "THB",
+      opening_balance: 1000,
+      balance_as_of: "2026-09-16T04:30:00.000Z",
+      active: true,
+    });
+
+    const fd = new FormData();
+    fd.set("name", "Existing KBank");
+    fd.set("type", "bank");
+    fd.set("opening_balance", "1000");
+    fd.set("balance_as_of", "malformed-garbage-date");
+
+    const res = await updateAccountAction(existing.id, null, fd);
+    expect(res.success).toBe(false);
+    expect(res.error).toBeDefined();
+
+    // Verify baseline was NOT modified or cleared to null
+    const afterUpdate = await MemoryDataStore.getAccountById("user-1", existing.id);
+    expect(afterUpdate?.balance_as_of).toBe("2026-09-16T04:30:00.000Z");
+  });
+
+  it("3. intentionally empty balance_as_of => clears baseline to null", async () => {
+    const existing = await MemoryDataStore.createAccount("user-1", {
+      name: "Existing KBank",
+      type: "bank",
+      currency: "THB",
+      opening_balance: 1000,
+      balance_as_of: "2026-09-16T04:30:00.000Z",
+      active: true,
+    });
+
+    const fd = new FormData();
+    fd.set("name", "Existing KBank");
+    fd.set("type", "bank");
+    fd.set("opening_balance", "1000");
+    fd.set("balance_as_of", ""); // Intentionally empty string
+
+    const res = await updateAccountAction(existing.id, null, fd);
+    expect(res.success).toBe(true);
+
+    const afterUpdate = await MemoryDataStore.getAccountById("user-1", existing.id);
+    expect(afterUpdate?.balance_as_of).toBeNull();
+  });
+
+  it("4. valid Bangkok datetime-local => canonical UTC stored", async () => {
+    const fd = new FormData();
+    fd.set("name", "Bangkok DateTime Account");
+    fd.set("type", "bank");
+    fd.set("opening_balance", "5000");
+    fd.set("balance_as_of", "2026-09-16T11:30"); // Bangkok local wall-clock
+
+    const res = await createAccountAction(null, fd);
+    expect(res.success).toBe(true);
+
+    const accounts = await MemoryDataStore.getAccounts("user-1");
+    const created = accounts.find((a) => a.name === "Bangkok DateTime Account");
+    expect(created).toBeDefined();
+    // 11:30 Bangkok = 04:30 UTC
+    expect(created?.balance_as_of).toBe("2026-09-16T04:30:00.000Z");
+  });
+
+  it("5. valid canonical ISO => preserved as same instant", async () => {
+    const canonical = "2026-09-16T04:30:00.000Z";
+    const fd = new FormData();
+    fd.set("name", "Canonical ISO Account");
+    fd.set("type", "bank");
+    fd.set("opening_balance", "5000");
+    fd.set("balance_as_of", canonical);
+
+    const res = await createAccountAction(null, fd);
+    expect(res.success).toBe(true);
+
+    const accounts = await MemoryDataStore.getAccounts("user-1");
+    const created = accounts.find((a) => a.name === "Canonical ISO Account");
+    expect(created?.balance_as_of).toBe(canonical);
+  });
+
+  it("6. invalid tx timestamp with active baseline => does not alter balance (fail-closed)", () => {
+    const account: Account = {
+      id: "acc-failclose",
+      user_id: "user-1",
+      name: "Fail Close Account",
+      type: "bank",
+      currency: "THB",
+      opening_balance: 1000,
+      balance_as_of: "2026-09-16T04:30:00.000Z",
+      active: true,
+      created_at: "",
+      updated_at: "",
+    };
+
+    const invalidTx: Transaction = {
+      id: "tx-corrupt",
+      user_id: "user-1",
+      type: "expense",
+      amount: 400,
+      from_account_id: "acc-failclose",
+      to_account_id: null,
+      currency: "THB",
+      transaction_date: "invalid-garbage-date",
+      source: "manual",
+      confidence: 1,
+      review_status: "confirmed",
+      tax_deductible: false,
+      created_at: "",
+      updated_at: "",
+    };
+
+    expect(doesTransactionAffectAccountBalance(account, invalidTx)).toBe(false);
+    const balanceResult = calculateAccountBalance(account, [invalidTx]);
+    // Current balance remains 1000 THB; historical corrupt delta is NOT applied
+    expect(balanceResult.current_balance).toBe(1000);
+    // Corrupt transaction is still counted in transaction count
+    expect(balanceResult.transaction_count).toBe(1);
+  });
+
+  it("7. invalid baseline timestamp => does not apply arbitrary historical deltas (fail-closed)", () => {
+    const accountWithCorruptedBaseline: Account = {
+      id: "acc-corrupt-baseline",
+      user_id: "user-1",
+      name: "Corrupted Baseline Account",
+      type: "bank",
+      currency: "THB",
+      opening_balance: 1000,
+      balance_as_of: "unparseable-baseline-timestamp",
+      active: true,
+      created_at: "",
+      updated_at: "",
+    };
+
+    const validTx: Transaction = {
+      id: "tx-valid",
+      user_id: "user-1",
+      type: "expense",
+      amount: 400,
+      from_account_id: "acc-corrupt-baseline",
+      to_account_id: null,
+      currency: "THB",
+      transaction_date: "2026-09-16T05:00:00.000Z",
+      source: "manual",
+      confidence: 1,
+      review_status: "confirmed",
+      tax_deductible: false,
+      created_at: "",
+      updated_at: "",
+    };
+
+    expect(doesTransactionAffectAccountBalance(accountWithCorruptedBaseline, validTx)).toBe(false);
+    const balanceResult = calculateAccountBalance(accountWithCorruptedBaseline, [validTx]);
+    // Current balance remains 1000 THB; cannot safely determine post-baseline status
+    expect(balanceResult.current_balance).toBe(1000);
+    expect(balanceResult.transaction_count).toBe(1);
+  });
+
+  it("8. parseStrictBaselineInstant rejects environment-dependent ambiguous strings", () => {
+    // Ambiguous local formats without timezone or time
+    expect(parseStrictBaselineInstant("09/16/2026").success).toBe(false);
+    expect(parseStrictBaselineInstant("16-09-2026").success).toBe(false);
+    expect(parseStrictBaselineInstant("yesterday").success).toBe(false);
+    expect(parseStrictBaselineInstant("2026-02-30T12:00").success).toBe(false); // Invalid calendar date
+
+    // Valid formats succeed
+    expect(parseStrictBaselineInstant("2026-09-16T11:30").success).toBe(true);
+    expect(parseStrictBaselineInstant("2026-09-16T04:30:00.000Z").success).toBe(true);
+    expect(parseStrictBaselineInstant("2026-09-16T11:30:00+07:00").success).toBe(true);
+
+    // Empty formats succeed as cleared
+    const emptyRes = parseStrictBaselineInstant("");
+    expect(emptyRes.success).toBe(true);
+    if (emptyRes.success) {
+      expect(emptyRes.instant).toBeNull();
+    }
   });
 });

@@ -22,6 +22,18 @@ Finn now treats `opening_balance` as the **authoritative balance as of `balance_
 - **Independent Account Baselines**: Each account manages its own baseline independently. Transfers between accounts with different baselines evaluate eligibility per account without cross-contamination.
 - **Legacy Compatibility**: Accounts with `balance_as_of IS NULL` continue to operate with traditional Finn calculation (all transactions included).
 
+### Fail-Closed Validation Hardening (Audit Additions)
+1. **Server Actions Fail-Closed (No Silent Baseline Wipe)**:
+   `createAccountAction` and `updateAccountAction` strictly validate non-empty `balance_as_of` inputs using `extractAndValidateBaselineInput`. If an invalid or malformed datetime is submitted, the action immediately rejects the request with a validation error and **never** silently clears `balance_as_of` to `null`.
+2. **Environment-Independent Strict Parsing**:
+   `parseStrictBaselineInstant` strictly accepts only:
+   - Canonical ISO with explicit `Z` or timezone offset
+   - Valid Bangkok wall-clock `datetime-local` (`YYYY-MM-DDTHH:mm[:ss]`), bound explicitly to `+07:00`
+   - Intentionally empty strings (`""` or `null`) to clear baseline
+   - Rejects ambiguous local strings (e.g. `"09/16/2026"`, `"yesterday"`) without falling back to native `Date` parsing.
+3. **Fail-Closed Balance Calculator**:
+   `doesTransactionAffectAccountBalance` safely returns `false` if either `transaction.transaction_date` or `account.balance_as_of` is invalid or `NaN`, preventing corrupted historical data from altering account balances.
+
 ---
 
 ## 2. Verification Summary
@@ -30,8 +42,8 @@ All verification gates have passed with zero warnings or errors:
 
 | Check | Result | Details |
 |---|---|---|
-| **Balance Baseline Test Suite** | **PASS (22/22)** | All 22 required product scenarios verified in [`tests/finance/balance-baseline.test.ts`](file:///C:/Users/Jeffy/OneDrive/Desktop/agy/finn/tests/finance/balance-baseline.test.ts) |
-| **Complete Unit & Integration Suite** | **PASS (256/256)** | All 19 test suites passing (vitest) |
+| **Balance Baseline Test Suite** | **PASS (30/30)** | 22 baseline scenarios + 8 fail-closed regression tests in [`tests/finance/balance-baseline.test.ts`](file:///C:/Users/Jeffy/OneDrive/Desktop/agy/finn/tests/finance/balance-baseline.test.ts) |
+| **Complete Unit & Integration Suite** | **PASS (264/264)** | All 19 test suites passing (vitest) |
 | **Playwright E2E Suite** | **PASS (76/76)** | Desktop Chrome & Mobile iPhone 11 Pro Max passing |
 | **TypeScript Typecheck** | **PASS (0 errors)** | `tsc --noEmit` exited with code 0 |
 | **ESLint Validation** | **PASS (0 errors)** | `next lint` verified cleanly |
@@ -39,7 +51,9 @@ All verification gates have passed with zero warnings or errors:
 
 ---
 
-## 3. Detailed Verification of the 22 Required Scenarios
+## 3. Detailed Verification of the 30 Required Scenarios
+
+### Part A: 22 Baseline Product Scenarios
 
 | # | Scenario | Status | Verification Detail |
 |---|---|:---:|---|
@@ -66,6 +80,19 @@ All verification gates have passed with zero warnings or errors:
 | 21 | Existing MAKE by KBank account (legacy) | PASS | Null baseline preserves 100% backward compatibility. |
 | 22 | DataStore & Schema validation | PASS | Validates ISO strings, Bangkok datetimes, null, empty string; Memory & Supabase stores verified. |
 
+### Part B: 8 Fail-Closed Regression Scenarios
+
+| # | Fail-Closed Scenario | Status | Verification Detail |
+|---|---|:---:|---|
+| 23 | Malformed date on Create Action | PASS | `createAccountAction` rejects non-empty malformed string; account not created. |
+| 24 | Malformed date on Update Action | PASS | `updateAccountAction` rejects malformed string; existing baseline NOT cleared. |
+| 25 | Intentionally empty string | PASS | `updateAccountAction` with `""` successfully clears baseline to `null`. |
+| 26 | Bangkok `datetime-local` input | PASS | `"2026-09-16T11:30"` successfully stored as `"2026-09-16T04:30:00.000Z"`. |
+| 27 | Canonical ISO input | PASS | `"2026-09-16T04:30:00.000Z"` preserved as identical instant. |
+| 28 | Invalid tx timestamp with active baseline | PASS | Transaction with unparseable date fails closed (excluded from current balance). |
+| 29 | Invalid baseline timestamp on account | PASS | Account with corrupted baseline fails closed (does not apply arbitrary deltas). |
+| 30 | Strict parsing rejects ambiguous local strings | PASS | `"09/16/2026"`, `"yesterday"`, and out-of-range dates rejected without native Date fallback. |
+
 ---
 
 ## 4. Modified & Created Files
@@ -80,9 +107,12 @@ All verification gates have passed with zero warnings or errors:
 - [`src/types/finance.ts`](file:///C:/Users/Jeffy/OneDrive/Desktop/agy/finn/src/types/finance.ts)
   - Added `balance_as_of?: string | null;` to `Account`.
 - [`src/lib/validation/schemas.ts`](file:///C:/Users/Jeffy/OneDrive/Desktop/agy/finn/src/lib/validation/schemas.ts)
-  - Added `balance_as_of` validation to `accountSchema`.
+  - Added `balance_as_of` validation refined by `parseStrictBaselineInstant`.
+- [`src/lib/finance/formatters.ts`](file:///C:/Users/Jeffy/OneDrive/Desktop/agy/finn/src/lib/finance/formatters.ts)
+  - Added `parseStrictBaselineInstant` (strict ISO / Bangkok datetime-local parser, no fallback).
+  - Added `extractAndValidateBaselineInput` shared helper for FormData handling.
 - [`src/lib/finance/balances.ts`](file:///C:/Users/Jeffy/OneDrive/Desktop/agy/finn/src/lib/finance/balances.ts)
-  - Implemented `doesTransactionAffectAccountBalance(account, transaction): boolean`.
+  - Implemented `doesTransactionAffectAccountBalance(account, transaction): boolean` with fail-closed handling on invalid timestamps.
   - Updated `calculateAccountBalance` to decouple transaction counting from balance modification.
 
 ### Data Layer & Server Actions
@@ -91,7 +121,7 @@ All verification gates have passed with zero warnings or errors:
 - [`src/lib/server/supabase-data-store.ts`](file:///C:/Users/Jeffy/OneDrive/Desktop/agy/finn/src/lib/server/supabase-data-store.ts)
   - Added `balance_as_of` mapping and persistence to Supabase.
 - [`src/app/actions/accounts.ts`](file:///C:/Users/Jeffy/OneDrive/Desktop/agy/finn/src/app/actions/accounts.ts)
-  - Converted `<input type="datetime-local">` submissions using `bangkokDateTimeLocalToCanonicalInstant`.
+  - Added fail-closed `extractAndValidateBaselineInput` validation for `createAccountAction` and `updateAccountAction`.
 
 ### User Interface Components
 - [`src/components/accounts/AccountsClient.tsx`](file:///C:/Users/Jeffy/OneDrive/Desktop/agy/finn/src/components/accounts/AccountsClient.tsx)

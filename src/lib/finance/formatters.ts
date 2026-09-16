@@ -405,6 +405,159 @@ export function bangkokDateTimeLocalToCanonicalInstant(
   return isNaN(d.getTime()) ? null : d.toISOString();
 }
 
+export type StrictBaselineResult =
+  | { success: true; isCleared: true; instant: null }
+  | { success: true; isCleared: false; instant: string }
+  | { success: false; error: string };
+
+/**
+ * Strict fail-closed parser for Account Balance Baseline (balance_as_of).
+ *
+ * Rules:
+ * 1. Intentionally empty input (null, undefined, or empty/whitespace string):
+ *    Returns { success: true, isCleared: true, instant: null }
+ * 2. Canonical ISO timestamp with explicit UTC 'Z' or timezone offset:
+ *    Parsed strictly; returns { success: true, isCleared: false, instant: canonicalUtcIso }
+ * 3. Valid Bangkok datetime-local format (YYYY-MM-DDTHH:mm[:ss]):
+ *    Explicitly bound to Asia/Bangkok (+07:00); calendar limits validated;
+ *    returns { success: true, isCleared: false, instant: canonicalUtcIso }
+ * 4. Any other non-empty string (e.g. malformed, ambiguous local string without timezone, words):
+ *    DOES NOT fall back to native Date parsing.
+ *    Returns { success: false, error: ... }
+ */
+export function parseStrictBaselineInstant(
+  input: string | Date | null | undefined
+): StrictBaselineResult {
+  if (input === null || input === undefined) {
+    return { success: true, isCleared: true, instant: null };
+  }
+
+  if (input instanceof Date) {
+    return isNaN(input.getTime())
+      ? {
+          success: false,
+          error: "รูปแบบวันที่/เวลาจุดอ้างอิงยอดคงเหลือไม่ถูกต้อง (Invalid Date object)",
+        }
+      : { success: true, isCleared: false, instant: input.toISOString() };
+  }
+
+  if (typeof input !== "string") {
+    return { success: false, error: "รูปแบบวันที่/เวลาจุดอ้างอิงยอดคงเหลือไม่ถูกต้อง" };
+  }
+
+  const trimmed = input.trim();
+  if (trimmed === "") {
+    return { success: true, isCleared: true, instant: null };
+  }
+
+  // 1. Check for canonical ISO string with explicit timezone offset or Z
+  const isoWithTzRegex =
+    /^\d{4}-\d{2}-\d{2}[T\s]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}(?::?\d{2})?)$/i;
+  if (isoWithTzRegex.test(trimmed)) {
+    const d = new Date(trimmed);
+    if (!isNaN(d.getTime())) {
+      return { success: true, isCleared: false, instant: d.toISOString() };
+    }
+    return {
+      success: false,
+      error: "รูปแบบวันที่/เวลาจุดอ้างอิงยอดคงเหลือไม่ถูกต้อง (Invalid ISO timestamp)",
+    };
+  }
+
+  // 2. Check for Bangkok datetime-local format: YYYY-MM-DDTHH:mm[:ss]
+  const bangkokLocalRegex =
+    /^(\d{4})[-/](\d{1,2})[-/](\d{1,2})[T\s](\d{1,2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?$/;
+  const match = trimmed.match(bangkokLocalRegex);
+  if (match) {
+    let year = parseInt(match[1], 10);
+    const month = parseInt(match[2], 10);
+    const day = parseInt(match[3], 10);
+    const hour = parseInt(match[4], 10);
+    const min = parseInt(match[5], 10);
+    const sec = match[6] !== undefined ? parseInt(match[6], 10) : 0;
+
+    // Buddhist Era normalization (e.g. 2569 -> 2026)
+    if (year >= 2400 && year <= 2700) {
+      year -= 543;
+    }
+
+    if (
+      month >= 1 &&
+      month <= 12 &&
+      day >= 1 &&
+      day <= 31 &&
+      hour >= 0 &&
+      hour <= 23 &&
+      min >= 0 &&
+      min <= 59 &&
+      sec >= 0 &&
+      sec <= 59
+    ) {
+      // Validate days in month (including leap years)
+      const daysInMonth = new Date(Date.UTC(year, month, 0)).getUTCDate();
+      if (day <= daysInMonth) {
+        const pad = (n: number) => n.toString().padStart(2, "0");
+        const isoBangkok = `${year}-${pad(month)}-${pad(day)}T${pad(hour)}:${pad(min)}:${pad(sec)}+07:00`;
+        const d = new Date(isoBangkok);
+        if (!isNaN(d.getTime())) {
+          return { success: true, isCleared: false, instant: d.toISOString() };
+        }
+      }
+    }
+    return {
+      success: false,
+      error: "วันที่หรือเวลาจุดอ้างอิงยอดคงเหลืออยู่นอกช่วงที่ถูกต้อง (Date out of range)",
+    };
+  }
+
+  // 3. Strict fail-closed: No native Date fallback for arbitrary local strings
+  return {
+    success: false,
+    error: "รูปแบบวันที่/เวลาจุดอ้างอิงยอดคงเหลือไม่ถูกต้อง กรุณาระบุในรูปแบบ YYYY-MM-DDTHH:mm หรือ ISO string",
+  };
+}
+
+/**
+ * Shared helper to safely extract and validate balance_as_of from FormData.
+ *
+ * Rules:
+ * 1. If key is completely absent from FormData:
+ *    - On create: returns { success: true, balance_as_of: null }
+ *    - On update: returns { success: true, balance_as_of: undefined } (do not overwrite)
+ * 2. If value is intentionally empty (e.g. empty string or whitespace):
+ *    - Returns { success: true, balance_as_of: null } (explicitly cleared by user)
+ * 3. If value is non-empty:
+ *    - Strictly parsed by parseStrictBaselineInstant
+ *    - If invalid: returns { success: false, error: ... } (DO NOT silently clear baseline)
+ *    - If valid: returns { success: true, balance_as_of: canonicalInstant }
+ */
+export function extractAndValidateBaselineInput(
+  formData: FormData,
+  isUpdate = false
+): { success: true; balance_as_of: string | null | undefined } | { success: false; error: string } {
+  if (!formData.has("balance_as_of")) {
+    return { success: true, balance_as_of: isUpdate ? undefined : null };
+  }
+
+  const raw = formData.get("balance_as_of");
+  if (raw === null || raw === undefined) {
+    return { success: true, balance_as_of: isUpdate ? undefined : null };
+  }
+
+  const str = String(raw).trim();
+  if (str === "") {
+    // Intentionally empty value clears baseline
+    return { success: true, balance_as_of: null };
+  }
+
+  const parsed = parseStrictBaselineInstant(str);
+  if (!parsed.success) {
+    return { success: false, error: parsed.error };
+  }
+
+  return { success: true, balance_as_of: parsed.instant };
+}
+
 /**
  * Thai greeting based on current hour in Asia/Bangkok
  */
