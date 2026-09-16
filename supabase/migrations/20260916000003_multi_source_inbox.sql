@@ -460,13 +460,23 @@ CREATE TRIGGER trg_validate_reconciliation_run_ownership
 -- ============================================================================
 -- Atomic Ingestion Item -> Transaction Bridge RPC (Operator Audit 3)
 -- ============================================================================
+-- ============================================================================
+-- Atomic Ingestion Item -> Transaction Bridge RPC (Hardened Security Definer)
+-- ============================================================================
 CREATE OR REPLACE FUNCTION public.create_transaction_from_ingestion_item(
     p_user_id UUID,
     p_item_id UUID,
     p_tx_data JSONB
 )
-RETURNS JSONB AS $$
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $$
 DECLARE
+    v_caller_uid UUID;
+    v_caller_role TEXT;
+    v_is_service_role BOOLEAN := false;
     v_item RECORD;
     v_tx RECORD;
     v_evidence RECORD;
@@ -481,12 +491,38 @@ DECLARE
     v_to_account UUID;
     v_cat_id UUID;
     v_ref TEXT;
+    v_acc RECORD;
 BEGIN
-    IF auth.uid() IS NOT NULL AND auth.uid() <> p_user_id THEN
-        RAISE EXCEPTION 'Unauthorized: caller does not match user_id';
+    -- 1. Caller Authentication & Authorization
+    v_caller_uid := auth.uid();
+
+    BEGIN
+        v_caller_role := COALESCE(
+            current_setting('request.jwt.claim.role', true),
+            (SELECT auth.jwt() ->> 'role'),
+            ''
+        );
+    EXCEPTION WHEN OTHERS THEN
+        v_caller_role := COALESCE(current_setting('request.jwt.claim.role', true), '');
+    END;
+
+    v_is_service_role := (
+        v_caller_role = 'service_role'
+        OR current_user = 'service_role'
+        OR session_user = 'service_role'
+    );
+
+    IF v_caller_uid IS NOT NULL THEN
+        IF v_caller_uid != p_user_id THEN
+            RAISE EXCEPTION 'Access denied: user_id does not match authenticated user';
+        END IF;
+    ELSIF v_is_service_role THEN
+        NULL;
+    ELSE
+        RAISE EXCEPTION 'Access denied: unauthenticated caller';
     END IF;
 
-    -- Row-lock ingestion item
+    -- 2. Lock and validate Ingestion Item
     SELECT * INTO v_item
     FROM public.ingestion_items
     WHERE id = p_item_id AND user_id = p_user_id
@@ -496,22 +532,37 @@ BEGIN
         RAISE EXCEPTION 'Ingestion item % not found for user %', p_item_id, p_user_id;
     END IF;
 
-    IF v_item.status = 'linked' THEN
+    IF v_item.status = 'linked' OR v_item.matched_transaction_id IS NOT NULL THEN
         RAISE EXCEPTION 'Ingestion item % is already linked to transaction %', p_item_id, v_item.matched_transaction_id;
     END IF;
 
-    -- Financial validation
+    -- Check if item already has evidence even if status is pending
+    IF EXISTS (
+        SELECT 1 FROM public.transaction_evidence
+        WHERE ingestion_item_id = p_item_id
+    ) THEN
+        RAISE EXCEPTION 'Ingestion item % already has associated transaction evidence', p_item_id;
+    END IF;
+
+    -- 3. Financial validation
     v_amount := (p_tx_data->>'amount')::NUMERIC;
     IF v_amount IS NULL OR v_amount <= 0 THEN
         RAISE EXCEPTION 'Invalid amount: must be greater than zero';
     END IF;
-
-    v_type := p_tx_data->>'type';
-    IF v_type NOT IN ('income', 'expense', 'transfer', 'refund', 'reimbursement', 'gift', 'loan_payment', 'loan_received', 'investment') THEN
-        RAISE EXCEPTION 'Invalid transaction type: %', v_type;
+    IF v_amount > 999999999999.99 THEN
+        RAISE EXCEPTION 'Invalid amount: exceeds maximum allowable limit';
     END IF;
 
-    v_currency := COALESCE(p_tx_data->>'currency', 'THB');
+    v_type := p_tx_data->>'type';
+    IF v_type IS NULL OR v_type NOT IN ('income', 'expense', 'transfer') THEN
+        RAISE EXCEPTION 'Invalid transaction type %: imported items only support income, expense, or transfer', v_type;
+    END IF;
+
+    v_currency := p_tx_data->>'currency';
+    IF v_currency IS NULL OR length(trim(v_currency)) = 0 THEN
+        RAISE EXCEPTION 'Currency is required';
+    END IF;
+
     v_date := (p_tx_data->>'transaction_date')::TIMESTAMPTZ;
     IF v_date IS NULL THEN
         RAISE EXCEPTION 'Invalid transaction_date: must be a valid timestamp';
@@ -524,14 +575,44 @@ BEGIN
     v_cat_id := (p_tx_data->>'category_id')::UUID;
     v_ref := COALESCE(p_tx_data->>'reference_number', v_item.reference_number);
 
-    IF v_type = 'expense' AND v_from_account IS NULL THEN
-        RAISE EXCEPTION 'from_account_id is required for expense transaction';
-    END IF;
-    IF v_type = 'income' AND v_to_account IS NULL THEN
-        RAISE EXCEPTION 'to_account_id is required for income transaction';
-    END IF;
-    IF v_type = 'transfer' AND (v_from_account IS NULL OR v_to_account IS NULL) THEN
-        RAISE EXCEPTION 'both from_account_id and to_account_id are required for transfer';
+    -- Strict direction invariants
+    IF v_type = 'expense' THEN
+        IF v_from_account IS NULL THEN
+            RAISE EXCEPTION 'from_account_id is required for expense transaction';
+        END IF;
+        IF v_to_account IS NOT NULL THEN
+            RAISE EXCEPTION 'Expense transaction cannot have to_account_id';
+        END IF;
+        SELECT * INTO v_acc FROM public.accounts WHERE id = v_from_account AND user_id = p_user_id;
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'Account % not found or does not belong to user %', v_from_account, p_user_id;
+        END IF;
+    ELSIF v_type = 'income' THEN
+        IF v_to_account IS NULL THEN
+            RAISE EXCEPTION 'to_account_id is required for income transaction';
+        END IF;
+        IF v_from_account IS NOT NULL THEN
+            RAISE EXCEPTION 'Income transaction cannot have from_account_id';
+        END IF;
+        SELECT * INTO v_acc FROM public.accounts WHERE id = v_to_account AND user_id = p_user_id;
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'Account % not found or does not belong to user %', v_to_account, p_user_id;
+        END IF;
+    ELSIF v_type = 'transfer' THEN
+        IF v_from_account IS NULL OR v_to_account IS NULL THEN
+            RAISE EXCEPTION 'both from_account_id and to_account_id are required for transfer';
+        END IF;
+        IF v_from_account = v_to_account THEN
+            RAISE EXCEPTION 'Transfer source and destination accounts must be different';
+        END IF;
+        SELECT * INTO v_acc FROM public.accounts WHERE id = v_from_account AND user_id = p_user_id;
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'Source account % not found or does not belong to user %', v_from_account, p_user_id;
+        END IF;
+        SELECT * INTO v_acc FROM public.accounts WHERE id = v_to_account AND user_id = p_user_id;
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'Destination account % not found or does not belong to user %', v_to_account, p_user_id;
+        END IF;
     END IF;
 
     -- Atomically insert Transaction
@@ -554,7 +635,7 @@ BEGIN
         p_user_id,
         v_type,
         v_amount,
-        v_currency,
+        trim(v_currency),
         v_date,
         v_desc,
         v_note,
@@ -589,19 +670,149 @@ BEGIN
         v_evidence_type
     ) RETURNING * INTO v_evidence;
 
-    -- Atomically update Ingestion Item
+    -- Atomically update Ingestion Item with RETURNING
     UPDATE public.ingestion_items
     SET status = 'linked',
         matched_transaction_id = v_tx.id,
         updated_at = now()
-    WHERE id = v_item.id;
+    WHERE id = v_item.id
+    RETURNING * INTO v_item;
 
     RETURN jsonb_build_object(
         'transaction', to_jsonb(v_tx),
-        'evidence', to_jsonb(v_evidence)
+        'evidence', to_jsonb(v_evidence),
+        'item', to_jsonb(v_item)
     );
 END;
-$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public;
+$$;
+
+REVOKE ALL ON FUNCTION public.create_transaction_from_ingestion_item(UUID, UUID, JSONB) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.create_transaction_from_ingestion_item(UUID, UUID, JSONB) FROM anon;
+GRANT EXECUTE ON FUNCTION public.create_transaction_from_ingestion_item(UUID, UUID, JSONB) TO authenticated;
+GRANT EXECUTE ON FUNCTION public.create_transaction_from_ingestion_item(UUID, UUID, JSONB) TO service_role;
+
+-- ============================================================================
+-- Atomic Link Ingestion Item to Transaction RPC (Operator Finding 3)
+-- ============================================================================
+CREATE OR REPLACE FUNCTION public.link_ingestion_item_to_transaction(
+    p_user_id UUID,
+    p_item_id UUID,
+    p_transaction_id UUID
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $$
+DECLARE
+    v_caller_uid UUID;
+    v_caller_role TEXT;
+    v_is_service_role BOOLEAN := false;
+    v_item RECORD;
+    v_tx RECORD;
+    v_evidence RECORD;
+    v_evidence_type TEXT;
+BEGIN
+    -- 1. Caller Authentication & Authorization
+    v_caller_uid := auth.uid();
+
+    BEGIN
+        v_caller_role := COALESCE(
+            current_setting('request.jwt.claim.role', true),
+            (SELECT auth.jwt() ->> 'role'),
+            ''
+        );
+    EXCEPTION WHEN OTHERS THEN
+        v_caller_role := COALESCE(current_setting('request.jwt.claim.role', true), '');
+    END;
+
+    v_is_service_role := (
+        v_caller_role = 'service_role'
+        OR current_user = 'service_role'
+        OR session_user = 'service_role'
+    );
+
+    IF v_caller_uid IS NOT NULL THEN
+        IF v_caller_uid != p_user_id THEN
+            RAISE EXCEPTION 'Access denied: user_id does not match authenticated user';
+        END IF;
+    ELSIF v_is_service_role THEN
+        NULL;
+    ELSE
+        RAISE EXCEPTION 'Access denied: unauthenticated caller';
+    END IF;
+
+    -- 2. Lock and validate Ingestion Item
+    SELECT * INTO v_item
+    FROM public.ingestion_items
+    WHERE id = p_item_id AND user_id = p_user_id
+    FOR UPDATE;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Ingestion item % not found for user %', p_item_id, p_user_id;
+    END IF;
+
+    IF v_item.status = 'linked' OR v_item.matched_transaction_id IS NOT NULL THEN
+        RAISE EXCEPTION 'Ingestion item % is already linked to a transaction', p_item_id;
+    END IF;
+
+    IF EXISTS (
+        SELECT 1 FROM public.transaction_evidence
+        WHERE ingestion_item_id = p_item_id
+    ) THEN
+        RAISE EXCEPTION 'Ingestion item % already has associated transaction evidence', p_item_id;
+    END IF;
+
+    -- 3. Validate Target Transaction
+    SELECT * INTO v_tx
+    FROM public.transactions
+    WHERE id = p_transaction_id AND user_id = p_user_id;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Target transaction % not found for user %', p_transaction_id, p_user_id;
+    END IF;
+
+    -- 4. Determine evidence type
+    IF v_item.item_type = 'email_notification' THEN
+        v_evidence_type := 'email_notification';
+    ELSIF v_item.item_type = 'statement_row' THEN
+        v_evidence_type := 'statement_row';
+    ELSE
+        v_evidence_type := 'api_import';
+    END IF;
+
+    -- 5. Atomically insert Evidence
+    INSERT INTO public.transaction_evidence (
+        user_id,
+        transaction_id,
+        ingestion_item_id,
+        evidence_type
+    ) VALUES (
+        p_user_id,
+        p_transaction_id,
+        p_item_id,
+        v_evidence_type
+    ) RETURNING * INTO v_evidence;
+
+    -- 6. Atomically update Ingestion Item with RETURNING
+    UPDATE public.ingestion_items
+    SET status = 'linked',
+        matched_transaction_id = p_transaction_id,
+        updated_at = now()
+    WHERE id = p_item_id
+    RETURNING * INTO v_item;
+
+    RETURN jsonb_build_object(
+        'evidence', to_jsonb(v_evidence),
+        'item', to_jsonb(v_item)
+    );
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.link_ingestion_item_to_transaction(UUID, UUID, UUID) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.link_ingestion_item_to_transaction(UUID, UUID, UUID) FROM anon;
+GRANT EXECUTE ON FUNCTION public.link_ingestion_item_to_transaction(UUID, UUID, UUID) TO authenticated;
+GRANT EXECUTE ON FUNCTION public.link_ingestion_item_to_transaction(UUID, UUID, UUID) TO service_role;
 
 -- ============================================================================
 -- Helper updated_at Triggers

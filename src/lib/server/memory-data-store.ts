@@ -1906,10 +1906,18 @@ export const MemoryDataStore: IDataStore = {
         throw new Error(`Ingestion item ${itemId} not found for user ${userId}`);
       }
 
-      if (item.status === "linked") {
+      if (item.status === "linked" || item.matched_transaction_id) {
         throw new Error(
           `Ingestion item ${itemId} is already linked to transaction ${item.matched_transaction_id}`
         );
+      }
+
+      // Check if item already has evidence even if status is pending
+      const existingEvidence = dbState.transaction_evidence.find(
+        (e) => e.ingestion_item_id === itemId
+      );
+      if (existingEvidence) {
+        throw new Error(`Ingestion item ${itemId} already has associated transaction evidence`);
       }
 
       // Financial validation: amount must be strictly greater than zero
@@ -1917,14 +1925,29 @@ export const MemoryDataStore: IDataStore = {
         throw new Error("Invalid transaction amount: must be greater than zero");
       }
 
+      // Strict currency requirement
+      if (!txData.currency || !txData.currency.trim()) {
+        throw new Error("Currency is required");
+      }
+
       if (!txData.transaction_date || isNaN(new Date(txData.transaction_date).getTime())) {
         throw new Error("Invalid transaction date: must be a valid timestamp");
       }
 
-      // Direction account validation & ownership
+      // Only supported imported transaction types
+      if (!["income", "expense", "transfer"].includes(txData.type)) {
+        throw new Error(
+          `Invalid transaction type ${txData.type}: imported items only support income, expense, or transfer`
+        );
+      }
+
+      // Strict direction invariants
       if (txData.type === "expense") {
         if (!txData.from_account_id) {
           throw new Error("from_account_id is required for expense transaction");
+        }
+        if (txData.to_account_id) {
+          throw new Error("Expense transaction cannot have to_account_id");
         }
         const acc = dbState.accounts.find(
           (a) => a.id === txData.from_account_id && a.user_id === userId
@@ -1936,6 +1959,9 @@ export const MemoryDataStore: IDataStore = {
         if (!txData.to_account_id) {
           throw new Error("to_account_id is required for income transaction");
         }
+        if (txData.from_account_id) {
+          throw new Error("Income transaction cannot have from_account_id");
+        }
         const acc = dbState.accounts.find(
           (a) => a.id === txData.to_account_id && a.user_id === userId
         );
@@ -1945,6 +1971,9 @@ export const MemoryDataStore: IDataStore = {
       } else if (txData.type === "transfer") {
         if (!txData.from_account_id || !txData.to_account_id) {
           throw new Error("both from_account_id and to_account_id are required for transfer");
+        }
+        if (txData.from_account_id === txData.to_account_id) {
+          throw new Error("Transfer source and destination accounts must be different");
         }
         const fromAcc = dbState.accounts.find(
           (a) => a.id === txData.from_account_id && a.user_id === userId
@@ -1963,7 +1992,7 @@ export const MemoryDataStore: IDataStore = {
         user_id: userId,
         type: txData.type,
         amount: roundToTwoDecimals(txData.amount),
-        currency: txData.currency || "THB",
+        currency: txData.currency.trim(),
         transaction_date: txData.transaction_date,
         description: txData.description,
         note: txData.note || null,
@@ -2002,6 +2031,66 @@ export const MemoryDataStore: IDataStore = {
       return { transaction: newTx, evidence, item };
     } catch (err) {
       // Rollback database state to exact snapshot on ANY error
+      const restored = JSON.parse(snapshotState);
+      Object.assign(dbState, restored);
+      throw err;
+    }
+  },
+
+  async linkIngestionItemToTransaction(
+    userId: string,
+    itemId: string,
+    transactionId: string
+  ): Promise<{ evidence: TransactionEvidence; item: IngestionItem }> {
+    const dbState = getDbState();
+    const snapshotState = JSON.stringify(dbState);
+
+    try {
+      const item = dbState.ingestion_items.find((i) => i.id === itemId && i.user_id === userId);
+      if (!item) {
+        throw new Error(`Ingestion item ${itemId} not found for user ${userId}`);
+      }
+
+      if (item.status === "linked" || item.matched_transaction_id) {
+        throw new Error(`Ingestion item ${itemId} is already linked to a transaction`);
+      }
+
+      const existingEvidence = dbState.transaction_evidence.find(
+        (e) => e.ingestion_item_id === itemId
+      );
+      if (existingEvidence) {
+        throw new Error(`Ingestion item ${itemId} already has associated transaction evidence`);
+      }
+
+      const tx = dbState.transactions.find((t) => t.id === transactionId && t.user_id === userId);
+      if (!tx) {
+        throw new Error(`Target transaction ${transactionId} not found for user ${userId}`);
+      }
+
+      const evidenceType =
+        item.item_type === "email_notification"
+          ? "email_notification"
+          : item.item_type === "statement_row"
+          ? "statement_row"
+          : "api_import";
+
+      const evidence: TransactionEvidence = {
+        id: crypto.randomUUID(),
+        user_id: userId,
+        transaction_id: tx.id,
+        slip_id: null,
+        ingestion_item_id: item.id,
+        evidence_type: evidenceType,
+        created_at: new Date().toISOString(),
+      };
+      dbState.transaction_evidence.push(evidence);
+
+      item.status = "linked";
+      item.matched_transaction_id = tx.id;
+      item.updated_at = new Date().toISOString();
+
+      return { evidence, item };
+    } catch (err) {
       const restored = JSON.parse(snapshotState);
       Object.assign(dbState, restored);
       throw err;

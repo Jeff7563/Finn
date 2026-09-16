@@ -171,6 +171,13 @@ export interface IDataStore {
     txData: Omit<Transaction, "id" | "created_at" | "updated_at" | "user_id">
   ): Promise<{ transaction: Transaction; evidence: TransactionEvidence; item: IngestionItem }>;
 
+  // Atomic Link Ingestion Item to Transaction
+  linkIngestionItemToTransaction(
+    userId: string,
+    itemId: string,
+    transactionId: string
+  ): Promise<{ evidence: TransactionEvidence; item: IngestionItem }>;
+
   // Test reset helper
   reset(initialState?: unknown): void;
 }

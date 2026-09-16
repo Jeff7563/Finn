@@ -29,32 +29,11 @@ export async function linkIngestionItemAction(
   const user = await requireUser();
 
   try {
-    const item = await DataStore.getIngestionItemById(user.id, itemId);
-    if (!item) {
-      return { success: false, error: "Ingestion item not found" };
-    }
-
-    const tx = await DataStore.getTransactionById(user.id, transactionId);
-    if (!tx) {
-      return { success: false, error: "Target transaction not found" };
-    }
-
-    // Create evidence link (enforces Decision 1 constraint & cross-user integrity)
-    const evidence = await DataStore.createTransactionEvidence(user.id, {
-      transaction_id: tx.id,
-      ingestion_item_id: item.id,
-      evidence_type: item.item_type === "email_notification" ? "email_notification" : "statement_row",
-    });
-
-    // Update item status
-    await DataStore.updateIngestionItem(user.id, item.id, {
-      status: "linked",
-      matched_transaction_id: tx.id,
-    });
+    const result = await DataStore.linkIngestionItemToTransaction(user.id, itemId, transactionId);
 
     revalidatePath("/inbox");
     revalidatePath("/transactions");
-    return { success: true, evidence };
+    return { success: true, evidence: result.evidence };
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : "Failed to link item";
     return { success: false, error: message };
@@ -121,7 +100,15 @@ export async function createTransactionFromItemAction(
       };
     }
 
-    // 3. Validate direction / type strictly (FAIL CLOSED)
+    // 3. Validate currency strictly: cannot silently invent THB (FAIL CLOSED)
+    if (!parsed.currency || !parsed.currency.trim()) {
+      return {
+        success: false,
+        error: "Missing transaction currency: cannot create transaction without explicit currency",
+      };
+    }
+
+    // 4. Validate direction / type strictly (FAIL CLOSED)
     const txType: TransactionType | undefined =
       (parsed.transaction_type as TransactionType) ||
       (parsed.direction === "incoming" ? "income" : parsed.direction === "outgoing" ? "expense" : undefined);
@@ -133,7 +120,7 @@ export async function createTransactionFromItemAction(
       };
     }
 
-    // 4. Validate account pointer strictly (FAIL CLOSED)
+    // 5. Validate account pointer strictly (FAIL CLOSED)
     if (!overrides.accountId) {
       return {
         success: false,
@@ -152,7 +139,7 @@ export async function createTransactionFromItemAction(
     const txData = {
       type: txType,
       amount: amountThb,
-      currency: parsed.currency || "THB",
+      currency: parsed.currency.trim(),
       transaction_date: parsed.occurred_at,
       description: overrides.description || parsed.description || parsed.merchant_name || "Imported transaction",
       note: overrides.note || parsed.note || null,

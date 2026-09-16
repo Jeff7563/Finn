@@ -501,6 +501,14 @@ export const DataStore: IDataStore = {
     return getActiveStore().createTransactionFromIngestionItem(userId, itemId, txData);
   },
 
+  async linkIngestionItemToTransaction(
+    userId: string,
+    itemId: string,
+    transactionId: string
+  ): Promise<{ evidence: TransactionEvidence; item: IngestionItem }> {
+    return getActiveStore().linkIngestionItemToTransaction(userId, itemId, transactionId);
+  },
+
   // Reset database for tests
   reset(initialState?: MemoryDatabaseState) {
     if (isProductionEnvironment()) {

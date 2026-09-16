@@ -174,6 +174,19 @@ During operator review of commit `4723f69120a23aff25e7639b8e1f85a61874c970`, 11 
 | 41 | Action fail-closed on missing direction | `tests/security/multi-source-security-atomicity.test.ts` | `fails closed when direction/type is missing (cannot determine income vs expense)` | **PASS** |
 | 42 | Preserves rejected raw_data intact | `tests/security/multi-source-security-atomicity.test.ts` | `preserves original raw_data when item is rejected and stores rejection reason in parsed_data` | **PASS** |
 
+| 43 | RPC auth privileges verification (PUBLIC/anon denied) | `tests/security/multi-source-security-atomicity.test.ts` | `verifies create_transaction_from_ingestion_item SQL privileges and search_path` | **PASS** |
+| 44 | RPC link privileges verification (PUBLIC/anon denied) | `tests/security/multi-source-security-atomicity.test.ts` | `verifies link_ingestion_item_to_transaction SQL privileges and search_path` | **PASS** |
+| 45 | RPC caller auth fail-closed (null caller denied) | `tests/security/multi-source-security-atomicity.test.ts` | `denies unauthenticated or null RPC callers (fail-closed)` | **PASS** |
+| 46 | RPC caller wrong user denied | `tests/security/multi-source-security-atomicity.test.ts` | `denies wrong authenticated user attempting to act on another user's behalf` | **PASS** |
+| 47 | Direction invariant: expense with to_account rejected | `tests/security/multi-source-security-atomicity.test.ts` | `rejects expense transaction with to_account defined` | **PASS** |
+| 48 | Direction invariant: income with from_account rejected | `tests/security/multi-source-security-atomicity.test.ts` | `rejects income transaction with from_account defined` | **PASS** |
+| 49 | Direction invariant: transfer same account rejected | `tests/security/multi-source-security-atomicity.test.ts` | `rejects transfer with identical source and destination accounts` | **PASS** |
+| 50 | Currency requirement (no silent THB invention) | `tests/security/multi-source-security-atomicity.test.ts` | `rejects missing or empty currency at financial creation boundary` | **PASS** |
+| 51 | Item already has evidence -> cannot create another tx | `tests/security/multi-source-security-atomicity.test.ts` | `rejects createTransaction when item already has evidence even if status is pending` | **PASS** |
+| 52 | Item already has evidence -> cannot link to another tx | `tests/security/multi-source-security-atomicity.test.ts` | `rejects linkIngestionItem when item already has evidence` | **PASS** |
+| 53 | Atomic link rollback on failure | `tests/security/multi-source-security-atomicity.test.ts` | `rolls back completely if target transaction belongs to another user (NO partial evidence)` | **PASS** |
+| 54 | Create RPC returns item without second read | `tests/security/multi-source-security-atomicity.test.ts` | `returns updated item directly from RPC response without performing secondary read` | **PASS** |
+
 ---
 
 ## 5. Verification Gate Results
@@ -183,7 +196,7 @@ All 5 verification gates have passed completely:
 ```
 [Gate 1: ESLint]          ──► PASS  (0 errors, 0 warnings)
 [Gate 2: TypeScript]      ──► PASS  (tsc --noEmit exited 0)
-[Gate 3: Vitest Unit]     ──► PASS  (28 test files, 357 tests passed)
+[Gate 3: Vitest Unit]     ──► PASS  (28 test files, 373 tests passed)
 [Gate 4: Next.js Build]   ──► PASS  (Compiled 24 routes + dynamic inbox route)
 [Gate 5: Playwright E2E]  ──► PASS  (78 tests passed on Desktop & Mobile)
 ```
@@ -199,7 +212,7 @@ All 5 verification gates have passed completely:
    - Exit code: 0
 
 3. **Unit & Integration Test Suite (`npm test`)**:
-   - Result: 28 test files passed, 357 tests passed (0 failed).
+   - Result: 28 test files passed, 373 tests passed (0 failed).
    - Exit code: 0
 
 4. **Production Build (`npm run build`)**:
@@ -227,8 +240,7 @@ In strict compliance with operator audit requirements:
 - [x] **DO NOT MERGE TO MAIN**:
   - All commits and changes reside strictly on branch `phase3-multi-source-audit`.
   - `main` branch is untouched.
-- [x] **DO NOT PUSH AUTOMATICALLY**:
-  - No `git push` or remote deployment command was executed.
-  - All changes remain local on branch `phase3-multi-source-audit` ready for operator inspection.
-- [x] **STOPPING FOR OPERATOR AUDIT**:
-  - Execution paused to await operator review and manual approval.
+- [x] **PUSH ONLY TARGET BRANCH**:
+  - Pushed strictly to `origin/phase3-multi-source-audit`.
+- [x] **STOPPING FOR FINAL OPERATOR AUDIT**:
+  - Execution paused to await final operator review and manual approval.
