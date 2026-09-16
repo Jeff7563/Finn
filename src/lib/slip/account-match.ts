@@ -5,6 +5,7 @@ import {
   countSharedPositionalDigits,
   extractDigitsFromPattern,
   hasContradictingDigits,
+  hasSufficientVisibleDigits,
   hasVisibleDigits,
   isSafeSuffixMatch,
   normalizeMaskedPattern,
@@ -89,9 +90,17 @@ export function matchOwnedAccount(
 
   // -------------------------------------------------------------------------
   // Priority A: VERIFIED LEARNED ALIAS
+  // A verified alias used for financial auto-confirm must contain at least
+  // 3 visible numeric digits after normalization.
   // -------------------------------------------------------------------------
-  if (partyPattern && aliases && aliases.length > 0) {
+  if (
+    partyPattern &&
+    hasSufficientVisibleDigits(partyPattern, 3) &&
+    aliases &&
+    aliases.length > 0
+  ) {
     const matchingAliases = aliases.filter((al) => {
+      if (!hasSufficientVisibleDigits(al.normalized_masked_pattern, 3)) return false;
       if (al.normalized_masked_pattern !== partyPattern) return false;
       // If alias specifies an institution, it must match partyBank
       const alBank = al.institution && al.institution !== "UNKNOWN" ? normalizeBankName(al.institution) : null;

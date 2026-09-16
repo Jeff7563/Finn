@@ -107,6 +107,7 @@ export interface IDataStore {
       raw_masked_pattern?: string | null;
       normalized_masked_pattern: string;
       source?: string;
+      confirmed_count?: number;
     }
   ): Promise<import("@/types/slip").AccountMatchAlias>;
   backfillAccountMatchAliases(userId: string): Promise<{ created: number; skipped: number }>;

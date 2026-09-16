@@ -25,7 +25,11 @@ import {
   AccountMatchAlias,
 } from "@/types/slip";
 import { normalizeBankName } from "../slip/bank-normalization";
-import { normalizeMaskedPattern } from "../slip/mask-pattern";
+import {
+  countVisibleDigits,
+  hasSufficientVisibleDigits,
+  normalizeMaskedPattern,
+} from "../slip/mask-pattern";
 import {
   PreloadedRelations,
   TransactionsPageData,
@@ -1030,6 +1034,7 @@ export const MemoryDataStore: IDataStore = {
       raw_masked_pattern?: string | null;
       normalized_masked_pattern: string;
       source?: string;
+      confirmed_count?: number;
     }
   ): Promise<AccountMatchAlias> {
     assertUserId(userId);
@@ -1038,6 +1043,13 @@ export const MemoryDataStore: IDataStore = {
     );
     if (!accountExists) {
       throw new Error(`Account ${data.account_id} not found or access denied`);
+    }
+
+    // Financial safety guard: verified alias must contain at least 3 visible digits
+    if (!hasSufficientVisibleDigits(data.normalized_masked_pattern, 3)) {
+      throw new Error(
+        `Cannot record account match alias: normalized pattern must contain at least 3 visible digits, got ${countVisibleDigits(data.normalized_masked_pattern)}`
+      );
     }
 
     const normBank = (data.institution && normalizeBankName(data.institution)) || "UNKNOWN";
@@ -1050,10 +1062,15 @@ export const MemoryDataStore: IDataStore = {
     );
 
     if (existing) {
-      // Idempotency: backfill reruns must NOT artificially inflate confirmed_count!
-      if (data.source !== "backfill") {
+      // Idempotency: backfill sets deterministic count; manual learning increments
+      if (data.source === "backfill") {
+        if (data.confirmed_count !== undefined) {
+          existing.confirmed_count = data.confirmed_count;
+        }
+      } else {
         existing.confirmed_count += 1;
       }
+      if (data.raw_masked_pattern) existing.raw_masked_pattern = data.raw_masked_pattern;
       existing.updated_at = new Date().toISOString();
       if (data.source) existing.source = data.source;
       return existing;
@@ -1068,7 +1085,7 @@ export const MemoryDataStore: IDataStore = {
       raw_masked_pattern: data.raw_masked_pattern || null,
       normalized_masked_pattern: data.normalized_masked_pattern,
       source: data.source || "manual_confirm",
-      confirmed_count: 1,
+      confirmed_count: data.confirmed_count ?? 1,
       created_at: now,
       updated_at: now,
     };
@@ -1093,34 +1110,15 @@ export const MemoryDataStore: IDataStore = {
         t.review_status === "corrected"
     );
 
-    // Group verified slips by sender/receiver patterns to ensure unambiguous relationships
-    const senderPatternMap = new Map<string, Set<string>>();
-    const receiverPatternMap = new Map<string, Set<string>>();
-
-    for (const tx of verifiedTxs) {
-      const slip = dbState.slips.find(
-        (s) => s.id === tx.source_slip_id && s.user_id === userId
-      );
-      if (!slip || !slip.extracted_json) continue;
-
-      if (tx.from_account_id && slip.extracted_json.sender?.accountMasked) {
-        const pattern = normalizeMaskedPattern(slip.extracted_json.sender.accountMasked);
-        const bank = normalizeBankName(slip.extracted_json.sender.bank) || "";
-        const key = `${bank}::${pattern}`;
-        if (!senderPatternMap.has(key)) senderPatternMap.set(key, new Set());
-        senderPatternMap.get(key)!.add(tx.from_account_id);
-      }
-
-      if (tx.to_account_id && slip.extracted_json.receiver?.accountMasked) {
-        const pattern = normalizeMaskedPattern(slip.extracted_json.receiver.accountMasked);
-        const bank = normalizeBankName(slip.extracted_json.receiver.bank) || "";
-        const key = `${bank}::${pattern}`;
-        if (!receiverPatternMap.has(key)) receiverPatternMap.set(key, new Set());
-        receiverPatternMap.get(key)!.add(tx.to_account_id);
-      }
+    interface BackfillCandidate {
+      accountId: string;
+      institution: string;
+      rawMask: string;
+      normalizedPattern: string;
     }
 
-    // Only backfill patterns that unambiguously map to exactly one account
+    const candidates: BackfillCandidate[] = [];
+
     for (const tx of verifiedTxs) {
       const slip = dbState.slips.find(
         (s) => s.id === tx.source_slip_id && s.user_id === userId
@@ -1130,44 +1128,89 @@ export const MemoryDataStore: IDataStore = {
       if (tx.from_account_id && slip.extracted_json.sender?.accountMasked) {
         const rawMask = slip.extracted_json.sender.accountMasked;
         const pattern = normalizeMaskedPattern(rawMask);
-        const bank = normalizeBankName(slip.extracted_json.sender.bank);
-        const key = `${bank || ""}::${pattern}`;
-        const accountsForPattern = senderPatternMap.get(key);
-
-        if (accountsForPattern && accountsForPattern.size === 1) {
-          await this.recordAccountMatchAlias(userId, {
-            account_id: tx.from_account_id,
+        // Financial safety guard: must have >= 3 visible digits
+        if (hasSufficientVisibleDigits(pattern, 3)) {
+          const bank = normalizeBankName(slip.extracted_json.sender.bank) || "UNKNOWN";
+          candidates.push({
+            accountId: tx.from_account_id,
             institution: bank,
-            raw_masked_pattern: rawMask,
-            normalized_masked_pattern: pattern,
-            source: "backfill",
+            rawMask,
+            normalizedPattern: pattern,
           });
-          created++;
-        } else {
-          skipped++;
         }
       }
 
       if (tx.to_account_id && slip.extracted_json.receiver?.accountMasked) {
         const rawMask = slip.extracted_json.receiver.accountMasked;
         const pattern = normalizeMaskedPattern(rawMask);
-        const bank = normalizeBankName(slip.extracted_json.receiver.bank);
-        const key = `${bank || ""}::${pattern}`;
-        const accountsForPattern = receiverPatternMap.get(key);
-
-        if (accountsForPattern && accountsForPattern.size === 1) {
-          await this.recordAccountMatchAlias(userId, {
-            account_id: tx.to_account_id,
+        // Financial safety guard: must have >= 3 visible digits
+        if (hasSufficientVisibleDigits(pattern, 3)) {
+          const bank = normalizeBankName(slip.extracted_json.receiver.bank) || "UNKNOWN";
+          candidates.push({
+            accountId: tx.to_account_id,
             institution: bank,
-            raw_masked_pattern: rawMask,
-            normalized_masked_pattern: pattern,
-            source: "backfill",
+            rawMask,
+            normalizedPattern: pattern,
           });
-          created++;
-        } else {
-          skipped++;
         }
       }
+    }
+
+    // Check if any (institution, pattern) maps to multiple distinct accounts
+    const patternAccountsMap = new Map<string, Set<string>>();
+    for (const c of candidates) {
+      const pKey = `${c.institution}::${c.normalizedPattern}`;
+      if (!patternAccountsMap.has(pKey)) patternAccountsMap.set(pKey, new Set());
+      patternAccountsMap.get(pKey)!.add(c.accountId);
+    }
+
+    // Deduplicate and group by the actual UNIQUE key:
+    // (account_id, institution, normalized_masked_pattern)
+    // Ensures differently formatted raw masks (e.g. xxx-x-x7520-x and xxxxx7520x) produce exactly ONE alias!
+    interface GroupedAlias {
+      accountId: string;
+      institution: string;
+      normalizedPattern: string;
+      rawMasks: string[];
+      count: number;
+    }
+
+    const grouped = new Map<string, GroupedAlias>();
+
+    for (const c of candidates) {
+      const pKey = `${c.institution}::${c.normalizedPattern}`;
+      if (patternAccountsMap.get(pKey)?.size !== 1) {
+        skipped++;
+        continue;
+      }
+
+      const uniqueKey = `${c.accountId}::${c.institution}::${c.normalizedPattern}`;
+      if (!grouped.has(uniqueKey)) {
+        grouped.set(uniqueKey, {
+          accountId: c.accountId,
+          institution: c.institution,
+          normalizedPattern: c.normalizedPattern,
+          rawMasks: [],
+          count: 0,
+        });
+      }
+      const entry = grouped.get(uniqueKey)!;
+      entry.rawMasks.push(c.rawMask);
+      entry.count++;
+    }
+
+    for (const entry of grouped.values()) {
+      // Deterministic representative raw_masked_pattern
+      const repRawMask = [...entry.rawMasks].sort()[0];
+      await this.recordAccountMatchAlias(userId, {
+        account_id: entry.accountId,
+        institution: entry.institution,
+        raw_masked_pattern: repRawMask,
+        normalized_masked_pattern: entry.normalizedPattern,
+        source: "backfill",
+        confirmed_count: entry.count,
+      });
+      created++;
     }
 
     return { created, skipped };

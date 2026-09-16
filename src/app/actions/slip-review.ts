@@ -12,7 +12,10 @@ import { classifyDirection } from "@/lib/slip/direction";
 import { matchCounterparty } from "@/lib/slip/counterparty-match";
 import { suggestCategory } from "@/lib/slip/category-suggest";
 import { bangkokDateTimeLocalToCanonicalInstant } from "@/lib/finance/formatters";
-import { normalizeMaskedPattern } from "@/lib/slip/mask-pattern";
+import {
+  normalizeMaskedPattern,
+  hasSufficientVisibleDigits,
+} from "@/lib/slip/mask-pattern";
 
 export interface ReviewActionResult {
   success: boolean;
@@ -23,6 +26,7 @@ export interface ReviewActionResult {
 /**
  * Best-effort helper to learn account match aliases from confirmed slips.
  * Crucial guarantee: Alias-learning failure NEVER rolls back or fails a valid financial transaction.
+ * Hardening: Verified aliases must contain at least 3 visible digits after normalization.
  */
 async function safelyLearnAlias(
   userId: string,
@@ -33,7 +37,7 @@ async function safelyLearnAlias(
 ): Promise<void> {
   if (!accountId || !rawMasked) return;
   const pattern = normalizeMaskedPattern(rawMasked);
-  if (!pattern || pattern.length < 3) return;
+  if (!pattern || !hasSufficientVisibleDigits(pattern, 3)) return;
 
   try {
     await DataStore.recordAccountMatchAlias(userId, {

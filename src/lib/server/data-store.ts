@@ -340,6 +340,7 @@ export const DataStore: IDataStore = {
       raw_masked_pattern?: string | null;
       normalized_masked_pattern: string;
       source?: string;
+      confirmed_count?: number;
     }
   ): Promise<import("@/types/slip").AccountMatchAlias> {
     return getActiveStore().recordAccountMatchAlias(userId, data);

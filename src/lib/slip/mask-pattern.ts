@@ -63,6 +63,30 @@ export function extractDigitsFromPattern(patternOrRaw?: string | null): string {
 }
 
 /**
+ * Minimum number of visible digits required for a verified alias to be learned,
+ * backfilled, or used for financial auto-confirm.
+ */
+export const MIN_ALIAS_VISIBLE_DIGITS = 3;
+
+/**
+ * Returns the count of visible numeric digits (0-9) in a pattern or raw string.
+ */
+export function countVisibleDigits(patternOrRaw?: string | null): number {
+  return extractDigitsFromPattern(patternOrRaw).length;
+}
+
+/**
+ * Checks whether a pattern contains at least minDigits visible numeric digits.
+ * Default minimum is 3 digits.
+ */
+export function hasSufficientVisibleDigits(
+  patternOrRaw?: string | null,
+  minDigits: number = MIN_ALIAS_VISIBLE_DIGITS
+): boolean {
+  return countVisibleDigits(patternOrRaw) >= minDigits;
+}
+
+/**
  * Checks if the pattern has any visible digits.
  */
 export function hasVisibleDigits(pattern?: string | null): boolean {
