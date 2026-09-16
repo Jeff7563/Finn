@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Account, Category, Merchant, Person, TransactionType } from "@/types/finance";
 import { createTransactionAction } from "@/app/actions/transactions";
+import { canonicalInstantToBangkokDateTimeLocal } from "@/lib/finance/formatters";
 import {
   ArrowDownLeft,
   ArrowUpRight,
@@ -46,9 +47,7 @@ export function TransactionForm({
   // Date and Time default (current local datetime in YYYY-MM-DDTHH:mm format, or prefilled defaultDate)
   const nowLocal = defaultDate
     ? `${defaultDate}T12:00`
-    : new Date(Date.now() - new Date().getTimezoneOffset() * 60000)
-        .toISOString()
-        .slice(0, 16);
+    : canonicalInstantToBangkokDateTimeLocal(new Date());
 
   const [state, formAction, isPending] = useActionState(
     async (prevState: unknown, formData: FormData) => {

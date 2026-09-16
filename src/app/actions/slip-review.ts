@@ -11,6 +11,7 @@ import { matchOwnedAccount } from "@/lib/slip/account-match";
 import { classifyDirection } from "@/lib/slip/direction";
 import { matchCounterparty } from "@/lib/slip/counterparty-match";
 import { suggestCategory } from "@/lib/slip/category-suggest";
+import { bangkokDateTimeLocalToCanonicalInstant } from "@/lib/finance/formatters";
 
 export interface ReviewActionResult {
   success: boolean;
@@ -131,12 +132,17 @@ export async function confirmSlipAction(
     }
 
     // Atomically create transaction and update slip status to 'created'
+    const canonicalTxDate =
+      bangkokDateTimeLocalToCanonicalInstant(ext.transactionDate) ||
+      ext.transactionDate ||
+      new Date().toISOString();
+
     const confirmRes = await DataStore.confirmSlipTransaction(user.id, {
       slipId: slip.id,
       type: txType,
       amount: ext.amount,
       currency: ext.currency || "THB",
-      transaction_date: ext.transactionDate || new Date().toISOString(),
+      transaction_date: canonicalTxDate,
       description,
       note: null,
       from_account_id: fromAccountId,
@@ -212,6 +218,10 @@ export async function editAndConfirmSlipAction(
 
     const ext = slip.extracted_json;
 
+    const canonicalTxDate =
+      bangkokDateTimeLocalToCanonicalInstant(data.transaction_date) ||
+      data.transaction_date;
+
     // Track user corrections for audit and future intelligence
     if (ext) {
       if (ext.amount && Math.abs(ext.amount - Number(data.amount)) > 0.001) {
@@ -230,12 +240,12 @@ export async function editAndConfirmSlipAction(
           corrected_value: data.reference_number,
         });
       }
-      if (data.transaction_date && ext.transactionDate !== data.transaction_date) {
+      if (canonicalTxDate && ext.transactionDate !== canonicalTxDate) {
         await DataStore.createSlipCorrection(user.id, {
           slip_id: slip.id,
           field_name: "transaction_date",
           extracted_value: ext.transactionDate,
-          corrected_value: data.transaction_date,
+          corrected_value: canonicalTxDate,
         });
       }
     }
@@ -246,7 +256,7 @@ export async function editAndConfirmSlipAction(
       type: data.type,
       amount: Number(data.amount),
       currency: data.currency || "THB",
-      transaction_date: data.transaction_date,
+      transaction_date: canonicalTxDate,
       description: data.description || null,
       note: data.note || null,
       from_account_id: data.type === "income" ? null : data.from_account_id || null,

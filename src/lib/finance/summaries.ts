@@ -4,7 +4,7 @@ import {
   MonthSummary,
   Transaction,
 } from "@/types/finance";
-import { roundToTwoDecimals } from "./formatters";
+import { roundToTwoDecimals, getBangkokLocalDateParts } from "./formatters";
 
 /**
  * Deterministically calculates monthly cash flow metrics.
@@ -17,15 +17,16 @@ export function calculateMonthSummary(
   let incomeTotal = 0;
   let expenseTotal = 0;
 
-  const filterMonth = targetDate ? targetDate.getMonth() : null;
-  const filterYear = targetDate ? targetDate.getFullYear() : null;
+  const targetParts = targetDate ? getBangkokLocalDateParts(targetDate) : null;
+  const filterMonth = targetParts ? targetParts.month : null;
+  const filterYear = targetParts ? targetParts.year : null;
 
   for (const tx of transactions) {
     if (filterMonth !== null && filterYear !== null) {
-      const txDate = new Date(tx.transaction_date);
+      const txParts = getBangkokLocalDateParts(tx.transaction_date);
       if (
-        txDate.getMonth() !== filterMonth ||
-        txDate.getFullYear() !== filterYear
+        txParts.month !== filterMonth ||
+        txParts.year !== filterYear
       ) {
         continue;
       }
@@ -135,18 +136,18 @@ export function calculateMonthlyTrends(
 
   // Determine sorted unique months from transactions or generate last N months
   const now = new Date();
+  const nowParts = getBangkokLocalDateParts(now);
   const months: string[] = [];
-
   for (let i = monthsCount - 1; i >= 0; i--) {
-    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+    const d = new Date(nowParts.year, nowParts.month - i, 1);
     const ym = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
     months.push(ym);
     trendMap.set(ym, { income: 0, expense: 0 });
   }
 
   for (const tx of transactions) {
-    const txDate = new Date(tx.transaction_date);
-    const ym = `${txDate.getFullYear()}-${String(txDate.getMonth() + 1).padStart(2, "0")}`;
+    const txParts = getBangkokLocalDateParts(tx.transaction_date);
+    const ym = `${txParts.year}-${String(txParts.month + 1).padStart(2, "0")}`;
 
     if (trendMap.has(ym)) {
       const current = trendMap.get(ym)!;

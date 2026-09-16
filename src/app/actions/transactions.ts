@@ -4,7 +4,7 @@ import { revalidatePath } from "next/cache";
 import { requireUser } from "@/lib/server/auth";
 import { DataStore } from "@/lib/server/data-store";
 import { transactionSchema } from "@/lib/validation/schemas";
-import { parseThaiSlipDate } from "@/lib/slip/ocr/thai-slip-normalizer";
+import { bangkokDateTimeLocalToCanonicalInstant } from "@/lib/finance/formatters";
 import { ActionResult } from "./auth";
 
 export async function createTransactionAction(
@@ -17,8 +17,8 @@ export async function createTransactionAction(
     const rawType = formData.get("type") as string;
     const rawDateInput = formData.get("transaction_date") as string;
     const normalizedDate =
-      parseThaiSlipDate(rawDateInput) ||
-      (rawDateInput ? new Date(rawDateInput).toISOString() : new Date().toISOString());
+      bangkokDateTimeLocalToCanonicalInstant(rawDateInput) ||
+      new Date().toISOString();
 
     const rawData = {
       type: rawType,
@@ -74,8 +74,8 @@ export async function updateTransactionAction(
 
     const rawDateInput = formData.get("transaction_date") as string;
     const normalizedDate =
-      parseThaiSlipDate(rawDateInput) ||
-      (rawDateInput ? new Date(rawDateInput).toISOString() : new Date().toISOString());
+      bangkokDateTimeLocalToCanonicalInstant(rawDateInput) ||
+      new Date().toISOString();
 
     const rawData = {
       type: formData.get("type") as string,

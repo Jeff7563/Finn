@@ -169,6 +169,31 @@ export function formatTime(
 }
 
 /**
+ * Extracts { year, month, day } (0-indexed month: 0-11)
+ * in Asia/Bangkok local wall-clock time.
+ */
+export function getBangkokLocalDateParts(
+  dateInput: string | Date,
+  timeZone: string = "Asia/Bangkok"
+): { year: number; month: number; day: number } {
+  const date = typeof dateInput === "string" ? new Date(dateInput) : dateInput;
+  if (isNaN(date.getTime())) return { year: 0, month: 0, day: 0 };
+
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    year: "numeric",
+    month: "numeric",
+    day: "numeric",
+  }).formatToParts(date);
+
+  const day = parseInt(parts.find((p) => p.type === "day")?.value || "0", 10);
+  const month =
+    parseInt(parts.find((p) => p.type === "month")?.value || "0", 10) - 1;
+  const year = parseInt(parts.find((p) => p.type === "year")?.value || "0", 10);
+  return { day, month, year };
+}
+
+/**
  * Formats relative date or full date for transaction ledger:
  * "วันนี้ 12:42", "เมื่อวาน 18:15", "14 ก.ย. 12:42" (Asia/Bangkok by default)
  */
@@ -182,22 +207,8 @@ export function formatDateTimeThai(
   const now = new Date();
   const timeStr = formatTime(date, timeZone);
 
-  const getLocalDateParts = (d: Date) => {
-    const parts = new Intl.DateTimeFormat("en-US", {
-      timeZone,
-      year: "numeric",
-      month: "numeric",
-      day: "numeric",
-    }).formatToParts(d);
-    const day = parseInt(parts.find((p) => p.type === "day")?.value || "0", 10);
-    const month =
-      parseInt(parts.find((p) => p.type === "month")?.value || "0", 10) - 1;
-    const year = parseInt(parts.find((p) => p.type === "year")?.value || "0", 10);
-    return { day, month, year };
-  };
-
-  const dParts = getLocalDateParts(date);
-  const nowParts = getLocalDateParts(now);
+  const dParts = getBangkokLocalDateParts(date, timeZone);
+  const nowParts = getBangkokLocalDateParts(now, timeZone);
 
   const isToday =
     dParts.day === nowParts.day &&
@@ -232,22 +243,8 @@ export function formatDayHeadingThai(
   if (isNaN(date.getTime())) return String(dateInput);
 
   const now = new Date();
-  const getLocalDateParts = (d: Date) => {
-    const parts = new Intl.DateTimeFormat("en-US", {
-      timeZone,
-      year: "numeric",
-      month: "numeric",
-      day: "numeric",
-    }).formatToParts(d);
-    const day = parseInt(parts.find((p) => p.type === "day")?.value || "0", 10);
-    const month =
-      parseInt(parts.find((p) => p.type === "month")?.value || "0", 10) - 1;
-    const year = parseInt(parts.find((p) => p.type === "year")?.value || "0", 10);
-    return { day, month, year };
-  };
-
-  const dParts = getLocalDateParts(date);
-  const nowParts = getLocalDateParts(now);
+  const dParts = getBangkokLocalDateParts(date, timeZone);
+  const nowParts = getBangkokLocalDateParts(now, timeZone);
 
   const isToday =
     dParts.day === nowParts.day &&
@@ -275,12 +272,26 @@ export function formatDayHeadingThai(
 }
 
 /**
- * Formats a date into `YYYY-MM-DDTHH:mm` format suitable for `<input type="datetime-local">` in Asia/Bangkok local time.
+ * Converts a canonical UTC instant (or ISO string with timezone or Date object)
+ * into `YYYY-MM-DDTHH:mm` wall-clock representation in `Asia/Bangkok` (UTC+7),
+ * strictly formatted for `<input type="datetime-local">`.
+ *
+ * If the input is already in `YYYY-MM-DDTHH:mm` format, it is returned directly
+ * without double-conversion.
  */
-export function formatDateTimeLocal(
+export function canonicalInstantToBangkokDateTimeLocal(
   dateInput: string | Date,
   timeZone: string = "Asia/Bangkok"
 ): string {
+  if (!dateInput) return "";
+
+  if (typeof dateInput === "string") {
+    const trimmed = dateInput.trim();
+    if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(trimmed)) {
+      return trimmed;
+    }
+  }
+
   const date = typeof dateInput === "string" ? new Date(dateInput) : dateInput;
   if (isNaN(date.getTime())) return "";
 
@@ -296,7 +307,96 @@ export function formatDateTimeLocal(
 
   const get = (type: string) =>
     parts.find((p) => p.type === type)?.value || "00";
-  return `${get("year")}-${get("month")}-${get("day")}T${get("hour")}:${get("minute")}`;
+  let hour = get("hour");
+  if (hour === "24") hour = "00";
+  return `${get("year")}-${get("month")}-${get("day")}T${hour}:${get("minute")}`;
+}
+
+/**
+ * Formats a date into `YYYY-MM-DDTHH:mm` format suitable for `<input type="datetime-local">` in Asia/Bangkok local time.
+ * Backwards-compatible wrapper around `canonicalInstantToBangkokDateTimeLocal`.
+ */
+export function formatDateTimeLocal(
+  dateInput: string | Date,
+  timeZone: string = "Asia/Bangkok"
+): string {
+  return canonicalInstantToBangkokDateTimeLocal(dateInput, timeZone);
+}
+
+/**
+ * Converts a datetime-local input string (e.g. `YYYY-MM-DDTHH:mm` or `YYYY-MM-DDTHH:mm:ss`)
+ * explicitly into a canonical UTC ISO-8601 instant string (`...Z`), binding the wall-clock components
+ * strictly to `Asia/Bangkok` (+07:00).
+ *
+ * Environment-independent: produces the exact same UTC instant regardless of whether
+ * it runs on a UTC cloud server, a Windows developer machine, or a browser with any local timezone.
+ *
+ * If input is already an ISO string with timezone specifier (`Z` or `+07:00`), preserves the instant
+ * without reinterpreting UTC components as local time.
+ */
+export function bangkokDateTimeLocalToCanonicalInstant(
+  datetimeLocalInput: string | Date | null | undefined
+): string | null {
+  if (!datetimeLocalInput) return null;
+
+  if (datetimeLocalInput instanceof Date) {
+    return isNaN(datetimeLocalInput.getTime()) ? null : datetimeLocalInput.toISOString();
+  }
+
+  if (typeof datetimeLocalInput !== "string") return null;
+
+  const trimmed = datetimeLocalInput.trim();
+  if (!trimmed) return null;
+
+  // 1. If string already has explicit timezone offset or Z, parse directly as canonical instant
+  const tzRegex = /(?:Z|[+-]\d{2}(?::?\d{2})?)$/i;
+  if (tzRegex.test(trimmed)) {
+    const d = new Date(trimmed);
+    return isNaN(d.getTime()) ? null : d.toISOString();
+  }
+
+  // 2. Parse wall-clock YYYY-MM-DDTHH:mm[:ss] without timezone and explicitly bind to Asia/Bangkok (+07:00)
+  const match = trimmed.match(
+    /^(\d{4})[-/](\d{1,2})[-/](\d{1,2})(?:[T\s]+(\d{1,2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?)?$/
+  );
+
+  if (match) {
+    let year = parseInt(match[1], 10);
+    const month = parseInt(match[2], 10);
+    const day = parseInt(match[3], 10);
+    const hour = match[4] !== undefined ? parseInt(match[4], 10) : 12;
+    const min = match[5] !== undefined ? parseInt(match[5], 10) : 0;
+    const sec = match[6] !== undefined ? parseInt(match[6], 10) : 0;
+
+    // Buddhist Era normalization (e.g. 2569 -> 2026)
+    if (year >= 2400 && year <= 2700) {
+      year -= 543;
+    }
+
+    if (
+      month >= 1 &&
+      month <= 12 &&
+      day >= 1 &&
+      day <= 31 &&
+      hour >= 0 &&
+      hour <= 23 &&
+      min >= 0 &&
+      min <= 59 &&
+      sec >= 0 &&
+      sec <= 59
+    ) {
+      const pad = (n: number) => n.toString().padStart(2, "0");
+      const isoBangkok = `${year}-${pad(month)}-${pad(day)}T${pad(hour)}:${pad(min)}:${pad(sec)}+07:00`;
+      const dateObj = new Date(isoBangkok);
+      if (!isNaN(dateObj.getTime())) {
+        return dateObj.toISOString();
+      }
+    }
+  }
+
+  // 3. Fallback: Native Date parse
+  const d = new Date(trimmed);
+  return isNaN(d.getTime()) ? null : d.toISOString();
 }
 
 /**

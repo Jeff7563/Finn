@@ -20,8 +20,11 @@ import {
 } from "@/app/actions/slip-review";
 import { MoneyAmount } from "@/components/ui/MoneyAmount";
 import { EmptyState } from "@/components/ui/EmptyState";
-import { formatDateTimeThai, formatDateTimeLocal } from "@/lib/finance/formatters";
-import { parseThaiSlipDate } from "@/lib/slip/ocr/thai-slip-normalizer";
+import {
+  formatDateTimeThai,
+  canonicalInstantToBangkokDateTimeLocal,
+  bangkokDateTimeLocalToCanonicalInstant,
+} from "@/lib/finance/formatters";
 import { matchOwnedAccount } from "@/lib/slip/account-match";
 import { classifyDirection } from "@/lib/slip/direction";
 import { matchCounterparty } from "@/lib/slip/counterparty-match";
@@ -272,8 +275,8 @@ export function ReviewInboxClient({
       type: defaultType,
       amount: ext?.amount || 0,
       transaction_date: ext?.transactionDate
-        ? formatDateTimeLocal(ext.transactionDate)
-        : formatDateTimeLocal(new Date()),
+        ? canonicalInstantToBangkokDateTimeLocal(ext.transactionDate)
+        : canonicalInstantToBangkokDateTimeLocal(new Date()),
       from_account_id: sMatch.accountId || "",
       to_account_id: rMatch.accountId || "",
       category_id: catSuggest.categoryId || "",
@@ -313,15 +316,17 @@ export function ReviewInboxClient({
       }
     }
 
+    const canonicalTxDate =
+      bangkokDateTimeLocalToCanonicalInstant(editFormData.transaction_date) ||
+      new Date().toISOString();
+
     setActiveActionId(editingSlip.id);
     try {
       const res = await editAndConfirmSlipAction(editingSlip.id, {
         type: editFormData.type as "income" | "expense" | "transfer",
         amount: Number(editFormData.amount),
         currency: "THB",
-        transaction_date:
-          parseThaiSlipDate(editFormData.transaction_date) ||
-          new Date(editFormData.transaction_date).toISOString(),
+        transaction_date: canonicalTxDate,
         description: editFormData.description || null,
         note: editFormData.note || null,
         from_account_id:

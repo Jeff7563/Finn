@@ -3,7 +3,7 @@
 **Security Status**: `PRODUCTION HARDENED (PRE-DEPLOYMENT AUDITED)`  
 **Date**: September 16, 2026  
 **Target Migration**: [`supabase/migrations/20260915000001_confirm_slips_realtime.sql`](file:///C:/Users/Jeffy/OneDrive/Desktop/agy/finn/supabase/migrations/20260915000001_confirm_slips_realtime.sql)  
-**Security & Verification Gate**: **100% PASSED** (0 Lint Warnings, 0 TypeScript Errors, 201/201 Vitest Tests Green, Production Build Succeeded, 76/76 Playwright E2E Green)  
+**Security & Verification Gate**: **100% PASSED** (0 Lint Warnings, 0 TypeScript Errors, 211/211 Vitest Tests Green across 17 suites, Production Build Succeeded, 76/76 Playwright E2E Green)  
 **Deployment Note**: **MIGRATION HAS NOT BEEN APPLIED TO PRODUCTION** (as directed).
 
 ---
@@ -445,6 +445,7 @@ Exit code: 0
  ✓ tests/security/adversarial.test.ts (14 tests) 284ms
  ✓ tests/auth/auth-recovery.test.ts (22 tests) 797ms
  ✓ tests/security/slip-confirmation-security.test.ts (10 tests) 268ms
+ ✓ tests/slip/slip-timezone.test.ts (10 tests) 32ms
  ✓ tests/supabase/supabase-data-layer.test.ts (8 tests) 28ms
  ✓ tests/slip/slip-confirmation.test.ts (12 tests) 34ms
  ✓ tests/slip/slip-realtime.test.ts (9 tests) 97ms
@@ -455,9 +456,9 @@ Exit code: 0
  ✓ tests/perf/deduplication.test.ts (4 tests) 15ms
  ✓ tests/theme/theme.test.ts (7 tests) 9ms
 
- Test Files  16 passed (16)
-      Tests  201 passed (201)
-   Duration  9.71s
+ Test Files  17 passed (17)
+      Tests  211 passed (211)
+   Duration  9.84s
 Exit code: 0
 ```
 
@@ -489,7 +490,78 @@ Exit code: 0
 
 ---
 
-## 6. Pre-Deployment Advisory
+## 6. Bangkok Timezone Round-Trip Fix & Production Remediation
+
+### 1. Root Cause Analysis of the 7-Hour Shift
+- **Observed Production Incident**:
+  - Thai bank slip visible time: `15 Sep 2026 20:08 Asia/Bangkok`.
+  - Review Inbox displayed: `20:08` ✅
+  - Private slip preview displayed: `20:08` ✅
+  - After Edit & Confirm, Transactions displayed: `13:08` ❌ (7-hour regression; 13:08 UTC was interpreted as Bangkok time or converted twice).
+- **Exact Mechanism of Failure**:
+  1. `<input type="datetime-local">` outputs wall-clock datetime in the format `YYYY-MM-DDTHH:mm` with **no timezone designator**.
+  2. Previously, JavaScript `new Date(editFormData.transaction_date).toISOString()` parsed the local string using the host machine's timezone. In UTC environments (or when slicing `toISOString().slice(0, 16)`), UTC `2026-09-15T13:08:00.000Z` was sliced into `"2026-09-15T13:08"`.
+  3. When saved back, `"2026-09-15T13:08"` was interpreted as Bangkok local time (`13:08 Bangkok` = `06:08 UTC`). When formatted for display in Bangkok (+7), `06:08 UTC` became `13:08 Bangkok`, effectively subtracting 7 hours twice.
+  4. In Direct Confirm vs. Edit & Confirm, direct confirm passed `ext.transactionDate` while Edit & Confirm passed the form string, causing disparate interpretations and generating false `slip_corrections` audit rows even when the user made no edits to the date.
+
+### 2. Canonical Timezone Rules & Helpers
+To guarantee deterministic round-trips regardless of browser or server runtime timezones:
+1. **Rule**:
+   - Thai bank slip visible time has no explicit timezone; it is **always** in `Asia/Bangkok` (UTC+7).
+   - In Database: `transactions.transaction_date` is `TIMESTAMPTZ` (canonical UTC instant, e.g. `2026-09-15T13:08:00.000Z`).
+   - In UI: `transaction_date` is **always** formatted in `Asia/Bangkok` (e.g. `20:08`).
+   - In `<input type="datetime-local">`: value represents local wall-clock time in `Asia/Bangkok` (`YYYY-MM-DDTHH:mm`).
+   - Conversion from datetime-local to canonical UTC instant happens **exactly once** via `bangkokDateTimeLocalToCanonicalInstant()`. If input already contains `Z` or an explicit timezone offset, it preserves the instant without reinterpreting UTC components as Bangkok local time.
+   - Conversion from canonical UTC instant to datetime-local happens **exactly once** via `canonicalInstantToBangkokDateTimeLocal()`.
+   - Direct Confirm and Edit & Confirm (with date unchanged) are mathematically guaranteed to produce the exact same UTC instant.
+   - Unchanged edits compare canonicalized instants, preventing spurious `slip_corrections`.
+
+2. **Core Helpers in `src/lib/finance/formatters.ts`**:
+   - `canonicalInstantToBangkokDateTimeLocal(dateInput: string | Date, timeZone = "Asia/Bangkok"): string`: Formats UTC instant to `YYYY-MM-DDTHH:mm` in Bangkok time for form inputs. Corrects edge case where `en-CA` locale outputs `"24"` for midnight hour.
+   - `bangkokDateTimeLocalToCanonicalInstant(datetimeLocalInput: string | Date | null | undefined): string | null`: Binds wall-clock components explicitly to `+07:00` (`YYYY-MM-DDTHH:mm:00.000+07:00`) before converting to UTC ISO string (`Z`).
+   - `getBangkokLocalDateParts(dateInput: string | Date, timeZone = "Asia/Bangkok")`: Extracts Bangkok year, month (0-indexed), and day for monthly aggregations, preventing midnight transactions from crossing month boundaries.
+
+### 3. Files Modified & Verification
+- [`src/lib/finance/formatters.ts`](file:///C:/Users/Jeffy/OneDrive/Desktop/agy/finn/src/lib/finance/formatters.ts): Implemented `canonicalInstantToBangkokDateTimeLocal`, `bangkokDateTimeLocalToCanonicalInstant`, and `getBangkokLocalDateParts`.
+- [`src/components/slips/ReviewInboxClient.tsx`](file:///C:/Users/Jeffy/OneDrive/Desktop/agy/finn/src/components/slips/ReviewInboxClient.tsx): Edit modal populates with `canonicalInstantToBangkokDateTimeLocal` and converts with `bangkokDateTimeLocalToCanonicalInstant`.
+- [`src/app/actions/slip-review.ts`](file:///C:/Users/Jeffy/OneDrive/Desktop/agy/finn/src/app/actions/slip-review.ts): Both `confirmSlipAction` and `editAndConfirmSlipAction` canonicalize dates before passing to RPC; audit log compares canonicalized dates.
+- [`src/app/actions/transactions.ts`](file:///C:/Users/Jeffy/OneDrive/Desktop/agy/finn/src/app/actions/transactions.ts): `createTransactionAction` and `updateTransactionAction` normalize `transaction_date` with `bangkokDateTimeLocalToCanonicalInstant`.
+- [`src/components/transactions/TransactionForm.tsx`](file:///C:/Users/Jeffy/OneDrive/Desktop/agy/finn/src/components/transactions/TransactionForm.tsx): Initializes `nowLocal` with `canonicalInstantToBangkokDateTimeLocal(new Date())`.
+- [`src/components/transactions/TransactionDetailClient.tsx`](file:///C:/Users/Jeffy/OneDrive/Desktop/agy/finn/src/components/transactions/TransactionDetailClient.tsx): Initializes edit default with `canonicalInstantToBangkokDateTimeLocal`.
+- [`src/lib/finance/summaries.ts`](file:///C:/Users/Jeffy/OneDrive/Desktop/agy/finn/src/lib/finance/summaries.ts): `calculateMonthSummary` and `calculateMonthlyTrends` use `getBangkokLocalDateParts` for Bangkok local calendar grouping.
+- [`tests/slip/slip-timezone.test.ts`](file:///C:/Users/Jeffy/OneDrive/Desktop/agy/finn/tests/slip/slip-timezone.test.ts): 10 unit and integration tests covering round-trips, midnight boundaries, Buddhist Era (BE 2569 -> 2026 CE), and direct/edit parity.
+
+### 4. Production Data Recovery SQL
+To correct the single test transaction created during verification that has the 7-hour shifted timestamp:
+
+```sql
+-- Production Data Remediation for Verification Slip
+-- Target Slip visible time: 15 Sep 2026 20:08 Asia/Bangkok
+-- Correct Canonical TIMESTAMPTZ: 2026-09-15 13:08:00+00 UTC
+-- Run this in the Supabase SQL Editor:
+
+UPDATE public.transactions
+SET transaction_date = '2026-09-15 13:08:00+00'::timestamptz,
+    updated_at = NOW()
+WHERE source_slip_id = '<VERIFICATION_SLIP_ID>'
+  AND user_id = '<USER_ID>';
+
+-- Alternatively, if transaction ID is known directly:
+-- UPDATE public.transactions
+-- SET transaction_date = '2026-09-15 13:08:00+00'::timestamptz,
+--     updated_at = NOW()
+-- WHERE id = '<TRANSACTION_ID>';
+
+-- Verification query:
+SELECT id, transaction_date, transaction_date AT TIME ZONE 'Asia/Bangkok' as bangkok_time, review_status
+FROM public.transactions
+WHERE source_slip_id = '<VERIFICATION_SLIP_ID>';
+-- Expected bangkok_time: 2026-09-15 20:08:00
+```
+
+---
+
+## 7. Pre-Deployment Advisory
 
 > [!IMPORTANT]
 > The database migration [`supabase/migrations/20260915000001_confirm_slips_realtime.sql`](file:///C:/Users/Jeffy/OneDrive/Desktop/agy/finn/supabase/migrations/20260915000001_confirm_slips_realtime.sql) is fully prepared, tested, and verified safe for re-running. It has **NOT** been applied to the production database as requested.
