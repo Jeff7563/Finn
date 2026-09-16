@@ -2,12 +2,24 @@ import { Account, AccountBalance, Transaction } from "@/types/finance";
 import { roundToTwoDecimals } from "./formatters";
 
 /**
+ * Determines whether a transaction is financially active.
+ * A voided transaction MUST contribute ZERO to any financial balance or metric.
+ */
+export function isFinanciallyActiveTransaction(
+  transaction: Pick<Transaction, "voided_at">
+): boolean {
+  return !transaction.voided_at;
+}
+
+/**
  * Determines whether a transaction is eligible to affect an account's current balance.
  *
  * Rules:
- * 1. If account.balance_as_of is NULL, undefined, or empty:
- *    Preserves legacy Finn behavior exactly: all transactions affect balance (returns true).
- * 2. If account.balance_as_of is set:
+ * 1. If transaction is voided (voided_at is set):
+ *    MUST NOT affect balance (returns false).
+ * 2. If account.balance_as_of is NULL, undefined, or empty:
+ *    Preserves legacy Finn behavior exactly: all active transactions affect balance (returns true).
+ * 3. If account.balance_as_of is set:
  *    The baseline timestamp is INCLUSIVE. Transactions with transaction_date <= balance_as_of
  *    are already accounted for in the baseline opening_balance and MUST NOT affect current balance.
  *    Only transactions strictly AFTER balance_as_of (transaction_date > balance_as_of) affect current balance.
@@ -16,6 +28,9 @@ export function doesTransactionAffectAccountBalance(
   account: Account,
   transaction: Transaction
 ): boolean {
+  if (!isFinanciallyActiveTransaction(transaction)) {
+    return false;
+  }
   if (!account.balance_as_of) {
     return true;
   }
@@ -44,7 +59,7 @@ export function doesTransactionAffectAccountBalance(
  * - Inflows strictly after balance_as_of (or all inflows if balance_as_of is null)
  * - Outflows strictly after balance_as_of (or all outflows if balance_as_of is null)
  *
- * Transaction count continues to include ALL transactions associated with the account.
+ * Active transaction count excludes voided transactions.
  */
 export function calculateAccountBalance(
   account: Account,
@@ -54,6 +69,10 @@ export function calculateAccountBalance(
   let txCount = 0;
 
   for (const tx of transactions) {
+    if (!isFinanciallyActiveTransaction(tx)) {
+      continue;
+    }
+
     const amount = Number(tx.amount) || 0;
     const isFromAccount = tx.from_account_id === account.id;
     const isToAccount = tx.to_account_id === account.id;
@@ -62,7 +81,7 @@ export function calculateAccountBalance(
       continue;
     }
 
-    // Historical count includes all transactions linked to this account
+    // Historical count includes all active transactions linked to this account
     txCount++;
 
     // Only transactions strictly after balance_as_of affect current balance
@@ -170,9 +189,12 @@ export function calculateAccountBalanceAt(
     };
   }
 
-  // Fail closed: If any transaction associated with this account has missing or unparseable date,
+  // Fail closed: If any active transaction associated with this account has missing or unparseable date,
   // we cannot safely compute point-in-time balance.
   for (const tx of transactions) {
+    if (!isFinanciallyActiveTransaction(tx)) {
+      continue;
+    }
     const isFromAccount = tx.from_account_id === account.id;
     const isToAccount = tx.to_account_id === account.id;
     if (!isFromAccount && !isToAccount) {
@@ -203,6 +225,9 @@ export function calculateAccountBalanceAt(
     let txCount = 0;
 
     for (const tx of transactions) {
+      if (!isFinanciallyActiveTransaction(tx)) {
+        continue;
+      }
       const isFromAccount = tx.from_account_id === account.id;
       const isToAccount = tx.to_account_id === account.id;
       if (!isFromAccount && !isToAccount) {
@@ -291,6 +316,9 @@ export function calculateAccountBalanceAt(
   let txCount = 0;
 
   for (const tx of transactions) {
+    if (!isFinanciallyActiveTransaction(tx)) {
+      continue;
+    }
     const isFromAccount = tx.from_account_id === account.id;
     const isToAccount = tx.to_account_id === account.id;
     if (!isFromAccount && !isToAccount) {

@@ -16,9 +16,12 @@ import {
 
 interface TransactionItemProps {
   transaction: TransactionWithRelations;
+  onRestore?: (transaction: TransactionWithRelations) => void;
 }
 
-export function TransactionItem({ transaction }: TransactionItemProps) {
+export function TransactionItem({ transaction, onRestore }: TransactionItemProps) {
+  const isVoided = Boolean(transaction.voided_at);
+
   // Title determination
   let title = transaction.description || "รายการ";
   if (transaction.type === "transfer") {
@@ -113,15 +116,28 @@ export function TransactionItem({ transaction }: TransactionItemProps) {
   return (
     <Link
       href={`/transactions/${transaction.id}`}
-      className="group flex items-center justify-between py-3 px-3 sm:px-4 hover:bg-surface-soft rounded-xl transition-colors min-h-[56px]"
+      className={`group flex items-center justify-between py-3 px-3 sm:px-4 hover:bg-surface-soft rounded-xl transition-colors min-h-[56px] ${
+        isVoided ? "opacity-60 bg-surface-soft/40 hover:bg-surface-soft/80" : ""
+      }`}
     >
       <div className="flex items-center gap-3 min-w-0 pr-3">
         {getTransactionIcon()}
 
         <div className="min-w-0">
-          <span className="font-semibold text-sm text-text-primary truncate block">
-            {title}
-          </span>
+          <div className="flex items-center gap-2 flex-wrap">
+            <span
+              className={`font-semibold text-sm truncate block ${
+                isVoided ? "line-through text-text-muted" : "text-text-primary"
+              }`}
+            >
+              {title}
+            </span>
+            {isVoided && (
+              <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold bg-rose-100 text-rose-700 dark:bg-rose-950/60 dark:text-rose-300 border border-rose-200 dark:border-rose-850">
+                ยกเลิกแล้ว (Voided)
+              </span>
+            )}
+          </div>
 
           <div className="flex items-center flex-wrap gap-x-2 text-xs text-text-muted mt-0.5 font-normal">
             {transaction.type === "transfer" ? (
@@ -154,17 +170,50 @@ export function TransactionItem({ transaction }: TransactionItemProps) {
                 </span>
               </>
             )}
+            {isVoided && transaction.void_reason && (
+              <>
+                <span>·</span>
+                <span className="text-rose-600 dark:text-rose-400 font-medium truncate">
+                  เหตุผล: {transaction.void_reason}
+                </span>
+              </>
+            )}
+            {isVoided && transaction.voided_at && (
+              <>
+                <span>·</span>
+                <span className="text-text-muted">
+                  (ยกเลิกเมื่อ {formatDateTimeThai(transaction.voided_at)})
+                </span>
+              </>
+            )}
           </div>
         </div>
       </div>
 
-      <div className="flex-shrink-0 text-right">
-        <MoneyAmount
-          amount={transaction.amount}
-          type={transaction.type}
-          currency={transaction.currency}
-          size="md"
-        />
+      <div className="flex items-center gap-3 flex-shrink-0 text-right">
+        <div className={isVoided ? "line-through text-text-muted opacity-60" : ""}>
+          <MoneyAmount
+            amount={transaction.amount}
+            type={transaction.type}
+            currency={transaction.currency}
+            size="md"
+          />
+        </div>
+
+        {isVoided && onRestore && (
+          <button
+            type="button"
+            onClick={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              onRestore(transaction);
+            }}
+            className="px-2.5 py-1 text-xs font-semibold text-text-primary bg-surface hover:bg-surface-soft border border-border rounded-lg shadow-2xs transition-colors"
+            title="คืนรายการ"
+          >
+            คืนรายการ
+          </button>
+        )}
       </div>
     </Link>
   );

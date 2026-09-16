@@ -1,5 +1,6 @@
 import { Person, PersonSummary, Transaction } from "@/types/finance";
 import { roundToTwoDecimals } from "./formatters";
+import { isFinanciallyActiveTransaction } from "./balances";
 
 /**
  * Calculates financial metrics for a specific person based on all transactions.
@@ -16,6 +17,7 @@ export function calculatePersonSummary(
   let count = 0;
 
   for (const tx of transactions) {
+    if (!isFinanciallyActiveTransaction(tx)) continue;
     if (tx.person_id !== person.id) continue;
 
     count++;

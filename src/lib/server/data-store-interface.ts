@@ -72,11 +72,16 @@ export interface IDataStore {
 
   // Transactions
   getTransactions(userId: string, preloadedRelations?: PreloadedRelations): Promise<TransactionWithRelations[]>;
+  getTransactionsIncludingVoided(userId: string, preloadedRelations?: PreloadedRelations): Promise<TransactionWithRelations[]>;
   getTransactionsPageData(userId: string): Promise<TransactionsPageData>;
+  getTransactionsPageDataIncludingVoided(userId: string): Promise<TransactionsPageData>;
   getTransactionById(userId: string, id: string, preloadedRelations?: PreloadedRelations): Promise<TransactionWithRelations | null>;
   createTransaction(userId: string, data: TransactionInput | TransactionFormData): Promise<Transaction>;
   updateTransaction(userId: string, id: string, data: Partial<TransactionFormData>): Promise<Transaction>;
   deleteTransaction(userId: string, id: string): Promise<void>;
+  voidTransaction(userId: string, transactionId: string, reason: string): Promise<import("@/types/finance").VoidTransactionResult>;
+  restoreTransaction(userId: string, transactionId: string, reason?: string): Promise<import("@/types/finance").RestoreTransactionResult>;
+  getTransactionVoidEvents(userId: string, transactionId: string): Promise<import("@/types/finance").TransactionVoidEvent[]>;
 
   // Ingest Tokens
   getIngestTokens(userId: string): Promise<IngestToken[]>;

@@ -5,6 +5,7 @@ import {
   Transaction,
 } from "@/types/finance";
 import { roundToTwoDecimals, getBangkokLocalDateParts } from "./formatters";
+import { isFinanciallyActiveTransaction } from "./balances";
 
 /**
  * Deterministically calculates monthly cash flow metrics.
@@ -22,6 +23,10 @@ export function calculateMonthSummary(
   const filterYear = targetParts ? targetParts.year : null;
 
   for (const tx of transactions) {
+    if (!isFinanciallyActiveTransaction(tx)) {
+      continue;
+    }
+
     if (filterMonth !== null && filterYear !== null) {
       const txParts = getBangkokLocalDateParts(tx.transaction_date);
       if (
@@ -75,6 +80,7 @@ export function calculateCategorySummaries(
   let grandTotal = 0;
 
   for (const tx of transactions) {
+    if (!isFinanciallyActiveTransaction(tx)) continue;
     if (tx.type !== type) continue;
 
     const amount = Number(tx.amount) || 0;
@@ -146,6 +152,7 @@ export function calculateMonthlyTrends(
   }
 
   for (const tx of transactions) {
+    if (!isFinanciallyActiveTransaction(tx)) continue;
     const txParts = getBangkokLocalDateParts(tx.transaction_date);
     const ym = `${txParts.year}-${String(txParts.month + 1).padStart(2, "0")}`;
 

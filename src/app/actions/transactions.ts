@@ -140,3 +140,89 @@ export async function deleteTransactionAction(id: string): Promise<ActionResult>
     return { success: false, error: message };
   }
 }
+
+export async function voidTransactionAction(
+  id: string,
+  reason: string
+): Promise<ActionResult> {
+  try {
+    const user = await requireUser();
+    const trimmedReason = (reason || "").trim();
+    if (!trimmedReason) {
+      return {
+        success: false,
+        error: "กรุณาระบุเหตุผลในการยกเลิกรายการ (Void reason is required)",
+      };
+    }
+    if (trimmedReason.length > 500) {
+      return {
+        success: false,
+        error: "เหตุผลต้องมีความยาวไม่เกิน 500 ตัวอักษร",
+      };
+    }
+
+    await DataStore.voidTransaction(user.id, id, trimmedReason);
+
+    revalidatePath(`/transactions/${id}`);
+    revalidatePath("/transactions");
+    revalidatePath("/today");
+    revalidatePath("/overview");
+    revalidatePath("/accounts");
+    revalidatePath("/people");
+    revalidatePath("/merchants");
+    revalidatePath("/inbox");
+
+    return { success: true };
+  } catch (err: unknown) {
+    const message =
+      err instanceof Error ? err.message : "Failed to void transaction";
+    return { success: false, error: message };
+  }
+}
+
+export async function restoreTransactionAction(
+  id: string,
+  reason?: string
+): Promise<ActionResult> {
+  try {
+    const user = await requireUser();
+    const trimmedReason = reason?.trim();
+    if (trimmedReason && trimmedReason.length > 500) {
+      return {
+        success: false,
+        error: "เหตุผลต้องมีความยาวไม่เกิน 500 ตัวอักษร",
+      };
+    }
+
+    await DataStore.restoreTransaction(user.id, id, trimmedReason);
+
+    revalidatePath(`/transactions/${id}`);
+    revalidatePath("/transactions");
+    revalidatePath("/today");
+    revalidatePath("/overview");
+    revalidatePath("/accounts");
+    revalidatePath("/people");
+    revalidatePath("/merchants");
+    revalidatePath("/inbox");
+
+    return { success: true };
+  } catch (err: unknown) {
+    const message =
+      err instanceof Error ? err.message : "Failed to restore transaction";
+    return { success: false, error: message };
+  }
+}
+
+export async function getTransactionVoidEventsAction(
+  id: string
+): Promise<{ success: boolean; events?: import("@/types/finance").TransactionVoidEvent[]; error?: string }> {
+  try {
+    const user = await requireUser();
+    const events = await DataStore.getTransactionVoidEvents(user.id, id);
+    return { success: true, events };
+  } catch (err: unknown) {
+    const message =
+      err instanceof Error ? err.message : "Failed to fetch void events";
+    return { success: false, error: message };
+  }
+}

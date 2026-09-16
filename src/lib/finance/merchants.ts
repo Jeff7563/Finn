@@ -5,6 +5,7 @@ import {
   Transaction,
 } from "@/types/finance";
 import { roundToTwoDecimals } from "./formatters";
+import { isFinanciallyActiveTransaction } from "./balances";
 
 /**
  * Calculates analytics for a merchant based on expense transactions.
@@ -19,6 +20,7 @@ export function calculateMerchantSummary(
   const categoryCounts = new Map<string, number>();
 
   for (const tx of transactions) {
+    if (!isFinanciallyActiveTransaction(tx)) continue;
     if (tx.merchant_id !== merchant.id) continue;
 
     count++;

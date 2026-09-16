@@ -190,10 +190,23 @@ export const DataStore: IDataStore = {
     return getActiveStore().getTransactions(userId, preloadedRelations);
   },
 
+  async getTransactionsIncludingVoided(
+    userId: string,
+    preloadedRelations?: PreloadedRelations
+  ): Promise<TransactionWithRelations[]> {
+    return getActiveStore().getTransactionsIncludingVoided(userId, preloadedRelations);
+  },
+
   async getTransactionsPageData(
     userId: string
   ): Promise<TransactionsPageData> {
     return getActiveStore().getTransactionsPageData(userId);
+  },
+
+  async getTransactionsPageDataIncludingVoided(
+    userId: string
+  ): Promise<TransactionsPageData> {
+    return getActiveStore().getTransactionsPageDataIncludingVoided(userId);
   },
 
   async getTransactionById(
@@ -221,6 +234,29 @@ export const DataStore: IDataStore = {
 
   async deleteTransaction(userId: string, id: string): Promise<void> {
     return getActiveStore().deleteTransaction(userId, id);
+  },
+
+  async voidTransaction(
+    userId: string,
+    transactionId: string,
+    reason: string
+  ): Promise<import("@/types/finance").VoidTransactionResult> {
+    return getActiveStore().voidTransaction(userId, transactionId, reason);
+  },
+
+  async restoreTransaction(
+    userId: string,
+    transactionId: string,
+    reason?: string
+  ): Promise<import("@/types/finance").RestoreTransactionResult> {
+    return getActiveStore().restoreTransaction(userId, transactionId, reason);
+  },
+
+  async getTransactionVoidEvents(
+    userId: string,
+    transactionId: string
+  ): Promise<import("@/types/finance").TransactionVoidEvent[]> {
+    return getActiveStore().getTransactionVoidEvents(userId, transactionId);
   },
 
   // INGEST TOKENS
