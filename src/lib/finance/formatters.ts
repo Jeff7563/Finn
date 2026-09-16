@@ -452,8 +452,60 @@ export function parseStrictBaselineInstant(
 
   // 1. Check for canonical ISO string with explicit timezone offset or Z
   const isoWithTzRegex =
-    /^\d{4}-\d{2}-\d{2}[T\s]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}(?::?\d{2})?)$/i;
-  if (isoWithTzRegex.test(trimmed)) {
+    /^(\d{4})-(\d{2})-(\d{2})[T\s](\d{2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?(Z|[+-]\d{2}(?::?\d{2})?)$/i;
+  const isoMatch = trimmed.match(isoWithTzRegex);
+  if (isoMatch) {
+    const isoYear = parseInt(isoMatch[1], 10);
+    const isoMonth = parseInt(isoMatch[2], 10);
+    const isoDay = parseInt(isoMatch[3], 10);
+    const isoHour = parseInt(isoMatch[4], 10);
+    const isoMin = parseInt(isoMatch[5], 10);
+    const isoSec = isoMatch[6] !== undefined ? parseInt(isoMatch[6], 10) : 0;
+    const tzPart = isoMatch[7];
+
+    // Validate timezone offset range if not Z
+    if (tzPart.toUpperCase() !== "Z") {
+      const tzMatch = tzPart.match(/^([+-])(\d{2}):?(\d{2})?$/);
+      if (!tzMatch) {
+        return {
+          success: false,
+          error: "รูปแบบวันที่/เวลาจุดอ้างอิงยอดคงเหลือไม่ถูกต้อง (Invalid timezone offset)",
+        };
+      }
+      const tzHour = parseInt(tzMatch[2], 10);
+      const tzMinute = tzMatch[3] !== undefined ? parseInt(tzMatch[3], 10) : 0;
+      if (tzHour > 23 || tzMinute > 59) {
+        return {
+          success: false,
+          error: "รูปแบบวันที่/เวลาจุดอ้างอิงยอดคงเหลือไม่ถูกต้อง (Timezone offset out of range)",
+        };
+      }
+    }
+
+    // Validate date/time component ranges
+    if (
+      isoMonth < 1 || isoMonth > 12 ||
+      isoDay < 1 || isoDay > 31 ||
+      isoHour < 0 || isoHour > 23 ||
+      isoMin < 0 || isoMin > 59 ||
+      isoSec < 0 || isoSec > 59
+    ) {
+      return {
+        success: false,
+        error: "รูปแบบวันที่/เวลาจุดอ้างอิงยอดคงเหลือไม่ถูกต้อง (Invalid ISO timestamp)",
+      };
+    }
+
+    // Validate days in month (including leap years)
+    const isoDaysInMonth = new Date(Date.UTC(isoYear, isoMonth, 0)).getUTCDate();
+    if (isoDay > isoDaysInMonth) {
+      return {
+        success: false,
+        error: "วันที่หรือเวลาจุดอ้างอิงยอดคงเหลืออยู่นอกช่วงที่ถูกต้อง (Date out of range)",
+      };
+    }
+
+    // All components valid — now safe to construct Date
     const d = new Date(trimmed);
     if (!isNaN(d.getTime())) {
       return { success: true, isCleared: false, instant: d.toISOString() };

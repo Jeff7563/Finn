@@ -895,4 +895,51 @@ describe("Finn — Balance Baseline Final Fail-Closed Validation Suite", () => {
       expect(emptyRes.instant).toBeNull();
     }
   });
+
+  it("9. parseStrictBaselineInstant rejects impossible ISO calendar dates (Feb 31)", () => {
+    const result = parseStrictBaselineInstant("2026-02-31T11:30:00Z");
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error).toContain("Date out of range");
+    }
+  });
+
+  it("10. parseStrictBaselineInstant rejects Feb 29 in non-leap year (2026)", () => {
+    const result = parseStrictBaselineInstant("2026-02-29T11:30:00Z");
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error).toContain("Date out of range");
+    }
+  });
+
+  it("11. parseStrictBaselineInstant accepts Feb 29 in leap year (2028)", () => {
+    const result = parseStrictBaselineInstant("2028-02-29T11:30:00Z");
+    expect(result.success).toBe(true);
+    if (result.success && !result.isCleared) {
+      expect(result.instant).toBe("2028-02-29T11:30:00.000Z");
+    }
+  });
+
+  it("12. parseStrictBaselineInstant rejects Apr 31 with timezone offset", () => {
+    const result = parseStrictBaselineInstant("2026-04-31T11:30:00+07:00");
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error).toContain("Date out of range");
+    }
+  });
+
+  it("13. parseStrictBaselineInstant preserves same instant for valid +07:00 ISO", () => {
+    // 2026-09-15T20:08:00+07:00 = 2026-09-15T13:08:00Z
+    const result = parseStrictBaselineInstant("2026-09-15T20:08:00+07:00");
+    expect(result.success).toBe(true);
+    if (result.success && !result.isCleared) {
+      expect(result.instant).toBe("2026-09-15T13:08:00.000Z");
+    }
+  });
+
+  it("14. parseStrictBaselineInstant rejects malformed timezone offset", () => {
+    expect(parseStrictBaselineInstant("2026-09-15T20:08:00+99:00").success).toBe(false);
+    expect(parseStrictBaselineInstant("2026-09-15T20:08:00+07:99").success).toBe(false);
+    expect(parseStrictBaselineInstant("2026-09-15T20:08:00+007:00").success).toBe(false);
+  });
 });
