@@ -27,6 +27,7 @@ import {
   mergeSlipExtractions,
   isAmountValid,
 } from "./quality-gate";
+import { bangkokDateTimeLocalToCanonicalInstant } from "@/lib/finance/formatters";
 
 export interface ProcessSlipOptions {
   userId: string;
@@ -184,7 +185,7 @@ export class SlipProcessor {
     source: SlipSource;
     isReprocess?: boolean;
   }): Promise<SlipProcessingResult> {
-    const { userId, slip, job, buffer, mime, fileHash, source, isReprocess = false } = params;
+    const { userId, slip, job, buffer, mime, fileHash, isReprocess = false } = params;
     const existingExtraction = slip.extracted_json || null;
     const prevScore = calculateCompletenessScore(existingExtraction);
 
@@ -401,14 +402,17 @@ export class SlipProcessor {
       const normalizedSenderBank = normalizeBankName(extraction.sender?.bank);
       const normalizedReceiverBank = normalizeBankName(extraction.receiver?.bank);
 
-      // 9. Match User Owned Accounts
+      // 9. Match User Owned Accounts (leveraging learned aliases)
       const ownedAccounts = await DataStore.getAccounts(userId);
+      const aliases = await DataStore.getAccountMatchAliases(userId);
+
       const senderMatch = matchOwnedAccount(
         {
           ...extraction.sender,
           bank: normalizedSenderBank || extraction.sender?.bank,
         },
-        ownedAccounts
+        ownedAccounts,
+        aliases
       );
 
       const receiverMatch = matchOwnedAccount(
@@ -416,7 +420,8 @@ export class SlipProcessor {
           ...extraction.receiver,
           bank: normalizedReceiverBank || extraction.receiver?.bank,
         },
-        ownedAccounts
+        ownedAccounts,
+        aliases
       );
 
       // 10. Direction & Suggested Transaction Type
@@ -519,31 +524,10 @@ export class SlipProcessor {
       // 15. Execution: Auto-Create OR Review Inbox
       // Note: If previous was preserved due to degraded reprocess, NEVER auto-create.
       if (confidenceDecision.canAutoCreate && !preservedPrevious) {
-        // Auto-Create Transaction
-        const newTx = await DataStore.createTransaction(userId, {
-          type: directionClass.suggestedType,
-          amount: extraction.amount!,
-          currency: "THB",
-          transaction_date: extraction.transactionDate || new Date().toISOString(),
-          description: counterpartyMatch.matchedName
-            ? `${directionClass.suggestedType === "transfer" ? "โอนเงิน" : "ชำระเงิน"} - ${counterpartyMatch.matchedName}`
-            : (counterpartyName ? `โอนให้ ${counterpartyName}` : "บันทึกจากสลิป"),
-          from_account_id: senderMatch.accountId,
-          to_account_id: receiverMatch.accountId,
-          merchant_id: counterpartyMatch.merchantId,
-          person_id: counterpartyMatch.personId,
-          category_id: categorySuggestion.categoryId,
-          source: source === "ios_shortcut" ? "shortcut" : "slip",
-          source_slip_id: slip.id,
-          reference_number: extraction.reference || null,
-          confidence: confidenceDecision.overallConfidence,
-          review_status: "confirmed",
-        });
-
-        // Link slip and update status
+        // Pre-save slip with extracted JSON so that if RPC confirmation fails,
+        // the slip is safely preserved in Review Inbox with full extracted data intact.
         await DataStore.updateSlip(userId, slip.id, {
-          status: "created",
-          linked_transaction_id: newTx.id,
+          status: "needs_review",
           qr_payload: qrPayload || slip.qr_payload,
           extracted_json: extraction,
           overall_confidence: confidenceDecision.overallConfidence,
@@ -551,27 +535,100 @@ export class SlipProcessor {
           processed_at: new Date().toISOString(),
         });
 
-        await DataStore.updateSlipJob(userId, job.id, {
-          status: "created",
-          safe_error_message: isReprocess ? jobDiagnostics : null,
-          finished_at: new Date().toISOString(),
-        });
+        // Canonicalize transaction date to Bangkok TIMESTAMPTZ instant
+        const canonicalTxDate =
+          bangkokDateTimeLocalToCanonicalInstant(extraction.transactionDate) ||
+          extraction.transactionDate ||
+          new Date().toISOString();
 
-        return {
-          jobId: job.id,
-          slipId: slip.id,
-          status: "created",
-          amount: extraction.amount,
-          currency: "THB",
-          transactionId: newTx.id,
-          extracted: extraction,
-          overallConfidence: confidenceDecision.overallConfidence,
-          direction: directionClass.direction,
-          matchedFromAccountId: senderMatch.accountId,
-          matchedToAccountId: receiverMatch.accountId,
-          preservedPrevious: false,
-          completenessScore: mergedScore,
-        };
+        try {
+          // Atomically confirm slip transaction via PostgreSQL RPC / DataStore
+          const confirmRes = await DataStore.confirmSlipTransaction(userId, {
+            slipId: slip.id,
+            type: directionClass.suggestedType,
+            amount: extraction.amount!,
+            currency: extraction.currency || "THB",
+            transaction_date: canonicalTxDate,
+            description: counterpartyMatch.matchedName
+              ? `${directionClass.suggestedType === "transfer" ? "โอนเงิน" : "ชำระเงิน"} - ${counterpartyMatch.matchedName}`
+              : (counterpartyName ? `โอนให้ ${counterpartyName}` : "บันทึกจากสลิป"),
+            note: null,
+            from_account_id: senderMatch.accountId,
+            to_account_id: receiverMatch.accountId,
+            category_id: categorySuggestion.categoryId || null,
+            merchant_id: counterpartyMatch.merchantId || null,
+            person_id: counterpartyMatch.personId || null,
+            reference_number: extraction.reference || null,
+            confidence: confidenceDecision.overallConfidence,
+            review_status: "confirmed",
+          });
+
+          const newTx = confirmRes.transaction;
+
+          await DataStore.updateSlipJob(userId, job.id, {
+            status: "created",
+            safe_error_message: isReprocess ? jobDiagnostics : null,
+            finished_at: new Date().toISOString(),
+          });
+
+          const primaryMatchedAccount = ownedAccounts.find(
+            (a) => a.id === (senderMatch.accountId || receiverMatch.accountId)
+          );
+
+          return {
+            jobId: job.id,
+            slipId: slip.id,
+            status: "created",
+            amount: extraction.amount,
+            currency: "THB",
+            transactionId: newTx.id,
+            extracted: extraction,
+            overallConfidence: confidenceDecision.overallConfidence,
+            direction: directionClass.direction,
+            matchedFromAccountId: senderMatch.accountId,
+            matchedToAccountId: receiverMatch.accountId,
+            matchedAccountInfo: primaryMatchedAccount
+              ? {
+                  id: primaryMatchedAccount.id,
+                  name: primaryMatchedAccount.name,
+                  institution: primaryMatchedAccount.institution,
+                }
+              : undefined,
+            preservedPrevious: false,
+            completenessScore: mergedScore,
+          };
+        } catch (rpcErr: unknown) {
+          // Fail-closed guarantee: If atomic RPC fails, NEVER create transaction through a fallback.
+          // The slip remains safely stored in needs_review for manual confirmation.
+          const rpcMsg =
+            rpcErr instanceof Error ? rpcErr.message : "RPC confirmation failed";
+
+          await DataStore.updateSlipJob(userId, job.id, {
+            status: "needs_review",
+            error_code: "CONFIRM_RPC_FAILED",
+            safe_error_message: `Auto-confirm failed: ${rpcMsg}`,
+            finished_at: new Date().toISOString(),
+          });
+
+          return {
+            jobId: job.id,
+            slipId: slip.id,
+            status: "needs_review",
+            amount: extraction.amount,
+            currency: "THB",
+            reviewUrl: `/review?slipId=${slip.id}`,
+            extracted: extraction,
+            overallConfidence: effectiveConfidence,
+            direction: directionClass.direction,
+            matchedFromAccountId: senderMatch.accountId,
+            matchedToAccountId: receiverMatch.accountId,
+            warningMessage:
+              "ระบบยืนยันรายการอัตโนมัติขัดข้อง กรุณาตรวจสอบและยืนยันด้วยตนเอง",
+            errorMessage: rpcMsg,
+            preservedPrevious,
+            completenessScore: mergedScore,
+          };
+        }
       } else {
         // Send to Review Inbox
         await DataStore.updateSlip(userId, slip.id, {

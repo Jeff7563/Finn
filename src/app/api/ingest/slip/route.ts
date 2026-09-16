@@ -146,10 +146,17 @@ export async function POST(req: NextRequest) {
       {
         jobId: result.jobId,
         status: result.status,
+        transactionId: result.transactionId,
         amount: result.amount,
         currency: result.currency || "THB",
+        direction: result.direction,
+        matchedAccount: result.matchedAccountInfo,
         reviewUrl: result.reviewUrl,
         warning: result.warningMessage,
+        reason:
+          result.status === "needs_review"
+            ? result.errorMessage || result.warningMessage
+            : undefined,
       },
       { status: httpStatus }
     );

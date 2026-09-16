@@ -189,7 +189,7 @@ test.describe.serial("Phase 2 — Slip Automation End-to-End", () => {
     await page.locator('input[type="file"]').setInputFiles(slipFile);
     await page.getByRole("button", { name: "เริ่มอ่านและประมวลผลสลิป" }).click();
     await expect(page.getByRole("heading", { name: /สำเร็จ|รอตรวจสอบ/i })).toBeVisible({ timeout: 10000 });
-    await page.getByRole("button", { name: /เสร็จสิ้น|เปิดตรวจสอบ/i }).click();
+    await page.getByRole("button", { name: "เสร็จสิ้น" }).click();
 
     // Second upload of exact same file
     await page.goto("/transactions");

@@ -107,11 +107,46 @@ export interface SlipCorrection {
   created_at: string;
 }
 
+export type AccountMatchMethod =
+  | "verified_alias"
+  | "positional_mask"
+  | "masked_suffix"
+  | "name_alias"
+  | "bank_only"
+  | "ambiguous"
+  | "no_match";
+
+export interface AccountMatchCandidate {
+  id: string;
+  name: string;
+}
+
 export interface AccountMatchResult {
   accountId: string | null;
   accountName?: string;
   confidence: number;
   reason: string;
+  matchMethod?: AccountMatchMethod;
+  ambiguousCandidates?: AccountMatchCandidate[];
+}
+
+export interface AccountMatchAlias {
+  id: string;
+  user_id: string;
+  account_id: string;
+  institution?: string | null;
+  raw_masked_pattern?: string | null;
+  normalized_masked_pattern: string;
+  source: string;
+  confirmed_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface MatchedAccountSummary {
+  id?: string;
+  name?: string;
+  institution?: string | null;
 }
 
 export interface SlipProcessingResult {
@@ -133,6 +168,7 @@ export interface SlipProcessingResult {
   direction?: Direction;
   matchedFromAccountId?: string | null;
   matchedToAccountId?: string | null;
+  matchedAccountInfo?: MatchedAccountSummary;
 }
 
 export interface IngestApiResponse {
@@ -141,7 +177,11 @@ export interface IngestApiResponse {
   amount?: number;
   currency: "THB";
   reviewUrl?: string;
+  transactionId?: string;
+  direction?: Direction;
+  matchedAccount?: MatchedAccountSummary;
   warning?: string;
   error?: string;
+  reason?: string;
 }
 

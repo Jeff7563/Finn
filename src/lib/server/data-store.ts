@@ -327,6 +327,30 @@ export const DataStore: IDataStore = {
     return getActiveStore().verifySlipPreviewSignature(slipId, exp, sig);
   },
 
+  // ACCOUNT MATCH ALIASES
+  async getAccountMatchAliases(userId: string): Promise<import("@/types/slip").AccountMatchAlias[]> {
+    return getActiveStore().getAccountMatchAliases(userId);
+  },
+
+  async recordAccountMatchAlias(
+    userId: string,
+    data: {
+      account_id: string;
+      institution?: string | null;
+      raw_masked_pattern?: string | null;
+      normalized_masked_pattern: string;
+      source?: string;
+    }
+  ): Promise<import("@/types/slip").AccountMatchAlias> {
+    return getActiveStore().recordAccountMatchAlias(userId, data);
+  },
+
+  async backfillAccountMatchAliases(
+    userId: string
+  ): Promise<{ created: number; skipped: number }> {
+    return getActiveStore().backfillAccountMatchAliases(userId);
+  },
+
   // Atomic Slip Confirmation
   async confirmSlipTransaction(
     userId: string,

@@ -97,6 +97,20 @@ export interface IDataStore {
   createSlipCorrection(userId: string, data: Partial<SlipCorrection>): Promise<SlipCorrection>;
   getSlipCorrections(userId: string, slipId?: string): Promise<SlipCorrection[]>;
 
+  // Account Match Aliases
+  getAccountMatchAliases(userId: string): Promise<import("@/types/slip").AccountMatchAlias[]>;
+  recordAccountMatchAlias(
+    userId: string,
+    data: {
+      account_id: string;
+      institution?: string | null;
+      raw_masked_pattern?: string | null;
+      normalized_masked_pattern: string;
+      source?: string;
+    }
+  ): Promise<import("@/types/slip").AccountMatchAlias>;
+  backfillAccountMatchAliases(userId: string): Promise<{ created: number; skipped: number }>;
+
   // Storage
   saveSlipFile(storagePath: string, buffer: Buffer): Promise<void>;
   getSlipFile(storagePath: string): Promise<Buffer | null>;

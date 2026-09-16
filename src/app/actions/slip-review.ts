@@ -12,11 +12,41 @@ import { classifyDirection } from "@/lib/slip/direction";
 import { matchCounterparty } from "@/lib/slip/counterparty-match";
 import { suggestCategory } from "@/lib/slip/category-suggest";
 import { bangkokDateTimeLocalToCanonicalInstant } from "@/lib/finance/formatters";
+import { normalizeMaskedPattern } from "@/lib/slip/mask-pattern";
 
 export interface ReviewActionResult {
   success: boolean;
   transactionId?: string;
   error?: string;
+}
+
+/**
+ * Best-effort helper to learn account match aliases from confirmed slips.
+ * Crucial guarantee: Alias-learning failure NEVER rolls back or fails a valid financial transaction.
+ */
+async function safelyLearnAlias(
+  userId: string,
+  accountId: string | null | undefined,
+  bank: string | null | undefined,
+  rawMasked: string | null | undefined,
+  source: string
+): Promise<void> {
+  if (!accountId || !rawMasked) return;
+  const pattern = normalizeMaskedPattern(rawMasked);
+  if (!pattern || pattern.length < 3) return;
+
+  try {
+    await DataStore.recordAccountMatchAlias(userId, {
+      account_id: accountId,
+      institution: bank || null,
+      raw_masked_pattern: rawMasked,
+      normalized_masked_pattern: pattern,
+      source,
+    });
+  } catch (err) {
+    // Non-blocking best-effort
+    console.warn("Best-effort alias recording skipped:", err);
+  }
 }
 
 /**
@@ -54,10 +84,11 @@ export async function confirmSlipAction(
       return { success: false, error: "สลิปนี้ไม่มีจำนวนเงินที่ถูกต้อง กรุณาแก้ไขก่อนยืนยัน" };
     }
 
-    // Match accounts against user's owned accounts
+    // Match accounts against user's owned accounts (leveraging learned aliases)
     const accounts = await DataStore.getAccounts(user.id);
-    const sMatch = matchOwnedAccount(ext.sender, accounts);
-    const rMatch = matchOwnedAccount(ext.receiver, accounts);
+    const aliases = await DataStore.getAccountMatchAliases(user.id);
+    const sMatch = matchOwnedAccount(ext.sender, accounts, aliases);
+    const rMatch = matchOwnedAccount(ext.receiver, accounts, aliases);
     const directionClass = classifyDirection(sMatch.accountId, rMatch.accountId);
 
     let fromAccountId: string | null = null;
@@ -154,6 +185,16 @@ export async function confirmSlipAction(
       confidence: slip.overall_confidence || 1.0,
       review_status: "confirmed",
     });
+
+    // Best-effort: Learn alias from verified selection after financial confirmation succeeds
+    if (txType === "expense") {
+      await safelyLearnAlias(user.id, fromAccountId, ext.sender?.bank, ext.sender?.accountMasked, "manual_confirm");
+    } else if (txType === "income") {
+      await safelyLearnAlias(user.id, toAccountId, ext.receiver?.bank, ext.receiver?.accountMasked, "manual_confirm");
+    } else if (txType === "transfer") {
+      await safelyLearnAlias(user.id, fromAccountId, ext.sender?.bank, ext.sender?.accountMasked, "manual_confirm");
+      await safelyLearnAlias(user.id, toAccountId, ext.receiver?.bank, ext.receiver?.accountMasked, "manual_confirm");
+    }
 
     revalidatePath("/review");
     revalidatePath("/today");
@@ -268,6 +309,20 @@ export async function editAndConfirmSlipAction(
       confidence: 1.0,
       review_status: "corrected",
     });
+
+    // Best-effort: Learn alias from user-corrected account selection
+    if (data.type === "expense" && data.from_account_id) {
+      await safelyLearnAlias(user.id, data.from_account_id, ext?.sender?.bank, ext?.sender?.accountMasked, "manual_edit");
+    } else if (data.type === "income" && data.to_account_id) {
+      await safelyLearnAlias(user.id, data.to_account_id, ext?.receiver?.bank, ext?.receiver?.accountMasked, "manual_edit");
+    } else if (data.type === "transfer") {
+      if (data.from_account_id) {
+        await safelyLearnAlias(user.id, data.from_account_id, ext?.sender?.bank, ext?.sender?.accountMasked, "manual_edit");
+      }
+      if (data.to_account_id) {
+        await safelyLearnAlias(user.id, data.to_account_id, ext?.receiver?.bank, ext?.receiver?.accountMasked, "manual_edit");
+      }
+    }
 
     revalidatePath("/review");
     revalidatePath("/today");

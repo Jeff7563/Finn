@@ -3,7 +3,7 @@
 
 import React, { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
-import { Slip } from "@/types/slip";
+import { Slip, AccountMatchAlias } from "@/types/slip";
 import {
   Account,
   Category,
@@ -58,6 +58,7 @@ interface ReviewInboxClientProps {
   categories: Category[];
   merchants: Merchant[];
   people: Person[];
+  aliases?: AccountMatchAlias[];
 }
 
 export function ReviewInboxClient({
@@ -67,6 +68,7 @@ export function ReviewInboxClient({
   categories,
   merchants,
   people,
+  aliases = [],
 }: ReviewInboxClientProps) {
   const router = useRouter();
   const [slips, setSlips] = useState<Slip[]>(initialSlips);
@@ -165,8 +167,8 @@ export function ReviewInboxClient({
     if (!targetSlip) return;
 
     const ext = targetSlip.extracted_json;
-    const sMatch = matchOwnedAccount(ext?.sender, accounts);
-    const rMatch = matchOwnedAccount(ext?.receiver, accounts);
+    const sMatch = matchOwnedAccount(ext?.sender, accounts, aliases);
+    const rMatch = matchOwnedAccount(ext?.receiver, accounts, aliases);
     const dir = classifyDirection(sMatch.accountId, rMatch.accountId);
 
     // If an account is required but not matched, open edit modal so user can choose account
@@ -242,8 +244,8 @@ export function ReviewInboxClient({
   // Open Edit Form
   const openEditModal = (slip: Slip) => {
     const ext = slip.extracted_json;
-    const sMatch = matchOwnedAccount(ext?.sender, accounts);
-    const rMatch = matchOwnedAccount(ext?.receiver, accounts);
+    const sMatch = matchOwnedAccount(ext?.sender, accounts, aliases);
+    const rMatch = matchOwnedAccount(ext?.receiver, accounts, aliases);
     const directionClass = classifyDirection(sMatch.accountId, rMatch.accountId);
 
     let defaultType: "expense" | "income" | "transfer" = "expense";
@@ -409,8 +411,8 @@ export function ReviewInboxClient({
               ? Math.round(slip.overall_confidence! * 100)
               : 0;
 
-            const senderMatch = matchOwnedAccount(ext?.sender, accounts);
-            const receiverMatch = matchOwnedAccount(ext?.receiver, accounts);
+            const senderMatch = matchOwnedAccount(ext?.sender, accounts, aliases);
+            const receiverMatch = matchOwnedAccount(ext?.receiver, accounts, aliases);
             const directionClass = classifyDirection(senderMatch.accountId, receiverMatch.accountId);
             const senderAcc = accounts.find((a) => a.id === senderMatch.accountId);
             const receiverAcc = accounts.find((a) => a.id === receiverMatch.accountId);

@@ -173,11 +173,17 @@ export function formatTime(
  * in Asia/Bangkok local wall-clock time.
  */
 export function getBangkokLocalDateParts(
-  dateInput: string | Date,
+  dateInput: string | Date | number | null | undefined,
   timeZone: string = "Asia/Bangkok"
 ): { year: number; month: number; day: number } {
-  const date = typeof dateInput === "string" ? new Date(dateInput) : dateInput;
-  if (isNaN(date.getTime())) return { year: 0, month: 0, day: 0 };
+  if (dateInput == null) return { year: 0, month: 0, day: 0 };
+  const date =
+    dateInput instanceof Date
+      ? dateInput
+      : typeof dateInput === "string" || typeof dateInput === "number"
+      ? new Date(dateInput)
+      : null;
+  if (!date || isNaN(date.getTime())) return { year: 0, month: 0, day: 0 };
 
   const parts = new Intl.DateTimeFormat("en-US", {
     timeZone,

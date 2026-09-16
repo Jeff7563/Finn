@@ -8,13 +8,14 @@ export const dynamic = "force-dynamic";
 export default async function ReviewPage() {
   const user = await requireUser();
 
-  const [pendingSlips, accounts, categories, merchants, people] =
+  const [pendingSlips, accounts, categories, merchants, people, aliases] =
     await Promise.all([
       DataStore.getPendingReviewSlips(user.id),
       DataStore.getAccounts(user.id),
       DataStore.getCategories(user.id),
       DataStore.getMerchants(user.id),
       DataStore.getPeople(user.id),
+      DataStore.getAccountMatchAliases(user.id),
     ]);
 
   return (
@@ -25,6 +26,7 @@ export default async function ReviewPage() {
       categories={categories}
       merchants={merchants}
       people={people}
+      aliases={aliases}
     />
   );
 }

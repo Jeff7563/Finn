@@ -22,7 +22,10 @@ import {
   Slip,
   SlipIngestionJob,
   SlipCorrection,
+  AccountMatchAlias,
 } from "@/types/slip";
+import { normalizeBankName } from "../slip/bank-normalization";
+import { normalizeMaskedPattern } from "../slip/mask-pattern";
 import {
   PreloadedRelations,
   TransactionsPageData,
@@ -85,6 +88,7 @@ export interface MemoryDatabaseState {
   slips: Slip[];
   slip_ingestion_jobs: SlipIngestionJob[];
   slip_corrections: SlipCorrection[];
+  account_match_aliases: AccountMatchAlias[];
 }
 
 function getInitialState(): MemoryDatabaseState {
@@ -105,6 +109,7 @@ function getInitialState(): MemoryDatabaseState {
     slips: [],
     slip_ingestion_jobs: [],
     slip_corrections: [],
+    account_match_aliases: [],
   };
 }
 
@@ -1011,6 +1016,158 @@ export const MemoryDataStore: IDataStore = {
     }
   },
 
+  // Account Match Aliases
+  async getAccountMatchAliases(userId: string): Promise<AccountMatchAlias[]> {
+    assertUserId(userId);
+    return dbState.account_match_aliases.filter((a) => a.user_id === userId);
+  },
+
+  async recordAccountMatchAlias(
+    userId: string,
+    data: {
+      account_id: string;
+      institution?: string | null;
+      raw_masked_pattern?: string | null;
+      normalized_masked_pattern: string;
+      source?: string;
+    }
+  ): Promise<AccountMatchAlias> {
+    assertUserId(userId);
+    const accountExists = dbState.accounts.some(
+      (a) => a.id === data.account_id && a.user_id === userId
+    );
+    if (!accountExists) {
+      throw new Error(`Account ${data.account_id} not found or access denied`);
+    }
+
+    const normBank = data.institution ? normalizeBankName(data.institution) : null;
+    const existing = dbState.account_match_aliases.find(
+      (a) =>
+        a.user_id === userId &&
+        a.account_id === data.account_id &&
+        (a.institution || null) === normBank &&
+        a.normalized_masked_pattern === data.normalized_masked_pattern
+    );
+
+    if (existing) {
+      existing.confirmed_count += 1;
+      existing.updated_at = new Date().toISOString();
+      if (data.source) existing.source = data.source;
+      return existing;
+    }
+
+    const now = new Date().toISOString();
+    const newAlias: AccountMatchAlias = {
+      id: crypto.randomUUID(),
+      user_id: userId,
+      account_id: data.account_id,
+      institution: normBank,
+      raw_masked_pattern: data.raw_masked_pattern || null,
+      normalized_masked_pattern: data.normalized_masked_pattern,
+      source: data.source || "manual_confirm",
+      confirmed_count: 1,
+      created_at: now,
+      updated_at: now,
+    };
+
+    dbState.account_match_aliases.push(newAlias);
+    return newAlias;
+  },
+
+  async backfillAccountMatchAliases(
+    userId: string
+  ): Promise<{ created: number; skipped: number }> {
+    assertUserId(userId);
+    let created = 0;
+    let skipped = 0;
+
+    const verifiedTxs = dbState.transactions.filter(
+      (t) =>
+        t.user_id === userId &&
+        Boolean(t.source_slip_id) &&
+        (t.review_status === "confirmed" || t.review_status === "corrected")
+    );
+
+    // Group verified slips by sender/receiver patterns to ensure unambiguous relationships
+    const senderPatternMap = new Map<string, Set<string>>();
+    const receiverPatternMap = new Map<string, Set<string>>();
+
+    for (const tx of verifiedTxs) {
+      const slip = dbState.slips.find(
+        (s) => s.id === tx.source_slip_id && s.user_id === userId
+      );
+      if (!slip || !slip.extracted_json) continue;
+
+      if (tx.from_account_id && slip.extracted_json.sender?.accountMasked) {
+        const pattern = normalizeMaskedPattern(slip.extracted_json.sender.accountMasked);
+        const bank = normalizeBankName(slip.extracted_json.sender.bank) || "";
+        const key = `${bank}::${pattern}`;
+        if (!senderPatternMap.has(key)) senderPatternMap.set(key, new Set());
+        senderPatternMap.get(key)!.add(tx.from_account_id);
+      }
+
+      if (tx.to_account_id && slip.extracted_json.receiver?.accountMasked) {
+        const pattern = normalizeMaskedPattern(slip.extracted_json.receiver.accountMasked);
+        const bank = normalizeBankName(slip.extracted_json.receiver.bank) || "";
+        const key = `${bank}::${pattern}`;
+        if (!receiverPatternMap.has(key)) receiverPatternMap.set(key, new Set());
+        receiverPatternMap.get(key)!.add(tx.to_account_id);
+      }
+    }
+
+    // Only backfill patterns that unambiguously map to exactly one account
+    for (const tx of verifiedTxs) {
+      const slip = dbState.slips.find(
+        (s) => s.id === tx.source_slip_id && s.user_id === userId
+      );
+      if (!slip || !slip.extracted_json) continue;
+
+      if (tx.from_account_id && slip.extracted_json.sender?.accountMasked) {
+        const rawMask = slip.extracted_json.sender.accountMasked;
+        const pattern = normalizeMaskedPattern(rawMask);
+        const bank = normalizeBankName(slip.extracted_json.sender.bank);
+        const key = `${bank || ""}::${pattern}`;
+        const accountsForPattern = senderPatternMap.get(key);
+
+        if (accountsForPattern && accountsForPattern.size === 1) {
+          await this.recordAccountMatchAlias(userId, {
+            account_id: tx.from_account_id,
+            institution: bank,
+            raw_masked_pattern: rawMask,
+            normalized_masked_pattern: pattern,
+            source: "backfill",
+          });
+          created++;
+        } else {
+          skipped++;
+        }
+      }
+
+      if (tx.to_account_id && slip.extracted_json.receiver?.accountMasked) {
+        const rawMask = slip.extracted_json.receiver.accountMasked;
+        const pattern = normalizeMaskedPattern(rawMask);
+        const bank = normalizeBankName(slip.extracted_json.receiver.bank);
+        const key = `${bank || ""}::${pattern}`;
+        const accountsForPattern = receiverPatternMap.get(key);
+
+        if (accountsForPattern && accountsForPattern.size === 1) {
+          await this.recordAccountMatchAlias(userId, {
+            account_id: tx.to_account_id,
+            institution: bank,
+            raw_masked_pattern: rawMask,
+            normalized_masked_pattern: pattern,
+            source: "backfill",
+          });
+          created++;
+        } else {
+          skipped++;
+        }
+      }
+    }
+
+    return { created, skipped };
+  },
+
   // Atomic Slip Confirmation
   async confirmSlipTransaction(
     userId: string,
@@ -1138,8 +1295,14 @@ export const MemoryDataStore: IDataStore = {
     }
 
     // 3. Validate status
-    if (slip.status !== "needs_review" && slip.status !== "created") {
-      throw new Error(`Slip status is ${slip.status}; only slips in needs_review can be confirmed`);
+    if (
+      slip.status !== "needs_review" &&
+      slip.status !== "created" &&
+      slip.status !== "processing"
+    ) {
+      throw new Error(
+        `Slip status is ${slip.status}; only slips in needs_review or processing can be confirmed`
+      );
     }
 
     // 4. Create transaction

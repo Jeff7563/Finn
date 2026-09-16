@@ -22,7 +22,10 @@ import {
   Slip,
   SlipIngestionJob,
   SlipCorrection,
+  AccountMatchAlias,
 } from "@/types/slip";
+import { normalizeBankName } from "../slip/bank-normalization";
+import { normalizeMaskedPattern } from "../slip/mask-pattern";
 import {
   generateIngestToken,
   hashToken,
@@ -246,6 +249,21 @@ function mapSlipCorrection(row: Record<string, unknown>): SlipCorrection {
     extracted_value: row.extracted_value,
     corrected_value: row.corrected_value,
     created_at: String(row.created_at),
+  };
+}
+
+function mapAccountMatchAlias(row: Record<string, unknown>): AccountMatchAlias {
+  return {
+    id: String(row.id),
+    user_id: String(row.user_id),
+    account_id: String(row.account_id),
+    institution: row.institution ? String(row.institution) : null,
+    raw_masked_pattern: row.raw_masked_pattern ? String(row.raw_masked_pattern) : null,
+    normalized_masked_pattern: String(row.normalized_masked_pattern),
+    source: String(row.source || "manual_confirm"),
+    confirmed_count: Number(row.confirmed_count || 1),
+    created_at: String(row.created_at || new Date().toISOString()),
+    updated_at: String(row.updated_at || new Date().toISOString()),
   };
 }
 
@@ -1497,6 +1515,116 @@ export class SupabaseDataStoreImpl implements IDataStore {
       throw new Error(`Failed to fetch slip corrections: ${(error as Error).message}`);
     }
     return (data || []).map(mapSlipCorrection);
+  }
+
+  // ACCOUNT MATCH ALIASES
+  async getAccountMatchAliases(userId: string): Promise<AccountMatchAlias[]> {
+    assertUserId(userId);
+    const client = await this.getClient(userId);
+    const { data, error } = await this.executeRead(() =>
+      client
+        .from("account_match_aliases")
+        .select("*")
+        .eq("user_id", userId)
+    );
+    if (error) {
+      return [];
+    }
+    return (data || []).map(mapAccountMatchAlias);
+  }
+
+  async recordAccountMatchAlias(
+    userId: string,
+    data: {
+      account_id: string;
+      institution?: string | null;
+      raw_masked_pattern?: string | null;
+      normalized_masked_pattern: string;
+      source?: string;
+    }
+  ): Promise<AccountMatchAlias> {
+    assertUserId(userId);
+    const client = await this.getClient(userId);
+    const normBank = data.institution ? normalizeBankName(data.institution) : null;
+    const payload = {
+      user_id: userId,
+      account_id: data.account_id,
+      institution: normBank,
+      raw_masked_pattern: data.raw_masked_pattern || null,
+      normalized_masked_pattern: data.normalized_masked_pattern,
+      source: data.source || "manual_confirm",
+    };
+
+    const { data: upserted, error } = await client
+      .from("account_match_aliases")
+      .upsert(payload, {
+        onConflict: "user_id, account_id, institution, normalized_masked_pattern",
+      })
+      .select()
+      .single();
+
+    if (error) {
+      throw new Error(`Failed to record account match alias: ${error.message}`);
+    }
+    return mapAccountMatchAlias(upserted);
+  }
+
+  async backfillAccountMatchAliases(
+    userId: string
+  ): Promise<{ created: number; skipped: number }> {
+    assertUserId(userId);
+    let created = 0;
+    let skipped = 0;
+
+    const verifiedTxs = await this.getTransactions(userId);
+    const filteredTxs = verifiedTxs.filter(
+      (t) =>
+        Boolean(t.source_slip_id) &&
+        (t.review_status === "confirmed" || t.review_status === "corrected")
+    );
+
+    for (const tx of filteredTxs) {
+      const slip = await this.getSlipById(userId, tx.source_slip_id!);
+      if (!slip || !slip.extracted_json) continue;
+
+      if (tx.from_account_id && slip.extracted_json.sender?.accountMasked) {
+        try {
+          const rawMask = slip.extracted_json.sender.accountMasked;
+          const pattern = normalizeMaskedPattern(rawMask);
+          const bank = normalizeBankName(slip.extracted_json.sender.bank);
+          await this.recordAccountMatchAlias(userId, {
+            account_id: tx.from_account_id,
+            institution: bank,
+            raw_masked_pattern: rawMask,
+            normalized_masked_pattern: pattern,
+            source: "backfill",
+          });
+          created++;
+        } catch {
+          skipped++;
+        }
+      }
+
+      if (tx.to_account_id && slip.extracted_json.receiver?.accountMasked) {
+        try {
+          const rawMask = slip.extracted_json.receiver.accountMasked;
+          const pattern = normalizeMaskedPattern(rawMask);
+          const bank = normalizeBankName(slip.extracted_json.receiver.bank);
+          await this.recordAccountMatchAlias(userId, {
+            account_id: tx.to_account_id,
+            institution: bank,
+            raw_masked_pattern: rawMask,
+            normalized_masked_pattern: pattern,
+            source: "backfill",
+          });
+          created++;
+        } catch {
+          skipped++;
+        }
+      }
+    }
+
+    return { created, skipped };
   }
 
   // PRIVATE STORAGE (Supabase Storage bucket: 'slips')
