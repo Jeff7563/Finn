@@ -139,3 +139,212 @@ export function calculateTotalActiveBalance(
 
   return roundToTwoDecimals(total);
 }
+
+export interface BalanceAtResult {
+  balance: number | null; // THB decimal, or null if cannot calculate safely
+  status: "success" | "cannot_calculate_safely";
+  reason?: string;
+  transaction_count?: number;
+}
+
+/**
+ * Calculates account balance at an exact point in time according to Decision 4 semantics:
+ * - target == balance_as_of -> exactly opening_balance
+ * - target > balance_as_of -> opening_balance + sum(transactions in (balance_as_of, target])
+ * - target < balance_as_of -> cannot_calculate_safely (returns null, NO fake reconstruction)
+ * - insufficient data (no balance_as_of or unparseable timestamps) -> cannot_calculate_safely
+ */
+export function calculateAccountBalanceAt(
+  account: Account,
+  transactions: Transaction[],
+  targetInstant: string | Date
+): BalanceAtResult {
+  const targetDate =
+    typeof targetInstant === "string" ? new Date(targetInstant) : targetInstant;
+  const targetTime = targetDate.getTime();
+  if (isNaN(targetTime)) {
+    return {
+      balance: null,
+      status: "cannot_calculate_safely",
+      reason: "Target instant is invalid",
+    };
+  }
+
+  // Fail closed: If any transaction associated with this account has missing or unparseable date,
+  // we cannot safely compute point-in-time balance.
+  for (const tx of transactions) {
+    const isFromAccount = tx.from_account_id === account.id;
+    const isToAccount = tx.to_account_id === account.id;
+    if (!isFromAccount && !isToAccount) {
+      continue;
+    }
+
+    if (!tx.transaction_date) {
+      return {
+        balance: null,
+        status: "cannot_calculate_safely",
+        reason: `Transaction ${tx.id} has missing transaction_date`,
+      };
+    }
+
+    const txTime = new Date(tx.transaction_date).getTime();
+    if (isNaN(txTime)) {
+      return {
+        balance: null,
+        status: "cannot_calculate_safely",
+        reason: `Transaction ${tx.id} has unparseable transaction_date: "${tx.transaction_date}"`,
+      };
+    }
+  }
+
+  // Legacy accounts without balance_as_of: preserve legacy calculation (opening_balance + sum up to target)
+  if (!account.balance_as_of) {
+    let balance = Number(account.opening_balance) || 0;
+    let txCount = 0;
+
+    for (const tx of transactions) {
+      const isFromAccount = tx.from_account_id === account.id;
+      const isToAccount = tx.to_account_id === account.id;
+      if (!isFromAccount && !isToAccount) {
+        continue;
+      }
+
+      const txTime = new Date(tx.transaction_date).getTime();
+      if (txTime <= targetTime) {
+        txCount++;
+        const amount = Number(tx.amount) || 0;
+
+        if (tx.type === "transfer") {
+          if (isFromAccount && isToAccount) {
+            continue;
+          }
+          if (isFromAccount) {
+            balance -= amount;
+          } else if (isToAccount) {
+            balance += amount;
+          }
+        } else if (
+          tx.type === "income" ||
+          tx.type === "refund" ||
+          tx.type === "reimbursement" ||
+          tx.type === "gift" ||
+          tx.type === "loan_received"
+        ) {
+          if (isToAccount) {
+            balance += amount;
+          }
+        } else if (
+          tx.type === "expense" ||
+          tx.type === "loan_payment" ||
+          tx.type === "investment"
+        ) {
+          if (isFromAccount) {
+            balance -= amount;
+          }
+        } else if (tx.type === "adjustment") {
+          if (isToAccount) {
+            balance += amount;
+          } else if (isFromAccount) {
+            balance -= amount;
+          }
+        }
+      }
+    }
+
+    return {
+      balance: roundToTwoDecimals(balance),
+      status: "success",
+      transaction_count: txCount,
+    };
+  }
+
+  const baselineTime = new Date(account.balance_as_of).getTime();
+  if (isNaN(baselineTime)) {
+    return {
+      balance: null,
+      status: "cannot_calculate_safely",
+      reason: "Account baseline timestamp is invalid",
+    };
+  }
+
+  // target < balance_as_of => strictly cannot calculate safely (no backward extrapolation)
+  if (targetTime < baselineTime) {
+    return {
+      balance: null,
+      status: "cannot_calculate_safely",
+      reason:
+        "Target instant is earlier than authoritative baseline (target < balance_as_of)",
+    };
+  }
+
+  // target == balance_as_of => exactly opening_balance
+  if (targetTime === baselineTime) {
+    return {
+      balance: roundToTwoDecimals(Number(account.opening_balance) || 0),
+      status: "success",
+      transaction_count: 0,
+    };
+  }
+
+  // target > balance_as_of => opening_balance + transactions in (balance_as_of, target]
+  let balance = Number(account.opening_balance) || 0;
+  let txCount = 0;
+
+  for (const tx of transactions) {
+    const isFromAccount = tx.from_account_id === account.id;
+    const isToAccount = tx.to_account_id === account.id;
+    if (!isFromAccount && !isToAccount) {
+      continue;
+    }
+
+    const txTime = new Date(tx.transaction_date).getTime();
+    // Interval: (balance_as_of, target]
+    // Strictly after baseline, on or before target
+    if (txTime > baselineTime && txTime <= targetTime) {
+      txCount++;
+      const amount = Number(tx.amount) || 0;
+
+      if (tx.type === "transfer") {
+        if (isFromAccount && isToAccount) {
+          continue;
+        }
+        if (isFromAccount) {
+          balance -= amount;
+        } else if (isToAccount) {
+          balance += amount;
+        }
+      } else if (
+        tx.type === "income" ||
+        tx.type === "refund" ||
+        tx.type === "reimbursement" ||
+        tx.type === "gift" ||
+        tx.type === "loan_received"
+      ) {
+        if (isToAccount) {
+          balance += amount;
+        }
+      } else if (
+        tx.type === "expense" ||
+        tx.type === "loan_payment" ||
+        tx.type === "investment"
+      ) {
+        if (isFromAccount) {
+          balance -= amount;
+        }
+      } else if (tx.type === "adjustment") {
+        if (isToAccount) {
+          balance += amount;
+        } else if (isFromAccount) {
+          balance -= amount;
+        }
+      }
+    }
+  }
+
+  return {
+    balance: roundToTwoDecimals(balance),
+    status: "success",
+    transaction_count: txCount,
+  };
+}
+

@@ -22,6 +22,14 @@ import {
   SlipCorrection,
 } from "@/types/slip";
 import {
+  SourceConnection,
+  SourceDocument,
+  ImportBatch,
+  IngestionItem,
+  TransactionEvidence,
+  ReconciliationRun,
+} from "@/types/multi-source";
+import {
   IDataStore,
   PreloadedRelations,
   TransactionsPageData,
@@ -358,6 +366,147 @@ export const DataStore: IDataStore = {
     input: ConfirmSlipTransactionInput
   ): Promise<ConfirmSlipTransactionResult> {
     return getActiveStore().confirmSlipTransaction(userId, input);
+  },
+
+  // Source Connections
+  async getSourceConnections(userId: string): Promise<SourceConnection[]> {
+    return getActiveStore().getSourceConnections(userId);
+  },
+
+  async getSourceConnectionById(userId: string, id: string): Promise<SourceConnection | null> {
+    return getActiveStore().getSourceConnectionById(userId, id);
+  },
+
+  async createSourceConnection(
+    userId: string,
+    data: Partial<SourceConnection>
+  ): Promise<SourceConnection> {
+    return getActiveStore().createSourceConnection(userId, data);
+  },
+
+  async updateSourceConnection(
+    userId: string,
+    id: string,
+    data: Partial<SourceConnection>
+  ): Promise<SourceConnection> {
+    return getActiveStore().updateSourceConnection(userId, id, data);
+  },
+
+  async deleteSourceConnection(userId: string, id: string): Promise<void> {
+    return getActiveStore().deleteSourceConnection(userId, id);
+  },
+
+  // Source Documents
+  async getSourceDocuments(userId: string): Promise<SourceDocument[]> {
+    return getActiveStore().getSourceDocuments(userId);
+  },
+
+  async getSourceDocumentById(userId: string, id: string): Promise<SourceDocument | null> {
+    return getActiveStore().getSourceDocumentById(userId, id);
+  },
+
+  async createSourceDocument(
+    userId: string,
+    data: Partial<SourceDocument>
+  ): Promise<SourceDocument> {
+    return getActiveStore().createSourceDocument(userId, data);
+  },
+
+  // Import Batches
+  async getImportBatches(userId: string): Promise<ImportBatch[]> {
+    return getActiveStore().getImportBatches(userId);
+  },
+
+  async getImportBatchById(userId: string, id: string): Promise<ImportBatch | null> {
+    return getActiveStore().getImportBatchById(userId, id);
+  },
+
+  async createImportBatch(
+    userId: string,
+    data: Partial<ImportBatch>
+  ): Promise<ImportBatch> {
+    return getActiveStore().createImportBatch(userId, data);
+  },
+
+  async updateImportBatch(
+    userId: string,
+    id: string,
+    data: Partial<ImportBatch>
+  ): Promise<ImportBatch> {
+    return getActiveStore().updateImportBatch(userId, id, data);
+  },
+
+  // Ingestion Items
+  async getIngestionItems(
+    userId: string,
+    filter?: { status?: string; sourceDocumentId?: string }
+  ): Promise<IngestionItem[]> {
+    return getActiveStore().getIngestionItems(userId, filter);
+  },
+
+  async getIngestionItemById(userId: string, id: string): Promise<IngestionItem | null> {
+    return getActiveStore().getIngestionItemById(userId, id);
+  },
+
+  async createIngestionItems(
+    userId: string,
+    items: Array<Partial<IngestionItem>>
+  ): Promise<IngestionItem[]> {
+    return getActiveStore().createIngestionItems(userId, items);
+  },
+
+  async updateIngestionItem(
+    userId: string,
+    id: string,
+    data: Partial<IngestionItem>
+  ): Promise<IngestionItem> {
+    return getActiveStore().updateIngestionItem(userId, id, data);
+  },
+
+  // Transaction Evidence Bridge
+  async getTransactionEvidence(
+    userId: string,
+    transactionId: string
+  ): Promise<TransactionEvidence[]> {
+    return getActiveStore().getTransactionEvidence(userId, transactionId);
+  },
+
+  async createTransactionEvidence(
+    userId: string,
+    data: Partial<TransactionEvidence>
+  ): Promise<TransactionEvidence> {
+    return getActiveStore().createTransactionEvidence(userId, data);
+  },
+
+  // Reconciliation Runs
+  async getReconciliationRuns(
+    userId: string,
+    accountId?: string
+  ): Promise<ReconciliationRun[]> {
+    return getActiveStore().getReconciliationRuns(userId, accountId);
+  },
+
+  async createReconciliationRun(
+    userId: string,
+    data: Partial<ReconciliationRun>
+  ): Promise<ReconciliationRun> {
+    return getActiveStore().createReconciliationRun(userId, data);
+  },
+
+  async createTransactionFromIngestionItem(
+    userId: string,
+    itemId: string,
+    txData: Omit<Transaction, "id" | "created_at" | "updated_at" | "user_id">
+  ): Promise<{ transaction: Transaction; evidence: TransactionEvidence; item: IngestionItem }> {
+    return getActiveStore().createTransactionFromIngestionItem(userId, itemId, txData);
+  },
+
+  async linkIngestionItemToTransaction(
+    userId: string,
+    itemId: string,
+    transactionId: string
+  ): Promise<{ evidence: TransactionEvidence; item: IngestionItem }> {
+    return getActiveStore().linkIngestionItemToTransaction(userId, itemId, transactionId);
   },
 
   // Reset database for tests

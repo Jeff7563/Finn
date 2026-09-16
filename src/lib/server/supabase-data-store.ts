@@ -24,6 +24,14 @@ import {
   SlipCorrection,
   AccountMatchAlias,
 } from "@/types/slip";
+import {
+  SourceConnection,
+  SourceDocument,
+  ImportBatch,
+  IngestionItem,
+  TransactionEvidence,
+  ReconciliationRun,
+} from "@/types/multi-source";
 import { normalizeBankName } from "../slip/bank-normalization";
 import {
   countVisibleDigits,
@@ -1855,6 +1863,414 @@ export class SupabaseDataStoreImpl implements IDataStore {
       transaction: tx,
       alreadyConfirmed: Boolean(rpcRes.already_confirmed),
     };
+  }
+
+  // ============================================================================
+  // Source Connections
+  // ============================================================================
+  async getSourceConnections(userId: string): Promise<SourceConnection[]> {
+    const supabase = await this.getClient();
+    const { data, error } = await supabase
+      .from("source_connections")
+      .select("*")
+      .eq("user_id", userId)
+      .order("created_at", { ascending: false });
+
+    if (error) throw new Error(`Failed to fetch source connections: ${error.message}`);
+    return data || [];
+  }
+
+  async getSourceConnectionById(userId: string, id: string): Promise<SourceConnection | null> {
+    const supabase = await this.getClient();
+    const { data, error } = await supabase
+      .from("source_connections")
+      .select("*")
+      .eq("user_id", userId)
+      .eq("id", id)
+      .maybeSingle();
+
+    if (error) throw new Error(`Failed to fetch source connection: ${error.message}`);
+    return data;
+  }
+
+  async createSourceConnection(
+    userId: string,
+    data: Partial<SourceConnection>
+  ): Promise<SourceConnection> {
+    const supabase = await this.getClient();
+    const { data: created, error } = await supabase
+      .from("source_connections")
+      .insert({
+        user_id: userId,
+        provider: data.provider,
+        label: data.label,
+        status: data.status || "active",
+        provider_account_id: data.provider_account_id,
+        config: data.config || {},
+      })
+      .select()
+      .single();
+
+    if (error) throw new Error(`Failed to create source connection: ${error.message}`);
+    return created;
+  }
+
+  async updateSourceConnection(
+    userId: string,
+    id: string,
+    data: Partial<SourceConnection>
+  ): Promise<SourceConnection> {
+    const supabase = await this.getClient();
+    const { data: updated, error } = await supabase
+      .from("source_connections")
+      .update(data)
+      .eq("user_id", userId)
+      .eq("id", id)
+      .select()
+      .single();
+
+    if (error) throw new Error(`Failed to update source connection: ${error.message}`);
+    return updated;
+  }
+
+  async deleteSourceConnection(userId: string, id: string): Promise<void> {
+    const supabase = await this.getClient();
+    const { error } = await supabase
+      .from("source_connections")
+      .delete()
+      .eq("user_id", userId)
+      .eq("id", id);
+
+    if (error) throw new Error(`Failed to delete source connection: ${error.message}`);
+  }
+
+  // ============================================================================
+  // Source Documents
+  // ============================================================================
+  async getSourceDocuments(userId: string): Promise<SourceDocument[]> {
+    const supabase = await this.getClient();
+    const { data, error } = await supabase
+      .from("source_documents")
+      .select("*")
+      .eq("user_id", userId)
+      .order("created_at", { ascending: false });
+
+    if (error) throw new Error(`Failed to fetch source documents: ${error.message}`);
+    return data || [];
+  }
+
+  async getSourceDocumentById(userId: string, id: string): Promise<SourceDocument | null> {
+    const supabase = await this.getClient();
+    const { data, error } = await supabase
+      .from("source_documents")
+      .select("*")
+      .eq("user_id", userId)
+      .eq("id", id)
+      .maybeSingle();
+
+    if (error) throw new Error(`Failed to fetch source document: ${error.message}`);
+    return data;
+  }
+
+  async createSourceDocument(
+    userId: string,
+    data: Partial<SourceDocument>
+  ): Promise<SourceDocument> {
+    const supabase = await this.getClient();
+    const { data: created, error } = await supabase
+      .from("source_documents")
+      .insert({
+        user_id: userId,
+        connection_id: data.connection_id,
+        document_type: data.document_type,
+        storage_path: data.storage_path,
+        original_filename: data.original_filename,
+        file_hash: data.file_hash,
+        file_size: data.file_size,
+        status: data.status || "received",
+        provider_metadata: data.provider_metadata || {},
+      })
+      .select()
+      .single();
+
+    if (error) throw new Error(`Failed to create source document: ${error.message}`);
+    return created;
+  }
+
+  // ============================================================================
+  // Import Batches
+  // ============================================================================
+  async getImportBatches(userId: string): Promise<ImportBatch[]> {
+    const supabase = await this.getClient();
+    const { data, error } = await supabase
+      .from("import_batches")
+      .select("*")
+      .eq("user_id", userId)
+      .order("created_at", { ascending: false });
+
+    if (error) throw new Error(`Failed to fetch import batches: ${error.message}`);
+    return data || [];
+  }
+
+  async getImportBatchById(userId: string, id: string): Promise<ImportBatch | null> {
+    const supabase = await this.getClient();
+    const { data, error } = await supabase
+      .from("import_batches")
+      .select("*")
+      .eq("user_id", userId)
+      .eq("id", id)
+      .maybeSingle();
+
+    if (error) throw new Error(`Failed to fetch import batch: ${error.message}`);
+    return data;
+  }
+
+  async createImportBatch(
+    userId: string,
+    data: Partial<ImportBatch>
+  ): Promise<ImportBatch> {
+    const supabase = await this.getClient();
+    const { data: created, error } = await supabase
+      .from("import_batches")
+      .insert({
+        user_id: userId,
+        connection_id: data.connection_id,
+        source_document_id: data.source_document_id,
+        batch_type: data.batch_type || "csv_statement",
+        status: data.status || "pending",
+        total_items: data.total_items || 0,
+        success_count: data.success_count || 0,
+        error_count: data.error_count || 0,
+        duplicate_count: data.duplicate_count || 0,
+        metadata: data.metadata || {},
+      })
+      .select()
+      .single();
+
+    if (error) throw new Error(`Failed to create import batch: ${error.message}`);
+    return created;
+  }
+
+  async updateImportBatch(
+    userId: string,
+    id: string,
+    data: Partial<ImportBatch>
+  ): Promise<ImportBatch> {
+    const supabase = await this.getClient();
+    const { data: updated, error } = await supabase
+      .from("import_batches")
+      .update(data)
+      .eq("user_id", userId)
+      .eq("id", id)
+      .select()
+      .single();
+
+    if (error) throw new Error(`Failed to update import batch: ${error.message}`);
+    return updated;
+  }
+
+  // ============================================================================
+  // Ingestion Items
+  // ============================================================================
+  async getIngestionItems(
+    userId: string,
+    filter?: { status?: string; sourceDocumentId?: string }
+  ): Promise<IngestionItem[]> {
+    const supabase = await this.getClient();
+    let query = supabase.from("ingestion_items").select("*").eq("user_id", userId);
+
+    if (filter?.status) {
+      query = query.eq("status", filter.status);
+    }
+    if (filter?.sourceDocumentId) {
+      query = query.eq("source_document_id", filter.sourceDocumentId);
+    }
+
+    const { data, error } = await query.order("created_at", { ascending: false });
+    if (error) throw new Error(`Failed to fetch ingestion items: ${error.message}`);
+    return data || [];
+  }
+
+  async getIngestionItemById(userId: string, id: string): Promise<IngestionItem | null> {
+    const supabase = await this.getClient();
+    const { data, error } = await supabase
+      .from("ingestion_items")
+      .select("*")
+      .eq("user_id", userId)
+      .eq("id", id)
+      .maybeSingle();
+
+    if (error) throw new Error(`Failed to fetch ingestion item: ${error.message}`);
+    return data;
+  }
+
+  async createIngestionItems(
+    userId: string,
+    items: Array<Partial<IngestionItem>>
+  ): Promise<IngestionItem[]> {
+    const supabase = await this.getClient();
+    const payload = items.map((item) => ({
+      user_id: userId,
+      source_document_id: item.source_document_id,
+      connection_id: item.connection_id,
+      item_type: item.item_type,
+      status: item.status || "pending",
+      raw_data: item.raw_data,
+      parsed_data: item.parsed_data,
+      fingerprint: item.fingerprint,
+      provider_external_id: item.provider_external_id,
+      reference_number: item.reference_number,
+      match_class: item.match_class,
+      matched_transaction_id: item.matched_transaction_id,
+      confidence_score: item.confidence_score,
+    }));
+
+    const { data, error } = await supabase.from("ingestion_items").insert(payload).select();
+    if (error) throw new Error(`Failed to create ingestion items: ${error.message}`);
+    return data || [];
+  }
+
+  async updateIngestionItem(
+    userId: string,
+    id: string,
+    data: Partial<IngestionItem>
+  ): Promise<IngestionItem> {
+    const supabase = await this.getClient();
+    const { data: updated, error } = await supabase
+      .from("ingestion_items")
+      .update(data)
+      .eq("user_id", userId)
+      .eq("id", id)
+      .select()
+      .single();
+
+    if (error) throw new Error(`Failed to update ingestion item: ${error.message}`);
+    return updated;
+  }
+
+  // ============================================================================
+  // Transaction Evidence Bridge
+  // ============================================================================
+  async getTransactionEvidence(
+    userId: string,
+    transactionId: string
+  ): Promise<TransactionEvidence[]> {
+    const supabase = await this.getClient();
+    const { data, error } = await supabase
+      .from("transaction_evidence")
+      .select("*")
+      .eq("user_id", userId)
+      .eq("transaction_id", transactionId);
+
+    if (error) throw new Error(`Failed to fetch transaction evidence: ${error.message}`);
+    return data || [];
+  }
+
+  async createTransactionEvidence(
+    userId: string,
+    data: Partial<TransactionEvidence>
+  ): Promise<TransactionEvidence> {
+    const supabase = await this.getClient();
+    const { data: created, error } = await supabase
+      .from("transaction_evidence")
+      .insert({
+        user_id: userId,
+        transaction_id: data.transaction_id,
+        slip_id: data.slip_id || null,
+        ingestion_item_id: data.ingestion_item_id || null,
+        evidence_type: data.evidence_type,
+      })
+      .select()
+      .single();
+
+    if (error) throw new Error(`Failed to create transaction evidence: ${error.message}`);
+    return created;
+  }
+
+  // ============================================================================
+  // Reconciliation Runs (Append-Only Audit Snapshots)
+  // ============================================================================
+  async getReconciliationRuns(
+    userId: string,
+    accountId?: string
+  ): Promise<ReconciliationRun[]> {
+    const supabase = await this.getClient();
+    let query = supabase.from("reconciliation_runs").select("*").eq("user_id", userId);
+
+    if (accountId) {
+      query = query.eq("account_id", accountId);
+    }
+
+    const { data, error } = await query.order("target_instant", { ascending: false });
+    if (error) throw new Error(`Failed to fetch reconciliation runs: ${error.message}`);
+    return data || [];
+  }
+
+  async createReconciliationRun(
+    userId: string,
+    data: Partial<ReconciliationRun>
+  ): Promise<ReconciliationRun> {
+    const supabase = await this.getClient();
+    const { data: created, error } = await supabase
+      .from("reconciliation_runs")
+      .insert({
+        user_id: userId,
+        account_id: data.account_id,
+        target_instant: data.target_instant,
+        authoritative_balance: data.authoritative_balance,
+        calculated_balance: data.calculated_balance,
+        difference: data.difference,
+        status: data.status,
+        source_document_id: data.source_document_id,
+        calculation_version: data.calculation_version || 1,
+        note: data.note,
+      })
+      .select()
+      .single();
+
+    if (error) throw new Error(`Failed to create reconciliation run: ${error.message}`);
+    return created;
+  }
+
+  async createTransactionFromIngestionItem(
+    userId: string,
+    itemId: string,
+    txData: Omit<Transaction, "id" | "created_at" | "updated_at" | "user_id">
+  ): Promise<{ transaction: Transaction; evidence: TransactionEvidence; item: IngestionItem }> {
+    assertUserId(userId);
+    const supabase = await this.getClient(userId);
+    const { data, error } = await supabase.rpc("create_transaction_from_ingestion_item", {
+      p_user_id: userId,
+      p_item_id: itemId,
+      p_tx_data: txData,
+    });
+    if (error) {
+      throw new Error(`Failed to create transaction from ingestion item: ${error.message}`);
+    }
+    const tx = mapTransaction(data.transaction);
+    const evidence: TransactionEvidence = data.evidence;
+    const item: IngestionItem = data.item;
+    return { transaction: tx, evidence, item };
+  }
+
+  async linkIngestionItemToTransaction(
+    userId: string,
+    itemId: string,
+    transactionId: string
+  ): Promise<{ evidence: TransactionEvidence; item: IngestionItem }> {
+    assertUserId(userId);
+    const supabase = await this.getClient(userId);
+    const { data, error } = await supabase.rpc("link_ingestion_item_to_transaction", {
+      p_user_id: userId,
+      p_item_id: itemId,
+      p_transaction_id: transactionId,
+    });
+    if (error) {
+      throw new Error(`Failed to link ingestion item: ${error.message}`);
+    }
+    const evidence: TransactionEvidence = data.evidence;
+    const item: IngestionItem = data.item;
+    return { evidence, item };
   }
 
   reset(): void {
