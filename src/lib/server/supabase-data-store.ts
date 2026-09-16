@@ -1586,115 +1586,55 @@ export class SupabaseDataStoreImpl implements IDataStore {
     assertUserId(userId);
     const client = await this.getClient(userId);
 
-    // 1. Try calling the atomic PostgreSQL RPC first
-    try {
-      const { data: rpcRes, error: rpcError } = await client.rpc(
-        "confirm_slip_transaction",
-        {
-          p_slip_id: input.slipId,
-          p_user_id: userId,
-          p_tx_type: input.type,
-          p_amount: Number(input.amount),
-          p_currency: input.currency || "THB",
-          p_transaction_date: input.transaction_date,
-          p_description: input.description || null,
-          p_note: input.note || null,
-          p_from_account_id: input.from_account_id || null,
-          p_to_account_id: input.to_account_id || null,
-          p_category_id: input.category_id || null,
-          p_merchant_id: input.merchant_id || null,
-          p_person_id: input.person_id || null,
-          p_reference_number: input.reference_number || null,
-          p_confidence: input.confidence !== undefined ? input.confidence : 1.0,
-          p_review_status: input.review_status || "confirmed",
-        }
-      );
-
-      if (!rpcError && rpcRes && rpcRes.transaction_id) {
-        const tx = await this.getTransactionById(userId, rpcRes.transaction_id);
-        if (!tx) {
-          throw new Error("Failed to retrieve confirmed transaction");
-        }
-        return {
-          transaction: tx,
-          alreadyConfirmed: Boolean(rpcRes.already_confirmed),
-        };
+    // Call the atomic PostgreSQL RPC. In production Supabase mode, the RPC is mandatory.
+    // If the RPC fails or is unavailable, fail closed! Never emulate atomicity with multiple network requests.
+    const { data: rpcRes, error: rpcError } = await client.rpc(
+      "confirm_slip_transaction",
+      {
+        p_slip_id: input.slipId,
+        p_user_id: userId,
+        p_tx_type: input.type,
+        p_amount: Number(input.amount),
+        p_currency: input.currency || "THB",
+        p_transaction_date: input.transaction_date,
+        p_description: input.description || null,
+        p_note: input.note || null,
+        p_from_account_id: input.from_account_id || null,
+        p_to_account_id: input.to_account_id || null,
+        p_category_id: input.category_id || null,
+        p_merchant_id: input.merchant_id || null,
+        p_person_id: input.person_id || null,
+        p_reference_number: input.reference_number || null,
+        p_confidence: input.confidence !== undefined ? input.confidence : 1.0,
+        p_review_status: input.review_status || "confirmed",
       }
+    );
 
-      if (rpcError) {
-        const errMsg = rpcError.message || "";
-        if (!errMsg.includes("could not find function") && !errMsg.includes("does not exist")) {
-          throw new Error(errMsg);
-        }
+    if (rpcError) {
+      const errMsg = rpcError.message || "";
+      if (
+        errMsg.includes("could not find function") ||
+        errMsg.includes("does not exist") ||
+        errMsg.includes("schema cache")
+      ) {
+        throw new Error("ระบบยืนยันรายการยังไม่พร้อม กรุณาติดต่อผู้ดูแล");
       }
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      if (!msg.includes("could not find function") && !msg.includes("does not exist")) {
-        throw err;
-      }
+      throw new Error(errMsg);
     }
 
-    // 2. Fallback: Application-level atomic execution with rollback guarantee
-    const slip = await this.getSlipById(userId, input.slipId);
-    if (!slip) {
-      throw new Error("Slip not found or access denied");
-    }
-    if (slip.linked_transaction_id) {
-      const existingTx = await this.getTransactionById(userId, slip.linked_transaction_id);
-      if (existingTx) {
-        return { transaction: existingTx, alreadyConfirmed: true };
-      }
+    if (!rpcRes || !rpcRes.transaction_id) {
+      throw new Error("ระบบยืนยันรายการยังไม่พร้อม กรุณาติดต่อผู้ดูแล");
     }
 
-    // Tier 2 idempotency: existing transaction with source_slip_id
-    const { data: existingTxRow } = await client
-      .from("transactions")
-      .select()
-      .eq("user_id", userId)
-      .eq("source_slip_id", input.slipId)
-      .maybeSingle();
-
-    if (existingTxRow) {
-      const existingTx = mapTransaction(existingTxRow);
-      await this.updateSlip(userId, input.slipId, {
-        status: "created",
-        linked_transaction_id: existingTx.id,
-        processed_at: new Date().toISOString(),
-      });
-      return { transaction: existingTx, alreadyConfirmed: true };
+    const tx = await this.getTransactionById(userId, rpcRes.transaction_id);
+    if (!tx) {
+      throw new Error("Failed to retrieve confirmed transaction");
     }
 
-    const newTx = await this.createTransaction(userId, {
-      type: input.type,
-      amount: input.amount,
-      currency: input.currency || "THB",
-      transaction_date: input.transaction_date,
-      description: input.description || null,
-      note: input.note || null,
-      from_account_id: input.from_account_id || null,
-      to_account_id: input.to_account_id || null,
-      category_id: input.category_id || null,
-      merchant_id: input.merchant_id || null,
-      person_id: input.person_id || null,
-      source: "slip",
-      source_slip_id: input.slipId,
-      reference_number: input.reference_number || null,
-      confidence: input.confidence !== undefined ? input.confidence : 1.0,
-      review_status: input.review_status || "confirmed",
-    });
-
-    try {
-      await this.updateSlip(userId, input.slipId, {
-        status: "created",
-        linked_transaction_id: newTx.id,
-        processed_at: new Date().toISOString(),
-      });
-      return { transaction: newTx, alreadyConfirmed: false };
-    } catch (slipErr) {
-      // Rollback inserted transaction so no orphaned transaction exists
-      await client.from("transactions").delete().eq("id", newTx.id).eq("user_id", userId);
-      throw slipErr;
-    }
+    return {
+      transaction: tx,
+      alreadyConfirmed: Boolean(rpcRes.already_confirmed),
+    };
   }
 
   reset(): void {

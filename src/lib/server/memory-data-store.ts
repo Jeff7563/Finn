@@ -1017,6 +1017,102 @@ export const MemoryDataStore: IDataStore = {
     input: ConfirmSlipTransactionInput
   ): Promise<ConfirmSlipTransactionResult> {
     assertUserId(userId);
+
+    // Domain validation 1: Allowed transaction types for slip confirmation
+    if (
+      !input.type ||
+      !["income", "expense", "transfer"].includes(input.type)
+    ) {
+      throw new Error(
+        `Invalid transaction type ${input.type}: confirmation only allows income, expense, or transfer`
+      );
+    }
+
+    // Domain validation 2: Allowed review status
+    const reviewStatus = input.review_status || "confirmed";
+    if (!["confirmed", "corrected"].includes(reviewStatus)) {
+      throw new Error(
+        `Invalid review_status ${input.review_status}: only confirmed or corrected allowed`
+      );
+    }
+
+    // Domain validation 3: Amount > 0 and finite
+    const numAmount = Number(input.amount);
+    if (!Number.isFinite(numAmount) || numAmount <= 0) {
+      throw new Error("Invalid amount: must be greater than 0");
+    }
+
+    // Domain validation 4: Transaction date required
+    if (!input.transaction_date) {
+      throw new Error("Transaction date is required");
+    }
+
+    // Domain validation 5: Account requirements
+    if (input.type === "transfer") {
+      if (!input.from_account_id || !input.to_account_id) {
+        throw new Error("Transfer requires both from_account_id and to_account_id");
+      }
+      if (input.from_account_id === input.to_account_id) {
+        throw new Error("Source and destination accounts must not be identical");
+      }
+    } else if (input.type === "expense") {
+      if (!input.from_account_id) {
+        throw new Error("Expense requires from_account_id");
+      }
+      if (input.to_account_id) {
+        throw new Error("Expense must not have to_account_id");
+      }
+    } else if (input.type === "income") {
+      if (!input.to_account_id) {
+        throw new Error("Income requires to_account_id");
+      }
+      if (input.from_account_id) {
+        throw new Error("Income must not have from_account_id");
+      }
+    }
+
+    // Defense-in-depth: Foreign ID ownership checks
+    if (input.from_account_id) {
+      const exists = dbState.accounts.some(
+        (a) => a.id === input.from_account_id && a.user_id === userId
+      );
+      if (!exists) {
+        throw new Error(`Security violation: foreign source account does not belong to user ${userId}`);
+      }
+    }
+    if (input.to_account_id) {
+      const exists = dbState.accounts.some(
+        (a) => a.id === input.to_account_id && a.user_id === userId
+      );
+      if (!exists) {
+        throw new Error(`Security violation: foreign destination account does not belong to user ${userId}`);
+      }
+    }
+    if (input.category_id) {
+      const exists = dbState.categories.some(
+        (c) => c.id === input.category_id && (c.user_id === userId || c.is_system)
+      );
+      if (!exists) {
+        throw new Error(`Security violation: foreign category does not belong to user ${userId}`);
+      }
+    }
+    if (input.merchant_id) {
+      const exists = dbState.merchants.some(
+        (m) => m.id === input.merchant_id && m.user_id === userId
+      );
+      if (!exists) {
+        throw new Error(`Security violation: foreign merchant does not belong to user ${userId}`);
+      }
+    }
+    if (input.person_id) {
+      const exists = dbState.people.some(
+        (p) => p.id === input.person_id && p.user_id === userId
+      );
+      if (!exists) {
+        throw new Error(`Security violation: foreign person does not belong to user ${userId}`);
+      }
+    }
+
     const slip = await this.getSlipById(userId, input.slipId);
     if (!slip) {
       throw new Error("Slip not found or access denied");
@@ -1049,7 +1145,7 @@ export const MemoryDataStore: IDataStore = {
     // 4. Create transaction
     const newTx = await this.createTransaction(userId, {
       type: input.type,
-      amount: input.amount,
+      amount: numAmount,
       currency: input.currency || "THB",
       transaction_date: input.transaction_date,
       description: input.description || null,
@@ -1063,7 +1159,7 @@ export const MemoryDataStore: IDataStore = {
       source_slip_id: input.slipId,
       reference_number: input.reference_number || null,
       confidence: input.confidence !== undefined ? input.confidence : 1.0,
-      review_status: input.review_status || "confirmed",
+      review_status: reviewStatus,
     });
 
     // 5. Update slip atomically (with rollback safeguard)
