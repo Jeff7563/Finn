@@ -38,6 +38,12 @@ export interface UnifiedInboxClientProps {
   accounts: Account[];
   categories?: Category[];
   existingTransactions?: Transaction[];
+  /** Server-computed canonical current balances keyed by account ID */
+  accountBalanceMap?: Record<string, number>;
+  /** Total bytes of legacy slip evidence (active, non-deleted, non-duplicate) */
+  legacySlipStorageBytes?: number;
+  /** Count of legacy slip evidence files */
+  legacySlipStorageCount?: number;
 }
 
 function formatBytes(bytes: number): string {
@@ -54,6 +60,9 @@ export function UnifiedInboxClient({
   accounts,
   categories = [],
   existingTransactions = [],
+  accountBalanceMap = {},
+  legacySlipStorageBytes = 0,
+  legacySlipStorageCount = 0,
 }: UnifiedInboxClientProps) {
   const [items, setItems] = useState<IngestionItem[]>(initialItems);
   const [selectedSourceFilter, setSelectedSourceFilter] = useState<string>("all");
@@ -269,38 +278,48 @@ export function UnifiedInboxClient({
           </button>
         </div>
 
-        {showStorageSummary && (
-          <div className="p-4 pt-0 border-t border-border/40 grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-3 text-xs">
-            <div className="p-3 bg-surface-soft rounded-lg space-y-1">
-              <span className="text-text-muted block text-[11px]">เอกสารที่จัดเก็บ</span>
-              <span className="font-bold text-text-primary text-sm">{storageSummary.totalDocuments} ไฟล์</span>
+        {showStorageSummary && (() => {
+          const combinedBytes = storageSummary.totalStoredBytes + legacySlipStorageBytes;
+          const combinedCount = storageSummary.totalDocuments + legacySlipStorageCount;
+          return (
+          <div className="p-4 pt-0 border-t border-border/40 space-y-3 text-xs">
+            {/* Combined totals */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-3">
+              <div className="p-3 bg-surface-soft rounded-lg space-y-1">
+                <span className="text-text-muted block text-[11px]">หลักฐานทั้งหมด</span>
+                <span className="font-bold text-text-primary text-sm">{combinedCount} ไฟล์</span>
+              </div>
+              <div className="p-3 bg-surface-soft rounded-lg space-y-1">
+                <span className="text-text-muted block text-[11px]">พื้นที่จัดเก็บรวม</span>
+                <span className="font-bold text-text-primary text-sm">{formatBytes(combinedBytes)}</span>
+              </div>
+              <div className="p-3 bg-surface-soft rounded-lg space-y-1">
+                <span className="text-text-muted block text-[11px]">สลิป (Legacy)</span>
+                <span className="font-bold text-text-primary text-sm">{legacySlipStorageCount} ไฟล์ / {formatBytes(legacySlipStorageBytes)}</span>
+              </div>
+              <div className="p-3 bg-surface-soft rounded-lg space-y-1">
+                <span className="text-text-muted block text-[11px]">เอกสารนำเข้า (Multi-Source)</span>
+                <span className="font-bold text-text-primary text-sm">{storageSummary.totalDocuments} ไฟล์ / {formatBytes(storageSummary.totalStoredBytes)}</span>
+              </div>
+              <div className="p-3 bg-surface-soft rounded-lg space-y-1">
+                <span className="text-text-muted block text-[11px]">รายการซ้ำ (Duplicates)</span>
+                <span className="font-bold text-text-primary text-sm">{storageSummary.duplicateCount}</span>
+              </div>
+              <div className="p-3 bg-surface-soft rounded-lg space-y-1">
+                <span className="text-text-muted block text-[11px]">ไฟล์ล้มเหลว/ปฏิเสธ</span>
+                <span className="font-bold text-text-primary text-sm">{storageSummary.failedOrRejectedCount}</span>
+              </div>
+              <div className="p-3 bg-surface-soft rounded-lg space-y-1">
+                <span className="text-text-muted block text-[11px]">พร้อมล้างไฟล์ ({">"}90 วัน)</span>
+                <span className="font-bold text-text-primary text-sm">{storageSummary.cleanupEligibleCount}</span>
+              </div>
             </div>
-            <div className="p-3 bg-surface-soft rounded-lg space-y-1">
-              <span className="text-text-muted block text-[11px]">พื้นที่จัดเก็บจริง</span>
-              <span className="font-bold text-text-primary text-sm">{formatBytes(storageSummary.totalStoredBytes)}</span>
-            </div>
-            <div className="p-3 bg-surface-soft rounded-lg space-y-1">
-              <span className="text-text-muted block text-[11px]">ขนาดไฟล์ต้นฉบับ</span>
-              <span className="font-bold text-text-primary text-sm">{formatBytes(storageSummary.totalOriginalBytes)}</span>
-            </div>
-            <div className="p-3 bg-emerald-500/10 rounded-lg space-y-1 text-emerald-700 dark:text-emerald-400">
-              <span className="text-[11px] block">ประหยัดพื้นที่ได้</span>
-              <span className="font-bold text-sm">{formatBytes(storageSummary.bytesSavedByOptimization)}</span>
-            </div>
-            <div className="p-3 bg-surface-soft rounded-lg space-y-1">
-              <span className="text-text-muted block text-[11px]">รายการซ้ำ (Duplicates)</span>
-              <span className="font-bold text-text-primary text-sm">{storageSummary.duplicateCount}</span>
-            </div>
-            <div className="p-3 bg-surface-soft rounded-lg space-y-1">
-              <span className="text-text-muted block text-[11px]">ไฟล์ล้มเหลว/ปฏิเสธ</span>
-              <span className="font-bold text-text-primary text-sm">{storageSummary.failedOrRejectedCount}</span>
-            </div>
-            <div className="p-3 bg-surface-soft rounded-lg space-y-1">
-              <span className="text-text-muted block text-[11px]">พร้อมล้างไฟล์ ({">"}90 วัน)</span>
-              <span className="font-bold text-text-primary text-sm">{storageSummary.cleanupEligibleCount}</span>
-            </div>
+            <p className="text-[11px] text-text-muted">
+              แสดงเฉพาะพื้นที่จัดเก็บที่ Finn เป็นเจ้าของ (Finn-owned metadata-based storage) — การล้างไฟล์ตามระยะเวลาเก็บรักษาใช้กับเอกสารนำเข้าเท่านั้น
+            </p>
           </div>
-        )}
+          );
+        })()}
       </div>
 
       {actionMessage && (
@@ -382,12 +401,15 @@ export function UnifiedInboxClient({
               onChange={(e) => setSelectedAccountId(e.target.value)}
               className="bg-surface border border-border rounded-md px-2 py-1 text-xs font-medium text-text-primary focus:outline-none focus:ring-1 focus:ring-primary"
             >
-              {accounts.map((acc) => (
+              {accounts.map((acc) => {
+                const displayBalance = accountBalanceMap[acc.id] ?? (Number(acc.opening_balance) || 0);
+                return (
                 <option key={acc.id} value={acc.id}>
                   {acc.name} ({acc.institution || "บัญชี"}) - คงเหลือ{" "}
-                  {(Number(acc.opening_balance) || 0).toLocaleString()} THB
+                  {displayBalance.toLocaleString()} THB
                 </option>
-              ))}
+                );
+              })}
             </select>
           </div>
 
