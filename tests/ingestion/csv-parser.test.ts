@@ -101,7 +101,31 @@ describe("Bank Statement CSV Parser", () => {
       const result = parseBankStatementCsv(csv, { userId });
       expect(result.items).toHaveLength(1);
       const item = result.items[0];
-      expect(item.parsed_data?.occurred_at).toBe("2026-09-15T14:30:00.000Z");
+      // 14:30:00 in Asia/Bangkok (+07:00) MUST canonicalize to 07:30:00.000Z in UTC
+      expect(item.parsed_data?.occurred_at).toBe("2026-09-15T07:30:00.000Z");
+    });
+
+    it("handles Gregorian DD/MM/YYYY, YYYY-MM-DD, date-only, and midnight boundaries in Asia/Bangkok", () => {
+      const csv = `Date,Time,Description,Amount
+15/09/2026,14:30:00,Gregorian DD/MM/YYYY,500.00
+2026-09-15,14:30:00,Gregorian YYYY-MM-DD,600.00
+15/09/2026,,Date Only Bangkok Noon,700.00
+16/09/2026,00:15:00,Midnight Cross-Day Boundary,800.00`;
+
+      const result = parseBankStatementCsv(csv, { userId });
+      expect(result.items).toHaveLength(4);
+
+      // 1. Gregorian DD/MM/YYYY 14:30:00 Bangkok -> 07:30:00.000Z UTC
+      expect(result.items[0].parsed_data?.occurred_at).toBe("2026-09-15T07:30:00.000Z");
+
+      // 2. Gregorian YYYY-MM-DD 14:30:00 Bangkok -> 07:30:00.000Z UTC
+      expect(result.items[1].parsed_data?.occurred_at).toBe("2026-09-15T07:30:00.000Z");
+
+      // 3. Date only defaults to 12:00:00 Bangkok wall clock -> 05:00:00.000Z UTC
+      expect(result.items[2].parsed_data?.occurred_at).toBe("2026-09-15T05:00:00.000Z");
+
+      // 4. Midnight boundary: 16/09/2026 00:15:00 Bangkok -> 2026-09-15T17:15:00.000Z UTC (previous day UTC)
+      expect(result.items[3].parsed_data?.occurred_at).toBe("2026-09-15T17:15:00.000Z");
     });
 
     it("Scenario 18: CSV debit (withdrawal column maps to outgoing expense in satang)", () => {
@@ -130,17 +154,38 @@ describe("Bank Statement CSV Parser", () => {
       expect(item.parsed_data?.transaction_type).toBe("income");
     });
 
-    it("Scenario 20: CSV malformed row -> review (skips zero-amount/header rows and preserves raw row for review)", () => {
+    it("Scenario 20: CSV malformed row -> review (preserves malformed/zero-amount rows with status pending, match_class no_match, and parse_error)", () => {
       const csv = `Date,Description,Amount
 2026-09-10,Malformed or Zero Row,0.00
 2026-09-10,Missing amount,
+invalid-date-format,Valid Amount,250.00
 2026-09-11,Valid Transaction,150.00`;
 
       const result = parseBankStatementCsv(csv, { userId });
-      // Zero-amount and unparseable rows are safely ignored from transaction creation candidates
-      expect(result.items).toHaveLength(1);
-      expect(result.items[0].parsed_data?.amount).toBe(15000);
+      // Malformed rows must NOT disappear!
+      expect(result.items).toHaveLength(4);
+
+      // Row 1: Zero amount
+      expect(result.items[0].status).toBe("pending");
+      expect(result.items[0].match_class).toBe("no_match");
+      expect(result.items[0].parsed_data?.parse_error).toContain("Missing or invalid non-zero transaction amount");
       expect(result.items[0].raw_data).toBeDefined();
+
+      // Row 2: Missing amount
+      expect(result.items[1].status).toBe("pending");
+      expect(result.items[1].match_class).toBe("no_match");
+      expect(result.items[1].parsed_data?.parse_error).toContain("Missing or invalid non-zero transaction amount");
+
+      // Row 3: Invalid date
+      expect(result.items[2].status).toBe("pending");
+      expect(result.items[2].match_class).toBe("no_match");
+      expect(result.items[2].parsed_data?.parse_error).toContain("Unparseable Bangkok date/time format");
+
+      // Row 4: Valid
+      expect(result.items[3].status).toBe("pending");
+      expect(result.items[3].match_class).toBeNull();
+      expect(result.items[3].parsed_data?.amount).toBe(15000);
+      expect(result.items[3].parsed_data?.parse_error).toBeUndefined();
     });
 
     it("handles empty or single-row CSV gracefully", () => {

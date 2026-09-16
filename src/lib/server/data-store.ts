@@ -493,6 +493,14 @@ export const DataStore: IDataStore = {
     return getActiveStore().createReconciliationRun(userId, data);
   },
 
+  async createTransactionFromIngestionItem(
+    userId: string,
+    itemId: string,
+    txData: Omit<Transaction, "id" | "created_at" | "updated_at" | "user_id">
+  ): Promise<{ transaction: Transaction; evidence: TransactionEvidence; item: IngestionItem }> {
+    return getActiveStore().createTransactionFromIngestionItem(userId, itemId, txData);
+  },
+
   // Reset database for tests
   reset(initialState?: MemoryDatabaseState) {
     if (isProductionEnvironment()) {

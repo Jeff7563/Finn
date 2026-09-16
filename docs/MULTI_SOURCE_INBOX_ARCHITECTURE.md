@@ -708,11 +708,13 @@ This migration will be **created but NOT applied** during this implementation. I
 Contents:
 1. Create `source_connections` table with RLS
 2. Create `source_documents` table with RLS
-3. Create `ingestion_items` table with RLS
-4. Create `transaction_evidence` table with RLS and integrity constraints
-5. Create `reconciliation_runs` table with RLS (append-only)
-6. Cross-user ownership validation trigger
-7. Updated_at triggers for new tables
+3. Create `import_batches` table with RLS
+4. Create `ingestion_items` table with RLS
+5. Create `transaction_evidence` table with RLS and integrity constraints
+6. Create `reconciliation_runs` table with RLS (append-only)
+7. Cross-user ownership validation triggers (SECURITY DEFINER SET search_path)
+8. Atomic `create_transaction_from_ingestion_item` RPC function
+9. Updated_at triggers for new tables
 
 ---
 
@@ -753,3 +755,4 @@ getTransactionEvidence(transactionId) → TransactionEvidence[]
 4. **Automated sync scheduling** — requires background job infrastructure
 5. **Storage privacy hardening** — next audit milestone after Phase 3
 6. **Multi-currency reconciliation** — exchange rate handling at reconciliation time
+7. **Binary Image Recompression / Transcoding Pipeline** — active binary compression and downsampling is deferred architecture; retention policy strictly enforces dimension bounds, no upscaling, and original cryptographic SHA-256 preservation.

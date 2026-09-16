@@ -81,47 +81,97 @@ export async function createTransactionFromItemAction(
       return { success: false, error: "Ingestion item not found" };
     }
 
+    if (item.status === "linked") {
+      return { success: false, error: "Ingestion item is already linked to a transaction" };
+    }
+
     const parsed = item.parsed_data;
-    const amountSatang = parsed?.amount || 0;
-    const amountThb = parsed?.amount_decimal || amountSatang / 100;
-    const txType: TransactionType =
-      (parsed?.transaction_type as TransactionType) ||
-      (parsed?.direction === "incoming" ? "income" : "expense");
+    if (!parsed) {
+      return { success: false, error: "Ingestion item has no parsed financial data" };
+    }
+
+    // 1. Validate amount strictly: must be > 0 (FAIL CLOSED)
+    const amountSatang = parsed.amount;
+    const amountThb =
+      parsed.amount_decimal !== undefined && parsed.amount_decimal !== null
+        ? parsed.amount_decimal
+        : amountSatang !== undefined && amountSatang !== null
+        ? amountSatang / 100
+        : null;
+
+    if (amountThb === null || isNaN(amountThb) || amountThb <= 0) {
+      return {
+        success: false,
+        error: "Missing or invalid amount: transaction amount must be greater than zero",
+      };
+    }
+
+    // 2. Validate occurred_at strictly: must be present and valid timestamp (FAIL CLOSED)
+    if (!parsed.occurred_at) {
+      return {
+        success: false,
+        error: "Missing transaction date: cannot create transaction without a valid date/time",
+      };
+    }
+    const dateTimestamp = new Date(parsed.occurred_at).getTime();
+    if (isNaN(dateTimestamp)) {
+      return {
+        success: false,
+        error: `Invalid transaction date timestamp: "${parsed.occurred_at}"`,
+      };
+    }
+
+    // 3. Validate direction / type strictly (FAIL CLOSED)
+    const txType: TransactionType | undefined =
+      (parsed.transaction_type as TransactionType) ||
+      (parsed.direction === "incoming" ? "income" : parsed.direction === "outgoing" ? "expense" : undefined);
+
+    if (!txType) {
+      return {
+        success: false,
+        error: "Missing transaction direction or type (cannot determine income vs expense)",
+      };
+    }
+
+    // 4. Validate account pointer strictly (FAIL CLOSED)
+    if (!overrides.accountId) {
+      return {
+        success: false,
+        error: "Account selection is required to create a transaction",
+      };
+    }
+
+    const account = await DataStore.getAccountById(user.id, overrides.accountId);
+    if (!account) {
+      return {
+        success: false,
+        error: "Selected account not found or does not belong to user",
+      };
+    }
 
     const txData = {
       type: txType,
       amount: amountThb,
-      currency: parsed?.currency || "THB",
-      transaction_date: parsed?.occurred_at || new Date().toISOString(),
-      description: overrides.description || parsed?.description || parsed?.merchant_name || "Imported transaction",
-      note: overrides.note || parsed?.note || null,
+      currency: parsed.currency || "THB",
+      transaction_date: parsed.occurred_at,
+      description: overrides.description || parsed.description || parsed.merchant_name || "Imported transaction",
+      note: overrides.note || parsed.note || null,
       from_account_id: txType === "expense" ? overrides.accountId : null,
       to_account_id: txType === "income" ? overrides.accountId : null,
       category_id: overrides.categoryId || null,
       source: "import" as const,
-      reference_number: parsed?.reference_number || null,
+      reference_number: parsed.reference_number || null,
       confidence: 1.0,
       review_status: "confirmed" as const,
+      tax_deductible: false,
     };
 
-    const newTx = await DataStore.createTransaction(user.id, txData);
-
-    // Create evidence bridge
-    const evidence = await DataStore.createTransactionEvidence(user.id, {
-      transaction_id: newTx.id,
-      ingestion_item_id: item.id,
-      evidence_type: item.item_type === "email_notification" ? "email_notification" : "statement_row",
-    });
-
-    // Update item status
-    await DataStore.updateIngestionItem(user.id, item.id, {
-      status: "linked",
-      matched_transaction_id: newTx.id,
-    });
+    // ATOMIC operation: creates transaction, creates evidence, updates item to linked
+    const result = await DataStore.createTransactionFromIngestionItem(user.id, item.id, txData);
 
     revalidatePath("/inbox");
     revalidatePath("/transactions");
-    return { success: true, transaction: newTx, evidence };
+    return { success: true, transaction: result.transaction, evidence: result.evidence };
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : "Failed to create transaction from item";
     return { success: false, error: message };
@@ -147,7 +197,7 @@ export async function dismissIngestionItemAction(itemId: string): Promise<{ succ
 }
 
 /**
- * Rejects an ingestion item with an error reason.
+ * Rejects an ingestion item with an error reason, preserving raw data.
  */
 export async function rejectIngestionItemAction(
   itemId: string,
@@ -156,10 +206,25 @@ export async function rejectIngestionItemAction(
   const user = await requireUser();
 
   try {
+    const item = await DataStore.getIngestionItemById(user.id, itemId);
+    if (!item) {
+      return { success: false, error: "Ingestion item not found" };
+    }
+
+    const rejectionReason = reason || "User rejected item";
+    const existingParsed = item.parsed_data || {
+      amount: null,
+    };
+
+    // Preserve raw_data completely! Store rejection reason in parsed_data.rejection_reason
     await DataStore.updateIngestionItem(user.id, itemId, {
       status: "error",
-      raw_data: { rejectionReason: reason || "User rejected item" },
+      parsed_data: {
+        ...existingParsed,
+        rejection_reason: rejectionReason,
+      },
     });
+
     revalidatePath("/inbox");
     return { success: true };
   } catch (err: unknown) {

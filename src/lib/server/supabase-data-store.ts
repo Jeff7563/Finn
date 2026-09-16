@@ -2232,6 +2232,29 @@ export class SupabaseDataStoreImpl implements IDataStore {
     return created;
   }
 
+  async createTransactionFromIngestionItem(
+    userId: string,
+    itemId: string,
+    txData: Omit<Transaction, "id" | "created_at" | "updated_at" | "user_id">
+  ): Promise<{ transaction: Transaction; evidence: TransactionEvidence; item: IngestionItem }> {
+    const supabase = await this.getClient();
+    const { data, error } = await supabase.rpc("create_transaction_from_ingestion_item", {
+      p_user_id: userId,
+      p_item_id: itemId,
+      p_tx_data: txData,
+    });
+    if (error) {
+      throw new Error(`Failed to create transaction from ingestion item: ${error.message}`);
+    }
+    const tx = mapTransaction(data.transaction);
+    const evidence: TransactionEvidence = data.evidence;
+    const item = await this.getIngestionItemById(userId, itemId);
+    if (!item) {
+      throw new Error("Updated ingestion item not found");
+    }
+    return { transaction: tx, evidence, item };
+  }
+
   reset(): void {
     // SupabaseDataStore does not allow arbitrary database resets
     throw new Error("DataStore.reset() is not supported on SupabaseDataStore.");

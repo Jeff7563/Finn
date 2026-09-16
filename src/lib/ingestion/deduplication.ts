@@ -134,6 +134,8 @@ export function classifyIngestionMatch(context: ClassifyMatchContext): MatchResu
     }
   }
 
+  const possibleCandidates: MatchCandidate[] = [];
+
   // ==========================================================================
   // Signal C: Scoped Transaction Reference Number
   // Scope required: institution / account / direction / reference
@@ -141,7 +143,7 @@ export function classifyIngestionMatch(context: ClassifyMatchContext): MatchResu
   // ==========================================================================
   if (item.reference_number && item.reference_number.trim().length > 0) {
     const targetRef = item.reference_number.trim().toLowerCase();
-    const itemBank = (item.parsed_data?.bank_code ?? "").toLowerCase();
+    const itemBank = (item.parsed_data?.bank_code ?? "").toLowerCase().trim();
     const itemDirection = item.parsed_data?.direction;
     const itemAccountLast4 = (item.parsed_data?.account_number ?? "").replace(/\D/g, "").slice(-4);
 
@@ -157,39 +159,91 @@ export function classifyIngestionMatch(context: ClassifyMatchContext): MatchResu
         const txInstitutions = [
           fromAcc?.institution?.toLowerCase(),
           toAcc?.institution?.toLowerCase(),
-        ].filter(Boolean);
+        ].filter(Boolean) as string[];
 
         const txAccountMasks = [
           fromAcc?.masked_number,
           toAcc?.masked_number,
-        ].filter(Boolean);
+        ].filter(Boolean) as string[];
 
-        const institutionMatches =
-          !itemBank || txInstitutions.some((inst) => inst && (inst.includes(itemBank) || itemBank.includes(inst)));
+        // Strict verification: Institution MUST be verified (both item and tx institution known and matching)
+        const hasVerifiedInstitution =
+          itemBank.length > 0 &&
+          txInstitutions.length > 0 &&
+          txInstitutions.some((inst) => inst.includes(itemBank) || itemBank.includes(inst));
 
         const accountMatches =
-          !itemAccountLast4 || txAccountMasks.some((mask) => mask && mask.includes(itemAccountLast4));
+          !itemAccountLast4 ||
+          txAccountMasks.some((mask) => mask && mask.includes(itemAccountLast4));
 
         let txDirection: "incoming" | "outgoing" | null = null;
-        if (tx.type === "income" || tx.type === "refund" || tx.type === "gift") {
+        if (
+          tx.type === "income" ||
+          tx.type === "refund" ||
+          tx.type === "gift" ||
+          tx.type === "reimbursement" ||
+          tx.type === "loan_received"
+        ) {
           txDirection = "incoming";
-        } else if (tx.type === "expense" || tx.type === "investment" || tx.type === "loan_payment") {
+        } else if (
+          tx.type === "expense" ||
+          tx.type === "investment" ||
+          tx.type === "loan_payment"
+        ) {
           txDirection = "outgoing";
         }
 
-        const directionMatches = !itemDirection || !txDirection || itemDirection === txDirection;
+        // Strict verification: Direction MUST be verified (both item and tx direction known and identical)
+        const hasVerifiedDirection =
+          itemDirection !== undefined &&
+          itemDirection !== null &&
+          txDirection !== null &&
+          itemDirection === txDirection;
 
-        // ONLY when institution AND direction are verified as matching does it qualify as strong match
-        if (institutionMatches && directionMatches && (accountMatches || itemBank.length > 0)) {
+        // ONLY when BOTH verified institution AND verified direction are present and matching does it qualify as strong_match!
+        if (hasVerifiedInstitution && hasVerifiedDirection && accountMatches) {
           return {
             matchClass: "strong_match",
             confidence: 0.98,
             matchedTransactionId: tx.id,
             reasons: [
-              `Strong match: Scoped reference "${item.reference_number}" matched transaction ${tx.id} with verified scope (institution: ${itemBank || "matched"}, direction: ${itemDirection ?? "matched"})`,
+              `Strong match: Scoped reference "${item.reference_number}" matched transaction ${tx.id} with verified scope (institution: ${itemBank}, direction: ${itemDirection})`,
             ],
           };
         }
+
+        // Reference number matched, but missing verified bank, verified direction, or account match:
+        // MUST produce possible_match (not strong_match) to require manual operator review!
+        const missingReasons: string[] = [];
+        if (!hasVerifiedInstitution) {
+          missingReasons.push(
+            itemBank.length === 0
+              ? "missing verified bank institution code on ingestion item"
+              : `unverified institution: "${itemBank}" did not match transaction account institution(s) [${txInstitutions.join(", ")}]`
+          );
+        }
+        if (!hasVerifiedDirection) {
+          missingReasons.push(
+            !itemDirection
+              ? "missing verified direction on ingestion item"
+              : !txDirection
+              ? "undetermined direction on transaction"
+              : `direction mismatch (item: ${itemDirection}, tx: ${txDirection})`
+          );
+        }
+        if (!accountMatches) {
+          missingReasons.push(
+            `account last 4 "${itemAccountLast4}" did not match transaction account masks [${txAccountMasks.join(", ")}]`
+          );
+        }
+
+        possibleCandidates.push({
+          transaction_id: tx.id,
+          confidence: 0.75, // Strictly capped < 0.85
+          reasons: [
+            `Reference number "${item.reference_number}" matches transaction ${tx.id}, but requires human review due to unverified scope (${missingReasons.join("; ")})`,
+          ],
+        });
       }
     }
   }
@@ -214,7 +268,6 @@ export function classifyIngestionMatch(context: ClassifyMatchContext): MatchResu
     : null;
 
   const itemFingerprint = item.fingerprint || generateCandidateFingerprint(item.parsed_data);
-  const possibleCandidates: MatchCandidate[] = [];
 
   for (const tx of existingTransactions) {
     if (tx.user_id !== item.user_id) continue;
@@ -280,11 +333,17 @@ export function classifyIngestionMatch(context: ClassifyMatchContext): MatchResu
     if (score >= 0.5) {
       // Hard cap at 0.85: Weak signals NEVER exceed 0.85 confidence and NEVER auto-link!
       const cappedConfidence = Math.min(Number(score.toFixed(2)), 0.85);
-      possibleCandidates.push({
-        transaction_id: tx.id,
-        confidence: cappedConfidence,
-        reasons,
-      });
+      const existingCandidate = possibleCandidates.find((c) => c.transaction_id === tx.id);
+      if (existingCandidate) {
+        existingCandidate.confidence = Math.max(existingCandidate.confidence, cappedConfidence);
+        existingCandidate.reasons.push(...reasons);
+      } else {
+        possibleCandidates.push({
+          transaction_id: tx.id,
+          confidence: cappedConfidence,
+          reasons,
+        });
+      }
     }
   }
 

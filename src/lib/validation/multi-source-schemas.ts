@@ -19,6 +19,9 @@ export const documentTypeSchema = z.enum([
   "email",
   "csv_statement",
   "pdf_statement",
+  "statement_image",
+  "manual_upload",
+  "provider_document",
   "api_response",
 ]);
 
@@ -137,6 +140,8 @@ export const ingestionParsedDataSchema = z.object({
   counterparty_name: z.string().trim().max(255).optional().nullable(),
   counterparty_account: z.string().trim().max(50).optional().nullable(),
   note: z.string().trim().max(1000).optional().nullable(),
+  parse_error: z.string().optional().nullable(),
+  rejection_reason: z.string().optional().nullable(),
   raw_metadata: z.record(z.unknown()).optional().nullable(),
 });
 

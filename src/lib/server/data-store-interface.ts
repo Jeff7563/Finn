@@ -164,6 +164,13 @@ export interface IDataStore {
   getReconciliationRuns(userId: string, accountId?: string): Promise<ReconciliationRun[]>;
   createReconciliationRun(userId: string, data: Partial<ReconciliationRun>): Promise<ReconciliationRun>;
 
+  // Atomic Create Transaction from Ingestion Item
+  createTransactionFromIngestionItem(
+    userId: string,
+    itemId: string,
+    txData: Omit<Transaction, "id" | "created_at" | "updated_at" | "user_id">
+  ): Promise<{ transaction: Transaction; evidence: TransactionEvidence; item: IngestionItem }>;
+
   // Test reset helper
   reset(initialState?: unknown): void;
 }

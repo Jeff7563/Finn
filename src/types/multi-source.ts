@@ -26,6 +26,9 @@ export type DocumentType =
   | "email"
   | "csv_statement"
   | "pdf_statement"
+  | "statement_image"
+  | "manual_upload"
+  | "provider_document"
   | "api_response";
 export type DocumentStatus = "received" | "processing" | "processed" | "failed";
 
@@ -113,6 +116,8 @@ export interface IngestionParsedData {
   counterparty_name?: string | null;
   counterparty_account?: string | null;
   note?: string | null;
+  parse_error?: string | null;
+  rejection_reason?: string | null;
   raw_metadata?: Record<string, unknown> | null;
 }
 

@@ -1,5 +1,19 @@
 import { SourceDocument, IngestionItem } from "@/types/multi-source";
 
+/**
+ * ARCHITECTURAL NOTICE — STORAGE RETENTION & IMAGE OPTIMIZATION:
+ *
+ * Active binary image transcoding, resizing, and compression (e.g., sharp/canvas pipelines)
+ * are DEFERRED ARCHITECTURE for future phases.
+ *
+ * Current Phase 3 implementation provides:
+ * 1. Storage retention rules, age calculations, and non-destructive binary pruning.
+ * 2. Dimension constraints and policy specification (no upscaling, max dimension ratios).
+ * 3. Contractual SHA-256 cryptographic hash preservation.
+ *
+ * Binary resizing is NOT executed in-flight at this stage.
+ */
+
 export interface StorageCleanupOptions {
   retentionDays?: number; // default 90 days
   failedRetentionDays?: number; // default 7 days for failed/duplicate files

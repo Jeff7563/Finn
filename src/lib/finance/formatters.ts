@@ -361,36 +361,59 @@ export function bangkokDateTimeLocalToCanonicalInstant(
     return isNaN(d.getTime()) ? null : d.toISOString();
   }
 
-  // 2. Parse wall-clock YYYY-MM-DDTHH:mm[:ss] without timezone and explicitly bind to Asia/Bangkok (+07:00)
-  const match = trimmed.match(
-    /^(\d{4})[-/](\d{1,2})[-/](\d{1,2})(?:[T\s]+(\d{1,2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?)?$/
-  );
+  // 2. Parse wall-clock YYYY-MM-DDTHH:mm[:ss] or DD/MM/YYYY without timezone and explicitly bind to Asia/Bangkok (+07:00)
+  const patternYearFirst =
+    /^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})(?:[T\s]+(\d{1,2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?)?$/;
+  const patternDayFirst =
+    /^(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})(?:[T\s]+(\d{1,2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?)?$/;
 
-  if (match) {
-    let year = parseInt(match[1], 10);
-    const month = parseInt(match[2], 10);
-    const day = parseInt(match[3], 10);
-    const hour = match[4] !== undefined ? parseInt(match[4], 10) : 12;
-    const min = match[5] !== undefined ? parseInt(match[5], 10) : 0;
-    const sec = match[6] !== undefined ? parseInt(match[6], 10) : 0;
+  let year: number;
+  let month: number;
+  let day: number;
+  let hour = 12;
+  let min = 0;
+  let sec = 0;
 
-    // Buddhist Era normalization (e.g. 2569 -> 2026)
-    if (year >= 2400 && year <= 2700) {
-      year -= 543;
-    }
+  const matchYearFirst = trimmed.match(patternYearFirst);
+  const matchDayFirst = trimmed.match(patternDayFirst);
 
-    if (
-      month >= 1 &&
-      month <= 12 &&
-      day >= 1 &&
-      day <= 31 &&
-      hour >= 0 &&
-      hour <= 23 &&
-      min >= 0 &&
-      min <= 59 &&
-      sec >= 0 &&
-      sec <= 59
-    ) {
+  if (matchYearFirst) {
+    year = parseInt(matchYearFirst[1], 10);
+    month = parseInt(matchYearFirst[2], 10);
+    day = parseInt(matchYearFirst[3], 10);
+    if (matchYearFirst[4] !== undefined) hour = parseInt(matchYearFirst[4], 10);
+    if (matchYearFirst[5] !== undefined) min = parseInt(matchYearFirst[5], 10);
+    if (matchYearFirst[6] !== undefined) sec = parseInt(matchYearFirst[6], 10);
+  } else if (matchDayFirst) {
+    day = parseInt(matchDayFirst[1], 10);
+    month = parseInt(matchDayFirst[2], 10);
+    year = parseInt(matchDayFirst[3], 10);
+    if (matchDayFirst[4] !== undefined) hour = parseInt(matchDayFirst[4], 10);
+    if (matchDayFirst[5] !== undefined) min = parseInt(matchDayFirst[5], 10);
+    if (matchDayFirst[6] !== undefined) sec = parseInt(matchDayFirst[6], 10);
+  } else {
+    return null;
+  }
+
+  // Buddhist Era normalization (e.g. 2569 -> 2026)
+  if (year >= 2400 && year <= 2700) {
+    year -= 543;
+  }
+
+  if (
+    month >= 1 &&
+    month <= 12 &&
+    day >= 1 &&
+    day <= 31 &&
+    hour >= 0 &&
+    hour <= 23 &&
+    min >= 0 &&
+    min <= 59 &&
+    sec >= 0 &&
+    sec <= 59
+  ) {
+    const daysInMonth = new Date(Date.UTC(year, month, 0)).getUTCDate();
+    if (day <= daysInMonth) {
       const pad = (n: number) => n.toString().padStart(2, "0");
       const isoBangkok = `${year}-${pad(month)}-${pad(day)}T${pad(hour)}:${pad(min)}:${pad(sec)}+07:00`;
       const dateObj = new Date(isoBangkok);
@@ -400,9 +423,7 @@ export function bangkokDateTimeLocalToCanonicalInstant(
     }
   }
 
-  // 3. Fallback: Native Date parse
-  const d = new Date(trimmed);
-  return isNaN(d.getTime()) ? null : d.toISOString();
+  return null;
 }
 
 export type StrictBaselineResult =

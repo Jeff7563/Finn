@@ -16,6 +16,7 @@ import {
   TransactionInput,
 } from "../validation/schemas";
 import crypto from "crypto";
+import { roundToTwoDecimals } from "../finance/formatters";
 
 import {
   IngestToken,
@@ -1510,6 +1511,16 @@ export const MemoryDataStore: IDataStore = {
     data: Partial<SourceDocument>
   ): Promise<SourceDocument> {
     const dbState = getDbState();
+
+    if (data.connection_id) {
+      const conn = dbState.source_connections.find((c) => c.id === data.connection_id);
+      if (!conn || conn.user_id !== userId) {
+        throw new Error(
+          `Cross-user integrity violation: connection ${data.connection_id} does not belong to user ${userId}`
+        );
+      }
+    }
+
     const newDoc: SourceDocument = {
       id: data.id || crypto.randomUUID(),
       user_id: userId,
@@ -1548,6 +1559,25 @@ export const MemoryDataStore: IDataStore = {
     data: Partial<ImportBatch>
   ): Promise<ImportBatch> {
     const dbState = getDbState();
+
+    if (data.connection_id) {
+      const conn = dbState.source_connections.find((c) => c.id === data.connection_id);
+      if (!conn || conn.user_id !== userId) {
+        throw new Error(
+          `Cross-user integrity violation: connection ${data.connection_id} does not belong to user ${userId}`
+        );
+      }
+    }
+
+    if (data.source_document_id) {
+      const doc = dbState.source_documents.find((d) => d.id === data.source_document_id);
+      if (!doc || doc.user_id !== userId) {
+        throw new Error(
+          `Cross-user integrity violation: source document ${data.source_document_id} does not belong to user ${userId}`
+        );
+      }
+    }
+
     const newBatch: ImportBatch = {
       id: data.id || crypto.randomUUID(),
       user_id: userId,
@@ -1618,11 +1648,48 @@ export const MemoryDataStore: IDataStore = {
     const created: IngestionItem[] = [];
 
     for (const item of items) {
+      if (item.source_document_id) {
+        const doc = dbState.source_documents.find((d) => d.id === item.source_document_id);
+        if (!doc || doc.user_id !== userId) {
+          throw new Error(
+            `Cross-user integrity violation: source document ${item.source_document_id} does not belong to user ${userId}`
+          );
+        }
+      }
+
+      if (item.connection_id) {
+        const conn = dbState.source_connections.find((c) => c.id === item.connection_id);
+        if (!conn || conn.user_id !== userId) {
+          throw new Error(
+            `Cross-user integrity violation: connection ${item.connection_id} does not belong to user ${userId}`
+          );
+        }
+      }
+
+      if (item.batch_id) {
+        const batch = dbState.import_batches.find((b) => b.id === item.batch_id);
+        if (!batch || batch.user_id !== userId) {
+          throw new Error(
+            `Cross-user integrity violation: batch ${item.batch_id} does not belong to user ${userId}`
+          );
+        }
+      }
+
+      if (item.matched_transaction_id) {
+        const tx = dbState.transactions.find((t) => t.id === item.matched_transaction_id);
+        if (!tx || tx.user_id !== userId) {
+          throw new Error(
+            `Cross-user integrity violation: matched transaction ${item.matched_transaction_id} does not belong to user ${userId}`
+          );
+        }
+      }
+
       const newItem: IngestionItem = {
         id: item.id || crypto.randomUUID(),
         user_id: userId,
         source_document_id: item.source_document_id || "unknown-doc",
         connection_id: item.connection_id || null,
+        batch_id: item.batch_id || null,
         item_type: item.item_type || "statement_row",
         status: item.status || "pending",
         raw_data: item.raw_data || null,
@@ -1783,6 +1850,22 @@ export const MemoryDataStore: IDataStore = {
       throw new Error("Missing required reconciliation run parameters");
     }
 
+    const acc = dbState.accounts.find((a) => a.id === data.account_id);
+    if (!acc || acc.user_id !== userId) {
+      throw new Error(
+        `Cross-user integrity violation: account ${data.account_id} does not belong to user ${userId}`
+      );
+    }
+
+    if (data.source_document_id) {
+      const doc = dbState.source_documents.find((d) => d.id === data.source_document_id);
+      if (!doc || doc.user_id !== userId) {
+        throw new Error(
+          `Cross-user integrity violation: source document ${data.source_document_id} does not belong to user ${userId}`
+        );
+      }
+    }
+
     const run: ReconciliationRun = {
       id: data.id || crypto.randomUUID(),
       user_id: userId,
@@ -1800,6 +1883,129 @@ export const MemoryDataStore: IDataStore = {
 
     dbState.reconciliation_runs.push(run);
     return run;
+  },
+
+  // ============================================================================
+  // Atomic Create Transaction From Ingestion Item (Decision 1 & Operator Audit 3)
+  // Ensures all three operations succeed atomically or rolls back completely:
+  // 1. Transaction creation
+  // 2. Transaction Evidence creation
+  // 3. Ingestion Item status update to 'linked'
+  // ============================================================================
+  async createTransactionFromIngestionItem(
+    userId: string,
+    itemId: string,
+    txData: Omit<Transaction, "id" | "created_at" | "updated_at" | "user_id">
+  ): Promise<{ transaction: Transaction; evidence: TransactionEvidence; item: IngestionItem }> {
+    const dbState = getDbState();
+    const snapshotState = JSON.stringify(dbState);
+
+    try {
+      const item = dbState.ingestion_items.find((i) => i.id === itemId && i.user_id === userId);
+      if (!item) {
+        throw new Error(`Ingestion item ${itemId} not found for user ${userId}`);
+      }
+
+      if (item.status === "linked") {
+        throw new Error(
+          `Ingestion item ${itemId} is already linked to transaction ${item.matched_transaction_id}`
+        );
+      }
+
+      // Financial validation: amount must be strictly greater than zero
+      if (!txData.amount || txData.amount <= 0) {
+        throw new Error("Invalid transaction amount: must be greater than zero");
+      }
+
+      if (!txData.transaction_date || isNaN(new Date(txData.transaction_date).getTime())) {
+        throw new Error("Invalid transaction date: must be a valid timestamp");
+      }
+
+      // Direction account validation & ownership
+      if (txData.type === "expense") {
+        if (!txData.from_account_id) {
+          throw new Error("from_account_id is required for expense transaction");
+        }
+        const acc = dbState.accounts.find(
+          (a) => a.id === txData.from_account_id && a.user_id === userId
+        );
+        if (!acc) {
+          throw new Error(`Account ${txData.from_account_id} not found for user ${userId}`);
+        }
+      } else if (txData.type === "income") {
+        if (!txData.to_account_id) {
+          throw new Error("to_account_id is required for income transaction");
+        }
+        const acc = dbState.accounts.find(
+          (a) => a.id === txData.to_account_id && a.user_id === userId
+        );
+        if (!acc) {
+          throw new Error(`Account ${txData.to_account_id} not found for user ${userId}`);
+        }
+      } else if (txData.type === "transfer") {
+        if (!txData.from_account_id || !txData.to_account_id) {
+          throw new Error("both from_account_id and to_account_id are required for transfer");
+        }
+        const fromAcc = dbState.accounts.find(
+          (a) => a.id === txData.from_account_id && a.user_id === userId
+        );
+        const toAcc = dbState.accounts.find(
+          (a) => a.id === txData.to_account_id && a.user_id === userId
+        );
+        if (!fromAcc || !toAcc) {
+          throw new Error(`Transfer accounts must exist and belong to user ${userId}`);
+        }
+      }
+
+      // Create transaction
+      const newTx: Transaction = {
+        id: crypto.randomUUID(),
+        user_id: userId,
+        type: txData.type,
+        amount: roundToTwoDecimals(txData.amount),
+        currency: txData.currency || "THB",
+        transaction_date: txData.transaction_date,
+        description: txData.description,
+        note: txData.note || null,
+        from_account_id: txData.from_account_id || null,
+        to_account_id: txData.to_account_id || null,
+        category_id: txData.category_id || null,
+        source: "import",
+        reference_number: txData.reference_number || item.reference_number || null,
+        confidence: 1.0,
+        review_status: "confirmed",
+        tax_deductible: txData.tax_deductible ?? false,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      };
+      dbState.transactions.push(newTx);
+
+      // Create evidence
+      const evidenceType =
+        item.item_type === "email_notification" ? "email_notification" : "statement_row";
+      const evidence: TransactionEvidence = {
+        id: crypto.randomUUID(),
+        user_id: userId,
+        transaction_id: newTx.id,
+        slip_id: null,
+        ingestion_item_id: item.id,
+        evidence_type: evidenceType,
+        created_at: new Date().toISOString(),
+      };
+      dbState.transaction_evidence.push(evidence);
+
+      // Update item
+      item.status = "linked";
+      item.matched_transaction_id = newTx.id;
+      item.updated_at = new Date().toISOString();
+
+      return { transaction: newTx, evidence, item };
+    } catch (err) {
+      // Rollback database state to exact snapshot on ANY error
+      const restored = JSON.parse(snapshotState);
+      Object.assign(dbState, restored);
+      throw err;
+    }
   },
 
   // Reset database for tests

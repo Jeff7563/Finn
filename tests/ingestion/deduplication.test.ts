@@ -280,9 +280,38 @@ describe("Decision 2: Deduplication — Separate Strong Match from Suggestion", 
       expect(result.matchClass).not.toBe("strong_match");
     });
 
-    it("does NOT strong match when reference number matches but direction is OPPOSITE", () => {
-      const itemOppositeDirection: IngestionItem = {
-        id: "item-incoming",
+    it("does NOT strong match when reference matches but item has MISSING bank code", () => {
+      const itemMissingBank: IngestionItem = {
+        id: "item-no-bank",
+        user_id: userId,
+        source_document_id: "doc-1",
+        item_type: "statement_row",
+        status: "pending",
+        reference_number: "2026091012345678",
+        parsed_data: {
+          amount: 150000,
+          bank_code: null, // Missing bank!
+          direction: "outgoing",
+          reference_number: "2026091012345678",
+        },
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      };
+
+      const result = classifyIngestionMatch({
+        item: itemMissingBank,
+        existingTransactions: [existingTx],
+        accountMap: sampleAccountMap,
+      });
+
+      expect(result.matchClass).toBe("possible_match");
+      expect(result.matchedTransactionId).toBeNull();
+      expect(result.confidence).toBeLessThanOrEqual(0.85);
+    });
+
+    it("does NOT strong match when reference matches but item has MISSING direction", () => {
+      const itemMissingDirection: IngestionItem = {
+        id: "item-no-direction",
         user_id: userId,
         source_document_id: "doc-1",
         item_type: "statement_row",
@@ -291,7 +320,7 @@ describe("Decision 2: Deduplication — Separate Strong Match from Suggestion", 
         parsed_data: {
           amount: 150000,
           bank_code: "KBANK",
-          direction: "incoming", // Opposite of expense!
+          direction: null, // Missing direction!
           reference_number: "2026091012345678",
         },
         created_at: new Date().toISOString(),
@@ -299,12 +328,14 @@ describe("Decision 2: Deduplication — Separate Strong Match from Suggestion", 
       };
 
       const result = classifyIngestionMatch({
-        item: itemOppositeDirection,
+        item: itemMissingDirection,
         existingTransactions: [existingTx],
         accountMap: sampleAccountMap,
       });
 
-      expect(result.matchClass).not.toBe("strong_match");
+      expect(result.matchClass).toBe("possible_match");
+      expect(result.matchedTransactionId).toBeNull();
+      expect(result.confidence).toBeLessThanOrEqual(0.85);
     });
   });
 

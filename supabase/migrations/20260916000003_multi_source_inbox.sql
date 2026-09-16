@@ -62,7 +62,7 @@ CREATE TABLE IF NOT EXISTS public.source_documents (
     id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id             UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
     connection_id       UUID NULL REFERENCES public.source_connections(id) ON DELETE SET NULL,
-    document_type       TEXT NOT NULL CHECK (document_type IN ('email', 'csv_statement', 'pdf_statement', 'api_response')),
+    document_type       TEXT NOT NULL CHECK (document_type IN ('email', 'csv_statement', 'pdf_statement', 'statement_image', 'manual_upload', 'provider_document', 'api_response')),
     storage_path        TEXT NULL,
     original_filename   TEXT NULL,
     file_hash           TEXT NULL, -- SHA-256 (survives optimization)
@@ -241,8 +241,115 @@ CREATE POLICY "transaction_evidence_delete_own"
     ON public.transaction_evidence FOR DELETE
     USING (auth.uid() = user_id);
 
--- Cross-User Ownership Validation Trigger (Decision 1)
--- Enforces that transaction_id, slip_id, and ingestion_item_id belong to the SAME user_id
+-- ============================================================================
+-- Cross-User Ownership Validation Triggers (Decision 1 & Operator Audit 6)
+-- Enforces that all referenced entities belong to NEW.user_id across tables.
+-- ============================================================================
+
+-- 1. source_documents: connection_id must belong to NEW.user_id
+CREATE OR REPLACE FUNCTION public.validate_source_document_ownership()
+RETURNS TRIGGER AS $$
+DECLARE
+    v_conn_user_id UUID;
+BEGIN
+    IF NEW.connection_id IS NOT NULL THEN
+        SELECT user_id INTO v_conn_user_id FROM public.source_connections WHERE id = NEW.connection_id;
+        IF v_conn_user_id IS NULL OR v_conn_user_id <> NEW.user_id THEN
+            RAISE EXCEPTION 'Cross-user integrity violation: source_connection % does not belong to user %',
+                NEW.connection_id, NEW.user_id;
+        END IF;
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public;
+
+DROP TRIGGER IF EXISTS trg_validate_source_document_ownership ON public.source_documents;
+CREATE TRIGGER trg_validate_source_document_ownership
+    BEFORE INSERT OR UPDATE ON public.source_documents
+    FOR EACH ROW
+    EXECUTE FUNCTION public.validate_source_document_ownership();
+
+-- 2. import_batches: connection_id & source_document_id must belong to NEW.user_id
+CREATE OR REPLACE FUNCTION public.validate_import_batch_ownership()
+RETURNS TRIGGER AS $$
+DECLARE
+    v_conn_user_id UUID;
+    v_doc_user_id UUID;
+BEGIN
+    IF NEW.connection_id IS NOT NULL THEN
+        SELECT user_id INTO v_conn_user_id FROM public.source_connections WHERE id = NEW.connection_id;
+        IF v_conn_user_id IS NULL OR v_conn_user_id <> NEW.user_id THEN
+            RAISE EXCEPTION 'Cross-user integrity violation: source_connection % does not belong to user %',
+                NEW.connection_id, NEW.user_id;
+        END IF;
+    END IF;
+    IF NEW.source_document_id IS NOT NULL THEN
+        SELECT user_id INTO v_doc_user_id FROM public.source_documents WHERE id = NEW.source_document_id;
+        IF v_doc_user_id IS NULL OR v_doc_user_id <> NEW.user_id THEN
+            RAISE EXCEPTION 'Cross-user integrity violation: source_document % does not belong to user %',
+                NEW.source_document_id, NEW.user_id;
+        END IF;
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public;
+
+DROP TRIGGER IF EXISTS trg_validate_import_batch_ownership ON public.import_batches;
+CREATE TRIGGER trg_validate_import_batch_ownership
+    BEFORE INSERT OR UPDATE ON public.import_batches
+    FOR EACH ROW
+    EXECUTE FUNCTION public.validate_import_batch_ownership();
+
+-- 3. ingestion_items: source_document_id, connection_id, batch_id, matched_transaction_id must belong to NEW.user_id
+CREATE OR REPLACE FUNCTION public.validate_ingestion_item_ownership()
+RETURNS TRIGGER AS $$
+DECLARE
+    v_doc_user_id UUID;
+    v_conn_user_id UUID;
+    v_batch_user_id UUID;
+    v_tx_user_id UUID;
+BEGIN
+    SELECT user_id INTO v_doc_user_id FROM public.source_documents WHERE id = NEW.source_document_id;
+    IF v_doc_user_id IS NULL OR v_doc_user_id <> NEW.user_id THEN
+        RAISE EXCEPTION 'Cross-user integrity violation: source_document % does not belong to user %',
+            NEW.source_document_id, NEW.user_id;
+    END IF;
+
+    IF NEW.connection_id IS NOT NULL THEN
+        SELECT user_id INTO v_conn_user_id FROM public.source_connections WHERE id = NEW.connection_id;
+        IF v_conn_user_id IS NULL OR v_conn_user_id <> NEW.user_id THEN
+            RAISE EXCEPTION 'Cross-user integrity violation: source_connection % does not belong to user %',
+                NEW.connection_id, NEW.user_id;
+        END IF;
+    END IF;
+
+    IF NEW.batch_id IS NOT NULL THEN
+        SELECT user_id INTO v_batch_user_id FROM public.import_batches WHERE id = NEW.batch_id;
+        IF v_batch_user_id IS NULL OR v_batch_user_id <> NEW.user_id THEN
+            RAISE EXCEPTION 'Cross-user integrity violation: import_batch % does not belong to user %',
+                NEW.batch_id, NEW.user_id;
+        END IF;
+    END IF;
+
+    IF NEW.matched_transaction_id IS NOT NULL THEN
+        SELECT user_id INTO v_tx_user_id FROM public.transactions WHERE id = NEW.matched_transaction_id;
+        IF v_tx_user_id IS NULL OR v_tx_user_id <> NEW.user_id THEN
+            RAISE EXCEPTION 'Cross-user integrity violation: transaction % does not belong to user %',
+                NEW.matched_transaction_id, NEW.user_id;
+        END IF;
+    END IF;
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public;
+
+DROP TRIGGER IF EXISTS trg_validate_ingestion_item_ownership ON public.ingestion_items;
+CREATE TRIGGER trg_validate_ingestion_item_ownership
+    BEFORE INSERT OR UPDATE ON public.ingestion_items
+    FOR EACH ROW
+    EXECUTE FUNCTION public.validate_ingestion_item_ownership();
+
+-- 4. transaction_evidence: transaction_id, slip_id, ingestion_item_id must belong to NEW.user_id
 CREATE OR REPLACE FUNCTION public.validate_transaction_evidence_ownership()
 RETURNS TRIGGER AS $$
 DECLARE
@@ -250,14 +357,12 @@ DECLARE
     v_slip_user_id UUID;
     v_item_user_id UUID;
 BEGIN
-    -- Validate transaction user_id
     SELECT user_id INTO v_tx_user_id FROM public.transactions WHERE id = NEW.transaction_id;
     IF v_tx_user_id IS NULL OR v_tx_user_id <> NEW.user_id THEN
         RAISE EXCEPTION 'Cross-user integrity violation: transaction % does not belong to user %',
             NEW.transaction_id, NEW.user_id;
     END IF;
 
-    -- Validate slip user_id if present
     IF NEW.slip_id IS NOT NULL THEN
         SELECT user_id INTO v_slip_user_id FROM public.slips WHERE id = NEW.slip_id;
         IF v_slip_user_id IS NULL OR v_slip_user_id <> NEW.user_id THEN
@@ -266,7 +371,6 @@ BEGIN
         END IF;
     END IF;
 
-    -- Validate ingestion_item user_id if present
     IF NEW.ingestion_item_id IS NOT NULL THEN
         SELECT user_id INTO v_item_user_id FROM public.ingestion_items WHERE id = NEW.ingestion_item_id;
         IF v_item_user_id IS NULL OR v_item_user_id <> NEW.user_id THEN
@@ -277,7 +381,7 @@ BEGIN
 
     RETURN NEW;
 END;
-$$ LANGUAGE plpgsql SECURITY DEFINER;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public;
 
 DROP TRIGGER IF EXISTS trg_validate_transaction_evidence_ownership ON public.transaction_evidence;
 CREATE TRIGGER trg_validate_transaction_evidence_ownership
@@ -321,6 +425,183 @@ CREATE POLICY "reconciliation_runs_insert_own"
 
 -- Explicitly disallow updates on reconciliation runs to protect audit integrity
 REVOKE UPDATE ON public.reconciliation_runs FROM authenticated, anon;
+
+-- 5. reconciliation_runs: account_id & source_document_id must belong to NEW.user_id
+CREATE OR REPLACE FUNCTION public.validate_reconciliation_run_ownership()
+RETURNS TRIGGER AS $$
+DECLARE
+    v_account_user_id UUID;
+    v_doc_user_id UUID;
+BEGIN
+    SELECT user_id INTO v_account_user_id FROM public.accounts WHERE id = NEW.account_id;
+    IF v_account_user_id IS NULL OR v_account_user_id <> NEW.user_id THEN
+        RAISE EXCEPTION 'Cross-user integrity violation: account % does not belong to user %',
+            NEW.account_id, NEW.user_id;
+    END IF;
+
+    IF NEW.source_document_id IS NOT NULL THEN
+        SELECT user_id INTO v_doc_user_id FROM public.source_documents WHERE id = NEW.source_document_id;
+        IF v_doc_user_id IS NULL OR v_doc_user_id <> NEW.user_id THEN
+            RAISE EXCEPTION 'Cross-user integrity violation: source_document % does not belong to user %',
+                NEW.source_document_id, NEW.user_id;
+        END IF;
+    END IF;
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public;
+
+DROP TRIGGER IF EXISTS trg_validate_reconciliation_run_ownership ON public.reconciliation_runs;
+CREATE TRIGGER trg_validate_reconciliation_run_ownership
+    BEFORE INSERT OR UPDATE ON public.reconciliation_runs
+    FOR EACH ROW
+    EXECUTE FUNCTION public.validate_reconciliation_run_ownership();
+
+-- ============================================================================
+-- Atomic Ingestion Item -> Transaction Bridge RPC (Operator Audit 3)
+-- ============================================================================
+CREATE OR REPLACE FUNCTION public.create_transaction_from_ingestion_item(
+    p_user_id UUID,
+    p_item_id UUID,
+    p_tx_data JSONB
+)
+RETURNS JSONB AS $$
+DECLARE
+    v_item RECORD;
+    v_tx RECORD;
+    v_evidence RECORD;
+    v_evidence_type TEXT;
+    v_amount NUMERIC;
+    v_type TEXT;
+    v_date TIMESTAMPTZ;
+    v_currency TEXT;
+    v_desc TEXT;
+    v_note TEXT;
+    v_from_account UUID;
+    v_to_account UUID;
+    v_cat_id UUID;
+    v_ref TEXT;
+BEGIN
+    IF auth.uid() IS NOT NULL AND auth.uid() <> p_user_id THEN
+        RAISE EXCEPTION 'Unauthorized: caller does not match user_id';
+    END IF;
+
+    -- Row-lock ingestion item
+    SELECT * INTO v_item
+    FROM public.ingestion_items
+    WHERE id = p_item_id AND user_id = p_user_id
+    FOR UPDATE;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Ingestion item % not found for user %', p_item_id, p_user_id;
+    END IF;
+
+    IF v_item.status = 'linked' THEN
+        RAISE EXCEPTION 'Ingestion item % is already linked to transaction %', p_item_id, v_item.matched_transaction_id;
+    END IF;
+
+    -- Financial validation
+    v_amount := (p_tx_data->>'amount')::NUMERIC;
+    IF v_amount IS NULL OR v_amount <= 0 THEN
+        RAISE EXCEPTION 'Invalid amount: must be greater than zero';
+    END IF;
+
+    v_type := p_tx_data->>'type';
+    IF v_type NOT IN ('income', 'expense', 'transfer', 'refund', 'reimbursement', 'gift', 'loan_payment', 'loan_received', 'investment') THEN
+        RAISE EXCEPTION 'Invalid transaction type: %', v_type;
+    END IF;
+
+    v_currency := COALESCE(p_tx_data->>'currency', 'THB');
+    v_date := (p_tx_data->>'transaction_date')::TIMESTAMPTZ;
+    IF v_date IS NULL THEN
+        RAISE EXCEPTION 'Invalid transaction_date: must be a valid timestamp';
+    END IF;
+
+    v_desc := COALESCE(p_tx_data->>'description', 'Imported transaction');
+    v_note := p_tx_data->>'note';
+    v_from_account := (p_tx_data->>'from_account_id')::UUID;
+    v_to_account := (p_tx_data->>'to_account_id')::UUID;
+    v_cat_id := (p_tx_data->>'category_id')::UUID;
+    v_ref := COALESCE(p_tx_data->>'reference_number', v_item.reference_number);
+
+    IF v_type = 'expense' AND v_from_account IS NULL THEN
+        RAISE EXCEPTION 'from_account_id is required for expense transaction';
+    END IF;
+    IF v_type = 'income' AND v_to_account IS NULL THEN
+        RAISE EXCEPTION 'to_account_id is required for income transaction';
+    END IF;
+    IF v_type = 'transfer' AND (v_from_account IS NULL OR v_to_account IS NULL) THEN
+        RAISE EXCEPTION 'both from_account_id and to_account_id are required for transfer';
+    END IF;
+
+    -- Atomically insert Transaction
+    INSERT INTO public.transactions (
+        user_id,
+        type,
+        amount,
+        currency,
+        transaction_date,
+        description,
+        note,
+        from_account_id,
+        to_account_id,
+        category_id,
+        source,
+        reference_number,
+        confidence,
+        review_status
+    ) VALUES (
+        p_user_id,
+        v_type,
+        v_amount,
+        v_currency,
+        v_date,
+        v_desc,
+        v_note,
+        v_from_account,
+        v_to_account,
+        v_cat_id,
+        'import',
+        v_ref,
+        1.0,
+        'confirmed'
+    ) RETURNING * INTO v_tx;
+
+    -- Determine evidence type
+    IF v_item.item_type = 'email_notification' THEN
+        v_evidence_type := 'email_notification';
+    ELSIF v_item.item_type = 'statement_row' THEN
+        v_evidence_type := 'statement_row';
+    ELSE
+        v_evidence_type := 'api_import';
+    END IF;
+
+    -- Atomically insert Evidence
+    INSERT INTO public.transaction_evidence (
+        user_id,
+        transaction_id,
+        ingestion_item_id,
+        evidence_type
+    ) VALUES (
+        p_user_id,
+        v_tx.id,
+        v_item.id,
+        v_evidence_type
+    ) RETURNING * INTO v_evidence;
+
+    -- Atomically update Ingestion Item
+    UPDATE public.ingestion_items
+    SET status = 'linked',
+        matched_transaction_id = v_tx.id,
+        updated_at = now()
+    WHERE id = v_item.id;
+
+    RETURN jsonb_build_object(
+        'transaction', to_jsonb(v_tx),
+        'evidence', to_jsonb(v_evidence)
+    );
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public;
 
 -- ============================================================================
 -- Helper updated_at Triggers

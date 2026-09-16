@@ -159,11 +159,102 @@ export function calculateAccountBalanceAt(
   transactions: Transaction[],
   targetInstant: string | Date
 ): BalanceAtResult {
-  if (!account.balance_as_of) {
+  const targetDate =
+    typeof targetInstant === "string" ? new Date(targetInstant) : targetInstant;
+  const targetTime = targetDate.getTime();
+  if (isNaN(targetTime)) {
     return {
       balance: null,
       status: "cannot_calculate_safely",
-      reason: "Account has no authoritative balance_as_of baseline",
+      reason: "Target instant is invalid",
+    };
+  }
+
+  // Fail closed: If any transaction associated with this account has missing or unparseable date,
+  // we cannot safely compute point-in-time balance.
+  for (const tx of transactions) {
+    const isFromAccount = tx.from_account_id === account.id;
+    const isToAccount = tx.to_account_id === account.id;
+    if (!isFromAccount && !isToAccount) {
+      continue;
+    }
+
+    if (!tx.transaction_date) {
+      return {
+        balance: null,
+        status: "cannot_calculate_safely",
+        reason: `Transaction ${tx.id} has missing transaction_date`,
+      };
+    }
+
+    const txTime = new Date(tx.transaction_date).getTime();
+    if (isNaN(txTime)) {
+      return {
+        balance: null,
+        status: "cannot_calculate_safely",
+        reason: `Transaction ${tx.id} has unparseable transaction_date: "${tx.transaction_date}"`,
+      };
+    }
+  }
+
+  // Legacy accounts without balance_as_of: preserve legacy calculation (opening_balance + sum up to target)
+  if (!account.balance_as_of) {
+    let balance = Number(account.opening_balance) || 0;
+    let txCount = 0;
+
+    for (const tx of transactions) {
+      const isFromAccount = tx.from_account_id === account.id;
+      const isToAccount = tx.to_account_id === account.id;
+      if (!isFromAccount && !isToAccount) {
+        continue;
+      }
+
+      const txTime = new Date(tx.transaction_date).getTime();
+      if (txTime <= targetTime) {
+        txCount++;
+        const amount = Number(tx.amount) || 0;
+
+        if (tx.type === "transfer") {
+          if (isFromAccount && isToAccount) {
+            continue;
+          }
+          if (isFromAccount) {
+            balance -= amount;
+          } else if (isToAccount) {
+            balance += amount;
+          }
+        } else if (
+          tx.type === "income" ||
+          tx.type === "refund" ||
+          tx.type === "reimbursement" ||
+          tx.type === "gift" ||
+          tx.type === "loan_received"
+        ) {
+          if (isToAccount) {
+            balance += amount;
+          }
+        } else if (
+          tx.type === "expense" ||
+          tx.type === "loan_payment" ||
+          tx.type === "investment"
+        ) {
+          if (isFromAccount) {
+            balance -= amount;
+          }
+        } else if (tx.type === "adjustment") {
+          if (isToAccount) {
+            balance += amount;
+          } else if (isFromAccount) {
+            balance -= amount;
+          }
+        }
+      }
+    }
+
+    return {
+      balance: roundToTwoDecimals(balance),
+      status: "success",
+      transaction_count: txCount,
     };
   }
 
@@ -173,17 +264,6 @@ export function calculateAccountBalanceAt(
       balance: null,
       status: "cannot_calculate_safely",
       reason: "Account baseline timestamp is invalid",
-    };
-  }
-
-  const targetDate =
-    typeof targetInstant === "string" ? new Date(targetInstant) : targetInstant;
-  const targetTime = targetDate.getTime();
-  if (isNaN(targetTime)) {
-    return {
-      balance: null,
-      status: "cannot_calculate_safely",
-      reason: "Target instant is invalid",
     };
   }
 
@@ -217,15 +297,7 @@ export function calculateAccountBalanceAt(
       continue;
     }
 
-    if (!tx.transaction_date) {
-      continue;
-    }
-
     const txTime = new Date(tx.transaction_date).getTime();
-    if (isNaN(txTime)) {
-      continue;
-    }
-
     // Interval: (balance_as_of, target]
     // Strictly after baseline, on or before target
     if (txTime > baselineTime && txTime <= targetTime) {

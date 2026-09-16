@@ -4,6 +4,7 @@ import {
   IngestionParsedData,
   SourceDocument,
 } from "@/types/multi-source";
+import { bangkokDateTimeLocalToCanonicalInstant } from "@/lib/finance/formatters";
 
 export interface ParsedStatementResult {
   fileHash: string;
@@ -161,40 +162,73 @@ export function parseBankStatementCsv(
       }
     }
 
-    if (finalSatang === null || finalSatang === 0) {
-      continue; // Skip balance headers or non-transaction rows
+    // Compose Bangkok wall-clock timestamp
+    let rawCombined = rawDateStr.trim();
+    if (rawTimeStr.trim()) {
+      rawCombined = `${rawCombined} ${rawTimeStr.trim()}`;
     }
+    const occurredAtIso = rawCombined
+      ? bangkokDateTimeLocalToCanonicalInstant(rawCombined)
+      : null;
 
-    // Compose timestamp
-    let occurredAtIso: string | null = null;
-    if (rawDateStr) {
-      const combined = rawTimeStr ? `${rawDateStr} ${rawTimeStr}` : rawDateStr;
-      const parsedD = new Date(combined);
-      if (!isNaN(parsedD.getTime())) {
-        occurredAtIso = parsedD.toISOString();
-      } else {
-        // Try DD/MM/YYYY
-        const parts = rawDateStr.split(/[/.-]/);
-        if (parts.length === 3) {
-          const day = parts[0].padStart(2, "0");
-          const month = parts[1].padStart(2, "0");
-          let year = parts[2];
-          if (parseInt(year) > 2500) {
-            year = String(parseInt(year) - 543); // Buddhist era
-          }
-          const timePart = rawTimeStr ? (rawTimeStr.length === 5 ? `${rawTimeStr}:00` : rawTimeStr) : "12:00:00";
-          const isoCandidate = `${year}-${month}-${day}T${timePart}.000Z`;
-          const d2 = new Date(isoCandidate);
-          if (!isNaN(d2.getTime())) {
-            occurredAtIso = d2.toISOString();
-          }
-        }
+    const hasValidAmount = finalSatang !== null && finalSatang > 0;
+    const hasValidDate = occurredAtIso !== null;
+
+    // Malformed rows must NOT disappear: queue for manual Inbox review
+    if (!hasValidAmount || !hasValidDate) {
+      const parseErrors: string[] = [];
+      if (!hasValidAmount) {
+        parseErrors.push("Missing or invalid non-zero transaction amount");
       }
+      if (!hasValidDate) {
+        parseErrors.push(
+          rawCombined
+            ? `Unparseable Bangkok date/time format: "${rawCombined}"`
+            : "Missing transaction date"
+        );
+      }
+      const parseError = parseErrors.join("; ");
+
+      const parsedData: IngestionParsedData = {
+        amount: finalSatang ?? 0,
+        amount_decimal: finalSatang !== null ? Number((finalSatang / 100).toFixed(2)) : 0,
+        currency: "THB",
+        description: description || null,
+        occurred_at: occurredAtIso,
+        account_number: accountStr,
+        bank_code: bankHint !== "GENERIC" ? bankHint : null,
+        transaction_type: txType,
+        direction,
+        reference_number: ref || null,
+        parse_error: parseError,
+        raw_metadata: { rowNumber: i + 1, rawRow: row },
+      };
+
+      const rawSeed = `${finalSatang || 0}|${rawCombined || "no_date"}|${accountStr || "no_acc"}|${direction}|row-${i + 1}`;
+      const fingerprint = computeSha256(rawSeed).slice(0, 32);
+
+      items.push({
+        user_id: userId,
+        source_document_id: sourceDocumentId,
+        connection_id: connectionId,
+        item_type: "statement_row",
+        status: "pending",
+        raw_data: { line: lines[i], rowNumber: i + 1, rawRow: row },
+        parsed_data: parsedData,
+        fingerprint,
+        provider_external_id: null,
+        reference_number: ref || null,
+        match_class: "no_match",
+        matched_transaction_id: null,
+        confidence_score: 0,
+      });
+      continue;
     }
 
+    const validSatang = finalSatang as number;
     const parsedData: IngestionParsedData = {
-      amount: finalSatang,
-      amount_decimal: Number((finalSatang / 100).toFixed(2)),
+      amount: validSatang,
+      amount_decimal: Number((validSatang / 100).toFixed(2)),
       currency: "THB",
       description: description || null,
       occurred_at: occurredAtIso,
@@ -214,7 +248,7 @@ export function parseBankStatementCsv(
       connection_id: connectionId,
       item_type: "statement_row",
       status: "pending",
-      raw_data: { line: lines[i], rowNumber: i + 1 },
+      raw_data: { line: lines[i], rowNumber: i + 1, rawRow: row },
       parsed_data: parsedData,
       fingerprint,
       provider_external_id: null,

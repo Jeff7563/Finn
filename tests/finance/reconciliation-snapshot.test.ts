@@ -164,21 +164,57 @@ describe("Decision 4: Reconciliation Runs Are Audit Snapshots", () => {
       expect(res.reason).toContain("earlier than authoritative baseline");
     });
 
-    it("account without balance_as_of -> cannot_calculate_safely (insufficient data)", () => {
+    it("legacy account without balance_as_of -> preserves legacy calculation (opening_balance + sum up to target)", () => {
       const legacyAccount: Account = {
         ...baselineAccount,
+        opening_balance: 10000.0,
         balance_as_of: null, // Legacy account without baseline
       };
 
+      // On or before 2026-09-10T00:00:00.000Z:
+      // opening (10000) + tx-at-baseline (5000) + tx-1 (2500.50) = 17,500.50 THB
       const res = calculateAccountBalanceAt(
         legacyAccount,
         sampleTransactions,
         "2026-09-10T00:00:00.000Z"
       );
 
+      expect(res.status).toBe("success");
+      expect(res.balance).toBe(17500.5);
+      expect(res.transaction_count).toBe(2);
+    });
+
+    it("fails closed with cannot_calculate_safely when any transaction linked to account has invalid date", () => {
+      const corruptTxs: Transaction[] = [
+        ...sampleTransactions,
+        {
+          id: "tx-corrupt-date",
+          user_id: userId,
+          type: "expense",
+          amount: 100,
+          currency: "THB",
+          transaction_date: "invalid-garbage-date",
+          from_account_id: baselineAccount.id,
+          to_account_id: null,
+          category_id: null,
+          source: "manual",
+          confidence: 1.0,
+          review_status: "confirmed",
+          tax_deductible: false,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        },
+      ];
+
+      const res = calculateAccountBalanceAt(
+        baselineAccount,
+        corruptTxs,
+        "2026-09-12T00:00:00.000Z"
+      );
+
       expect(res.status).toBe("cannot_calculate_safely");
       expect(res.balance).toBeNull();
-      expect(res.reason).toContain("no authoritative balance_as_of baseline");
+      expect(res.reason).toContain("unparseable transaction_date");
     });
   });
 
