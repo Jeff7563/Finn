@@ -2182,22 +2182,6 @@ export class SupabaseDataStoreImpl implements IDataStore {
     return updated;
   }
 
-  async deleteIngestionItemsByDocumentId(
-    userId: string,
-    sourceDocumentId: string
-  ): Promise<number> {
-    const supabase = await this.getClient();
-    const { data, error } = await supabase
-      .from("ingestion_items")
-      .delete()
-      .eq("user_id", userId)
-      .eq("source_document_id", sourceDocumentId)
-      .neq("status", "linked")
-      .select("id");
-    if (error) throw new Error(`Failed to delete ingestion items for document: ${error.message}`);
-    return data?.length || 0;
-  }
-
   // ============================================================================
   // Transaction Evidence Bridge
   // ============================================================================

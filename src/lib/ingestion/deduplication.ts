@@ -16,9 +16,10 @@ export function computeSha256(content: string | Buffer): string {
 }
 
 /**
- * Generates a deterministic RFC 4122 v5 UUID for a source document based on:
+ * Generates a deterministic RFC 4122-compliant UUID (UUID-shaped deterministic hash) for a source document based on:
  * userId + documentType + fileHash.
  *
+ * Formatted as an 8-4-4-4-12 UUID hex string with version 5 and RFC 4122 variant bits set.
  * Ensures concurrent requests for the exact same file produce the exact same primary key ID,
  * allowing database unique constraints to safely reject race conditions without schema migration.
  */

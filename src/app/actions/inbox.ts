@@ -738,7 +738,9 @@ export async function importStatementCsvAction(
       defaultMaskedNumber: account.masked_number || null,
     });
 
-    // 16. RESUMABLE RECOVERY & ITEM CREATION
+    // 16. AUDIT-SAFE RECONCILIATION & ITEM CREATION (ZERO DELETE OPERATIONS)
+    // Production DB enforces REVOKE DELETE ON public.ingestion_items.
+    // Retries must never call delete and must never duplicate rows.
     const existingItemsForDoc = await DataStore.getIngestionItems(user.id, {
       sourceDocumentId: sourceDoc.id,
     });
@@ -747,31 +749,103 @@ export async function importStatementCsvAction(
     let errorCount = 0;
     let duplicateCount = 0;
 
-    if (
-      existingItemsForDoc.length > 0 &&
-      existingItemsForDoc.length === parseResult.items.length
-    ) {
-      // All items were already inserted in a previous attempt before failure!
-      // Safely reuse/finalize them without inserting duplicate rows
-      for (const item of existingItemsForDoc) {
-        if (item.batch_id !== batch.id) {
-          await DataStore.updateIngestionItem(user.id, item.id, { batch_id: batch.id });
-        }
-        if (item.parsed_data?.parse_error) {
-          errorCount++;
-        } else {
-          successCount++;
-        }
-        if (item.match_class === "exact_duplicate") {
-          duplicateCount++;
-        }
+    // Index current parse rows by their stable rowNumber
+    const parsedByRowNumber = new Map<number, (typeof parseResult.items)[0]>();
+    for (const item of parseResult.items) {
+      const rawMeta = (item.raw_data as Record<string, unknown>) || {};
+      const parsedMeta = (item.parsed_data?.raw_metadata as Record<string, unknown>) || {};
+      const rowNum = Number(rawMeta.rowNumber ?? parsedMeta.rowNumber);
+      if (!isNaN(rowNum)) {
+        parsedByRowNumber.set(rowNum, item);
       }
-    } else {
-      // If partial unlinked items exist from a prior failed run, clean them up first
-      if (existingItemsForDoc.length > 0) {
-        await DataStore.deleteIngestionItemsByDocumentId(user.id, sourceDoc.id);
+    }
+
+    // Map each existing row to its rowNumber and validate stable evidence
+    const matchedRowNumbers = new Set<number>();
+
+    for (const existingItem of existingItemsForDoc) {
+      const rawMeta = (existingItem.raw_data as Record<string, unknown>) || {};
+      const parsedMeta = (existingItem.parsed_data?.raw_metadata as Record<string, unknown>) || {};
+      const rawRowNumber = rawMeta.rowNumber ?? parsedMeta.rowNumber;
+      const rowNum = Number(rawRowNumber);
+
+      if (
+        rawRowNumber === undefined ||
+        rawRowNumber === null ||
+        isNaN(rowNum) ||
+        !parsedByRowNumber.has(rowNum)
+      ) {
+        throw new Error(
+          "Existing ingestion items conflict with parsed file content and cannot be safely reconciled. Operator review required."
+        );
       }
 
+      if (matchedRowNumbers.has(rowNum)) {
+        // Multiple existing rows claim the exact same row number in database
+        throw new Error(
+          `Conflicting existing ingestion items detected: duplicate rowNumber ${rowNum} for source document. Operator review required.`
+        );
+      }
+
+      const parsedTarget = parsedByRowNumber.get(rowNum)!;
+      const targetRawMeta = (parsedTarget.raw_data as Record<string, unknown>) || {};
+
+      // Verify stable evidence: raw line, fingerprint, amount, direction, timestamp
+      if (rawMeta.line && targetRawMeta.line) {
+        if (rawMeta.line !== targetRawMeta.line) {
+          throw new Error(
+            `Conflicting existing ingestion item at row ${rowNum}: raw line does not match current file parse. Operator review required.`
+          );
+        }
+      } else if (existingItem.fingerprint && parsedTarget.fingerprint) {
+        if (existingItem.fingerprint !== parsedTarget.fingerprint) {
+          throw new Error(
+            `Conflicting existing ingestion item at row ${rowNum}: fingerprint mismatch. Operator review required.`
+          );
+        }
+      }
+
+      if (
+        existingItem.parsed_data &&
+        parsedTarget.parsed_data &&
+        (existingItem.parsed_data.amount !== parsedTarget.parsed_data.amount ||
+          existingItem.parsed_data.direction !== parsedTarget.parsed_data.direction ||
+          existingItem.parsed_data.occurred_at !== parsedTarget.parsed_data.occurred_at)
+      ) {
+        throw new Error(
+          `Conflicting existing ingestion item at row ${rowNum}: parsed financial values differ from file. Operator review required.`
+        );
+      }
+
+      // Safe match confirmed!
+      matchedRowNumbers.add(rowNum);
+
+      // Never overwrite status if already linked to a transaction or evidenced
+      if (existingItem.batch_id !== batch.id) {
+        await DataStore.updateIngestionItem(user.id, existingItem.id, {
+          batch_id: batch.id,
+        });
+      }
+
+      if (existingItem.parsed_data?.parse_error) {
+        errorCount++;
+      } else {
+        successCount++;
+      }
+      if (existingItem.match_class === "exact_duplicate") {
+        duplicateCount++;
+      }
+    }
+
+    // Identify genuinely missing rows that must be inserted
+    const missingItems = parseResult.items.filter((item) => {
+      const rawMeta = (item.raw_data as Record<string, unknown>) || {};
+      const parsedMeta = (item.parsed_data?.raw_metadata as Record<string, unknown>) || {};
+      const rowNum = Number(rawMeta.rowNumber ?? parsedMeta.rowNumber);
+      return !matchedRowNumbers.has(rowNum);
+    });
+
+    if (missingItems.length > 0) {
       // Load context for deduplication classification
       const [existingDocs, existingItems, existingTxs, allAccounts] = await Promise.all([
         DataStore.getSourceDocuments(user.id),
@@ -784,9 +858,9 @@ export async function importStatementCsvAction(
         allAccounts.map((a) => [a.id, { institution: a.institution, masked_number: a.masked_number }])
       );
 
-      const classifiedItems: Array<Partial<IngestionItem>> = [];
+      const classifiedMissingItems: Array<Partial<IngestionItem>> = [];
 
-      for (const item of parseResult.items) {
+      for (const item of missingItems) {
         const hasParseError = Boolean(item.parsed_data?.parse_error);
         if (hasParseError) {
           errorCount++;
@@ -811,7 +885,7 @@ export async function importStatementCsvAction(
         // DO NOT auto-create transactions.
         // DO NOT auto-link transaction evidence during import.
         // Even strong_match is surfaced in Inbox for explicit user action.
-        classifiedItems.push({
+        classifiedMissingItems.push({
           ...item,
           source_document_id: sourceDoc.id,
           batch_id: batch.id,
@@ -829,8 +903,8 @@ export async function importStatementCsvAction(
         });
       }
 
-      if (classifiedItems.length > 0) {
-        await DataStore.createIngestionItems(user.id, classifiedItems);
+      if (classifiedMissingItems.length > 0) {
+        await DataStore.createIngestionItems(user.id, classifiedMissingItems);
       }
     }
 

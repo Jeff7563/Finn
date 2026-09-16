@@ -746,6 +746,330 @@ bad-date,Malformed Row,300.00`;
       const items = await DataStore.getIngestionItems(userAlice);
       expect(items).toHaveLength(1);
     });
+
+    // 1.5 Partial 1 of 3 rows exists -> retry results in exactly 3 rows with zero delete operations
+    it("1.5 partial 1 of 3 rows exists: retry reconciles and results in exactly 3 rows without calling DELETE", async () => {
+      const csv = `Date,Description,Amount\n2026-09-10,Item 1,100.00\n2026-09-11,Item 2,200.00\n2026-09-12,Item 3,300.00`;
+      const fileBytes = Buffer.from(csv, "utf8");
+      const fileHash = computeSha256(fileBytes);
+
+      const doc = await DataStore.createSourceDocument(userAlice, {
+        document_type: "csv_statement",
+        original_filename: "reconcile3.csv",
+        file_hash: fileHash,
+        status: "failed",
+      });
+
+      const batch = await DataStore.createImportBatch(userAlice, {
+        source_document_id: doc.id,
+        batch_type: "csv_statement",
+        status: "failed",
+      });
+
+      const parsed = csvParser.parseBankStatementCsv(csv, {
+        userId: userAlice,
+        sourceDocumentId: doc.id,
+        filename: "reconcile3.csv",
+        fileHash,
+        fileSize: fileBytes.length,
+      });
+
+      // Seed only row 1
+      await DataStore.createIngestionItems(userAlice, [
+        {
+          ...parsed.items[0],
+          source_document_id: doc.id,
+          batch_id: batch.id,
+          status: "pending",
+          raw_data: {
+            ...(parsed.items[0].raw_data || {}),
+            statementAccountId: aliceAccount.id,
+          },
+        },
+      ]);
+
+      const initialCount = (await DataStore.getIngestionItems(userAlice)).length;
+      expect(initialCount).toBe(1);
+
+      // Retry upload of the full 3-row file
+      const file = createSyntheticFile(csv, "reconcile3.csv");
+      const formData = new FormData();
+      formData.append("file", file);
+      formData.append("accountId", aliceAccount.id);
+
+      const result = await importStatementCsvAction(formData);
+      expect(result.error).toBeUndefined();
+      expect(result.success).toBe(true);
+      expect(result.status).toBe("success");
+      expect(result.totalItems).toBe(3);
+
+      const finalItems = await DataStore.getIngestionItems(userAlice);
+      expect(finalItems).toHaveLength(3);
+
+      // Row 1 matches original and was preserved
+      const item1 = finalItems.find((i) => i.parsed_data?.description === "Item 1");
+      const item2 = finalItems.find((i) => i.parsed_data?.description === "Item 2");
+      const item3 = finalItems.find((i) => i.parsed_data?.description === "Item 3");
+
+      expect(item1).toBeDefined();
+      expect(item2).toBeDefined();
+      expect(item3).toBeDefined();
+    });
+
+    // 1.6 Partial 2 of 3 rows exists -> retry results in exactly 3 rows
+    it("1.6 partial 2 of 3 rows exists: retry results in exactly 3 rows", async () => {
+      const csv = `Date,Description,Amount\n2026-09-10,Row A,10.00\n2026-09-11,Row B,20.00\n2026-09-12,Row C,30.00`;
+      const fileBytes = Buffer.from(csv, "utf8");
+      const fileHash = computeSha256(fileBytes);
+
+      const doc = await DataStore.createSourceDocument(userAlice, {
+        document_type: "csv_statement",
+        original_filename: "partial2.csv",
+        file_hash: fileHash,
+        status: "failed",
+      });
+
+      const batch = await DataStore.createImportBatch(userAlice, {
+        source_document_id: doc.id,
+        batch_type: "csv_statement",
+        status: "failed",
+      });
+
+      const parsed = csvParser.parseBankStatementCsv(csv, {
+        userId: userAlice,
+        sourceDocumentId: doc.id,
+        filename: "partial2.csv",
+        fileHash,
+        fileSize: fileBytes.length,
+      });
+
+      // Seed rows 1 and 2
+      await DataStore.createIngestionItems(userAlice, [
+        {
+          ...parsed.items[0],
+          source_document_id: doc.id,
+          batch_id: batch.id,
+          status: "pending",
+          raw_data: {
+            ...(parsed.items[0].raw_data || {}),
+            statementAccountId: aliceAccount.id,
+          },
+        },
+        {
+          ...parsed.items[1],
+          source_document_id: doc.id,
+          batch_id: batch.id,
+          status: "pending",
+          raw_data: {
+            ...(parsed.items[1].raw_data || {}),
+            statementAccountId: aliceAccount.id,
+          },
+        },
+      ]);
+
+      const file = createSyntheticFile(csv, "partial2.csv");
+      const formData = new FormData();
+      formData.append("file", file);
+      formData.append("accountId", aliceAccount.id);
+
+      const result = await importStatementCsvAction(formData);
+      expect(result.success).toBe(true);
+      expect(result.totalItems).toBe(3);
+
+      const finalItems = await DataStore.getIngestionItems(userAlice);
+      expect(finalItems).toHaveLength(3);
+    });
+
+    // 1.7 All 3 exist after finalization failure -> reused, still 3 rows
+    it("1.7 all 3 exist after finalization failure: reused, still exactly 3 rows", async () => {
+      const csv = `Date,Description,Amount\n2026-09-10,Alpha,100.00\n2026-09-11,Beta,200.00\n2026-09-12,Gamma,300.00`;
+      const fileBytes = Buffer.from(csv, "utf8");
+      const fileHash = computeSha256(fileBytes);
+
+      const doc = await DataStore.createSourceDocument(userAlice, {
+        document_type: "csv_statement",
+        original_filename: "all3.csv",
+        file_hash: fileHash,
+        status: "failed",
+      });
+
+      const batch = await DataStore.createImportBatch(userAlice, {
+        source_document_id: doc.id,
+        batch_type: "csv_statement",
+        status: "failed",
+      });
+
+      const parsed = csvParser.parseBankStatementCsv(csv, {
+        userId: userAlice,
+        sourceDocumentId: doc.id,
+        filename: "all3.csv",
+        fileHash,
+        fileSize: fileBytes.length,
+      });
+
+      // Seed all 3
+      await DataStore.createIngestionItems(
+        userAlice,
+        parsed.items.map((it) => ({
+          ...it,
+          source_document_id: doc.id,
+          batch_id: batch.id,
+          status: "pending",
+          raw_data: {
+            ...(it.raw_data || {}),
+            statementAccountId: aliceAccount.id,
+          },
+        }))
+      );
+
+      const file = createSyntheticFile(csv, "all3.csv");
+      const formData = new FormData();
+      formData.append("file", file);
+      formData.append("accountId", aliceAccount.id);
+
+      const result = await importStatementCsvAction(formData);
+      expect(result.success).toBe(true);
+      expect(result.totalItems).toBe(3);
+
+      const finalItems = await DataStore.getIngestionItems(userAlice);
+      expect(finalItems).toHaveLength(3);
+    });
+
+    // 1.8 Conflicting existing partial row -> fail closed, no deletion
+    it("1.8 conflicting existing partial row: fail closed with clear error, zero deletion", async () => {
+      const csv = `Date,Description,Amount\n2026-09-10,Row 1,100.00\n2026-09-11,Row 2,200.00`;
+      const fileBytes = Buffer.from(csv, "utf8");
+      const fileHash = computeSha256(fileBytes);
+
+      const doc = await DataStore.createSourceDocument(userAlice, {
+        document_type: "csv_statement",
+        original_filename: "conflict.csv",
+        file_hash: fileHash,
+        status: "failed",
+      });
+
+      const batch = await DataStore.createImportBatch(userAlice, {
+        source_document_id: doc.id,
+        batch_type: "csv_statement",
+        status: "failed",
+      });
+
+      // Seed conflicting item for row 1 with completely different amount (9999 instead of 100)
+      await DataStore.createIngestionItems(userAlice, [
+        {
+          source_document_id: doc.id,
+          batch_id: batch.id,
+          item_type: "statement_row",
+          status: "pending",
+          raw_data: { line: "2026-09-10,Row 1,100.00", rowNumber: 1, statementAccountId: aliceAccount.id },
+          parsed_data: {
+            amount: 999999, // Conflicting amount!
+            amount_decimal: 9999.99,
+            currency: "THB",
+            description: "Row 1",
+            occurred_at: "2026-09-09T17:00:00.000Z",
+            direction: "outgoing",
+            raw_metadata: { rowNumber: 1 },
+          },
+        },
+      ]);
+
+      const file = createSyntheticFile(csv, "conflict.csv");
+      const formData = new FormData();
+      formData.append("file", file);
+      formData.append("accountId", aliceAccount.id);
+
+      const result = await importStatementCsvAction(formData);
+      expect(result.success).toBe(false);
+      expect(result.status).toBe("import_failure");
+      expect(result.error?.toLowerCase()).toContain("conflict");
+
+      // Check that existing row was NOT deleted (preserved for audit evidence)
+      const finalItems = await DataStore.getIngestionItems(userAlice);
+      expect(finalItems).toHaveLength(1);
+      expect(finalItems[0].parsed_data?.amount).toBe(999999);
+    });
+
+    // 1.9 Linked/evidenced item is never deleted or replaced
+    it("1.9 linked/evidenced item is never deleted or replaced during retry", async () => {
+      const csv = `Date,Description,Amount\n2026-09-10,Linked Row,500.00\n2026-09-11,Unlinked Row,600.00`;
+      const fileBytes = Buffer.from(csv, "utf8");
+      const fileHash = computeSha256(fileBytes);
+
+      const doc = await DataStore.createSourceDocument(userAlice, {
+        document_type: "csv_statement",
+        original_filename: "linked_safe.csv",
+        file_hash: fileHash,
+        status: "failed",
+      });
+
+      const batch = await DataStore.createImportBatch(userAlice, {
+        source_document_id: doc.id,
+        batch_type: "csv_statement",
+        status: "failed",
+      });
+
+      // Existing transaction
+      const tx = await DataStore.createTransaction(userAlice, {
+        type: "expense",
+        amount: 500,
+        currency: "THB",
+        transaction_date: "2026-09-10T00:00:00.000Z",
+        description: "Linked Row",
+        from_account_id: aliceAccount.id,
+        source: "manual",
+        confidence: 1,
+        review_status: "confirmed",
+      });
+
+      const parsed = csvParser.parseBankStatementCsv(csv, {
+        userId: userAlice,
+        sourceDocumentId: doc.id,
+        filename: "linked_safe.csv",
+        fileHash,
+        fileSize: fileBytes.length,
+      });
+
+      // Existing item for row 1 is already LINKED to tx
+      const seeded = await DataStore.createIngestionItems(userAlice, [
+        {
+          ...parsed.items[0],
+          source_document_id: doc.id,
+          batch_id: batch.id,
+          item_type: "statement_row",
+          status: "linked",
+          matched_transaction_id: tx.id,
+          raw_data: {
+            ...(parsed.items[0].raw_data || {}),
+            statementAccountId: aliceAccount.id,
+          },
+        },
+      ]);
+      const seededId = seeded[0].id;
+
+      const file = createSyntheticFile(csv, "linked_safe.csv");
+      const formData = new FormData();
+      formData.append("file", file);
+      formData.append("accountId", aliceAccount.id);
+
+      const result = await importStatementCsvAction(formData);
+      expect(result.success).toBe(true);
+      expect(result.totalItems).toBe(2);
+
+      const items = await DataStore.getIngestionItems(userAlice);
+      expect(items).toHaveLength(2);
+
+      const linkedItem = items.find((i) => i.id === seededId);
+      expect(linkedItem).toBeDefined();
+      expect(linkedItem?.status).toBe("linked"); // Status remains linked!
+      expect(linkedItem?.matched_transaction_id).toBe(tx.id); // Matched tx remains!
+    });
+
+    // 1.10 Static and runtime verification: zero DELETE permission dependency
+    it("1.10 security assertion: retry performs zero DELETE operations on ingestion_items", () => {
+      // Static assertion: deleteIngestionItemsByDocumentId has been removed from DataStore
+      expect((DataStore as unknown as Record<string, unknown>).deleteIngestionItemsByDocumentId).toBeUndefined();
+    });
   });
 
   describe("Section 2: Concurrency & Idempotency Hardening", () => {
@@ -967,6 +1291,66 @@ bad-date,Malformed Row,300.00`;
 
       expect(res.success).toBe(false);
       expect(res.error).toContain("inactive");
+    });
+
+    it("transfer override leaves counterpart account empty initially and blocks create until explicitly selected", async () => {
+      // 1. Outgoing row: statementAccount defaults as FROM, TO is empty
+      const csvOut = `Date,Description,Withdrawal\n2026-09-10,Outgoing Wire,700.00`;
+      const fileOut = createSyntheticFile(csvOut, "out_transfer.csv");
+      const formOut = new FormData();
+      formOut.append("file", fileOut);
+      formOut.append("accountId", aliceAccount.id);
+
+      await importStatementCsvAction(formOut);
+      const items = await DataStore.getIngestionItems(userAlice);
+      const outItem = items.find((i) => i.parsed_data?.description === "Outgoing Wire")!;
+
+      // Calling create with type: "transfer" without toAccountId fails closed
+      const failOut = await createTransactionFromItemAction(outItem.id, {
+        type: "transfer",
+        // toAccountId not provided
+      });
+      expect(failOut.success).toBe(false);
+      expect(failOut.error).toContain("Both fromAccountId and toAccountId are required");
+
+      // Once counterpart is explicitly selected, succeeds!
+      const succOut = await createTransactionFromItemAction(outItem.id, {
+        type: "transfer",
+        toAccountId: aliceSavingsAccount.id,
+      });
+      expect(succOut.success).toBe(true);
+      expect(succOut.transaction?.from_account_id).toBe(aliceAccount.id);
+      expect(succOut.transaction?.to_account_id).toBe(aliceSavingsAccount.id);
+      expect(outItem.parsed_data?.direction).toBe("outgoing");
+
+      // 2. Incoming row: statementAccount defaults as TO, FROM is empty
+      const csvIn = `Date,Description,Deposit\n2026-09-11,Incoming Wire,900.00`;
+      const fileIn = createSyntheticFile(csvIn, "in_transfer.csv");
+      const formIn = new FormData();
+      formIn.append("file", fileIn);
+      formIn.append("accountId", aliceAccount.id);
+
+      await importStatementCsvAction(formIn);
+      const items2 = await DataStore.getIngestionItems(userAlice);
+      const inItem = items2.find((i) => i.parsed_data?.description === "Incoming Wire")!;
+
+      // Calling create with type: "transfer" without fromAccountId fails closed
+      const failIn = await createTransactionFromItemAction(inItem.id, {
+        type: "transfer",
+        // fromAccountId not provided
+      });
+      expect(failIn.success).toBe(false);
+      expect(failIn.error).toContain("Both fromAccountId and toAccountId are required");
+
+      // Once counterpart is explicitly selected, succeeds!
+      const succIn = await createTransactionFromItemAction(inItem.id, {
+        type: "transfer",
+        fromAccountId: aliceSavingsAccount.id,
+      });
+      expect(succIn.success).toBe(true);
+      expect(succIn.transaction?.from_account_id).toBe(aliceSavingsAccount.id);
+      expect(succIn.transaction?.to_account_id).toBe(aliceAccount.id);
+      expect(inItem.parsed_data?.direction).toBe("incoming");
     });
   });
 

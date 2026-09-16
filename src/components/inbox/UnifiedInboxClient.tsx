@@ -153,11 +153,11 @@ function getStatementAccountId(
 
     if (type === "transfer") {
       if (isOriginallyIncoming) {
-        toAccountId = stmtAccountId || accounts[0]?.id || "";
-        fromAccountId = accounts.find((a) => a.id !== toAccountId)?.id || "";
+        toAccountId = stmtAccountId || "";
+        fromAccountId = "";
       } else {
-        fromAccountId = stmtAccountId || accounts[0]?.id || "";
-        toAccountId = accounts.find((a) => a.id !== fromAccountId)?.id || "";
+        fromAccountId = stmtAccountId || "";
+        toAccountId = "";
       }
     } else if (type === "expense") {
       fromAccountId = stmtAccountId || accounts[0]?.id || "";
@@ -850,11 +850,11 @@ function getStatementAccountId(
                               let newTo = form.toAccountId;
                               if (newType === "transfer") {
                                 if (isOriginallyIncoming) {
-                                  newTo = stmtAccountId || accounts[0]?.id || "";
-                                  newFrom = accounts.find((a) => a.id !== newTo)?.id || "";
+                                  newTo = stmtAccountId || "";
+                                  newFrom = "";
                                 } else {
-                                  newFrom = stmtAccountId || accounts[0]?.id || "";
-                                  newTo = accounts.find((a) => a.id !== newFrom)?.id || "";
+                                  newFrom = stmtAccountId || "";
+                                  newTo = "";
                                 }
                               } else if (newType === "expense") {
                                 newFrom = stmtAccountId || accounts[0]?.id || "";
@@ -1097,23 +1097,35 @@ function getStatementAccountId(
                         )}
 
                         {/* Action 3: Create Transaction Button (BLOCKED FOR EXACT DUPLICATES) */}
-                        {!isDuplicate && (
-                          <button
-                            onClick={() => {
-                              if (isTransfer && !isReviewOpen) {
-                                // For transfer without open review, open review so user explicitly selects other account
-                                setReviewedItemId(item.id);
-                              } else {
-                                handleCreate(item.id);
+                        {!isDuplicate && (() => {
+                          const form = getReviewForm(item);
+                          const isTransferIncomplete =
+                            form.type === "transfer" &&
+                            (!form.fromAccountId ||
+                              !form.toAccountId ||
+                              form.fromAccountId === form.toAccountId);
+                          return (
+                            <button
+                              onClick={() => {
+                                if (isTransferIncomplete) {
+                                  setReviewedItemId(item.id);
+                                } else {
+                                  handleCreate(item.id);
+                                }
+                              }}
+                              disabled={isPending || isTransferIncomplete}
+                              title={
+                                isTransferIncomplete
+                                  ? "การโอนเงินต้องระบุทั้งบัญชีต้นทางและปลายทาง กรุณาเลือกบัญชีในส่วนตรวจสอบ"
+                                  : undefined
                               }
-                            }}
-                            disabled={isPending}
-                            className="px-3 py-1.5 rounded-lg bg-primary text-primary-foreground text-xs font-semibold hover:bg-primary-hover transition-colors flex items-center gap-1.5"
-                          >
-                            <Plus className="w-3.5 h-3.5" />
-                            {isTransfer ? "สร้างรายการโอน" : "สร้างรายการใหม่"}
-                          </button>
-                        )}
+                              className="px-3 py-1.5 rounded-lg bg-primary text-primary-foreground text-xs font-semibold hover:bg-primary-hover disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-1.5"
+                            >
+                              <Plus className="w-3.5 h-3.5" />
+                              {form.type === "transfer" ? "สร้างรายการโอน" : "สร้างรายการใหม่"}
+                            </button>
+                          );
+                        })()}
 
                         {/* Action 4: Ignore (Dismiss) Button */}
                         <button

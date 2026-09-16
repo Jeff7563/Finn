@@ -475,13 +475,6 @@ export const DataStore: IDataStore = {
     return getActiveStore().updateIngestionItem(userId, id, data);
   },
 
-  async deleteIngestionItemsByDocumentId(
-    userId: string,
-    sourceDocumentId: string
-  ): Promise<number> {
-    return getActiveStore().deleteIngestionItemsByDocumentId(userId, sourceDocumentId);
-  },
-
   // Transaction Evidence Bridge
   async getTransactionEvidence(
     userId: string,

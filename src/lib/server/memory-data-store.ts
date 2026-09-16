@@ -1768,23 +1768,6 @@ export const MemoryDataStore: IDataStore = {
     return updated;
   },
 
-  async deleteIngestionItemsByDocumentId(
-    userId: string,
-    sourceDocumentId: string
-  ): Promise<number> {
-    const dbState = getDbState();
-    const initialLen = dbState.ingestion_items.length;
-    dbState.ingestion_items = dbState.ingestion_items.filter(
-      (item) =>
-        !(
-          item.user_id === userId &&
-          item.source_document_id === sourceDocumentId &&
-          item.status !== "linked"
-        )
-    );
-    return initialLen - dbState.ingestion_items.length;
-  },
-
   // ============================================================================
   // Transaction Evidence Bridge (Decision 1)
   // Enforces:
