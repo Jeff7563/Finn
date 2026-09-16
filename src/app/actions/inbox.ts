@@ -46,7 +46,9 @@ export async function linkIngestionItemAction(
 export async function createTransactionFromItemAction(
   itemId: string,
   overrides: {
-    accountId: string;
+    accountId?: string;
+    fromAccountId?: string;
+    toAccountId?: string;
     categoryId?: string | null;
     description?: string | null;
     note?: string | null;
@@ -116,23 +118,94 @@ export async function createTransactionFromItemAction(
     if (!txType) {
       return {
         success: false,
-        error: "Missing transaction direction or type (cannot determine income vs expense)",
+        error: "Missing transaction direction or type (cannot determine income, expense, or transfer)",
       };
     }
 
-    // 5. Validate account pointer strictly (FAIL CLOSED)
-    if (!overrides.accountId) {
-      return {
-        success: false,
-        error: "Account selection is required to create a transaction",
-      };
-    }
+    // 5. Direction-specific account validation (FAIL CLOSED)
+    let fromAccountId: string | null = null;
+    let toAccountId: string | null = null;
 
-    const account = await DataStore.getAccountById(user.id, overrides.accountId);
-    if (!account) {
+    if (txType === "transfer") {
+      const fromId = overrides.fromAccountId || (overrides.accountId && overrides.toAccountId && overrides.accountId !== overrides.toAccountId ? overrides.accountId : overrides.fromAccountId);
+      const toId = overrides.toAccountId;
+
+      if (!fromId || !toId) {
+        return {
+          success: false,
+          error: "Both fromAccountId and toAccountId are required for transfer transaction",
+        };
+      }
+
+      if (fromId === toId) {
+        return {
+          success: false,
+          error: "Transfer source and destination accounts must be distinct",
+        };
+      }
+
+      const [fromAccount, toAccount] = await Promise.all([
+        DataStore.getAccountById(user.id, fromId),
+        DataStore.getAccountById(user.id, toId),
+      ]);
+
+      if (!fromAccount) {
+        return {
+          success: false,
+          error: "Source account not found or does not belong to user",
+        };
+      }
+      if (!toAccount) {
+        return {
+          success: false,
+          error: "Destination account not found or does not belong to user",
+        };
+      }
+
+      fromAccountId = fromId;
+      toAccountId = toId;
+    } else if (txType === "expense") {
+      const fromId = overrides.fromAccountId || overrides.accountId;
+      if (!fromId) {
+        return {
+          success: false,
+          error: "Source account (fromAccountId or accountId) is required for expense transaction",
+        };
+      }
+
+      const account = await DataStore.getAccountById(user.id, fromId);
+      if (!account) {
+        return {
+          success: false,
+          error: "Selected source account not found or does not belong to user",
+        };
+      }
+
+      fromAccountId = fromId;
+      toAccountId = null;
+    } else if (txType === "income") {
+      const toId = overrides.toAccountId || overrides.accountId;
+      if (!toId) {
+        return {
+          success: false,
+          error: "Destination account (toAccountId or accountId) is required for income transaction",
+        };
+      }
+
+      const account = await DataStore.getAccountById(user.id, toId);
+      if (!account) {
+        return {
+          success: false,
+          error: "Selected destination account not found or does not belong to user",
+        };
+      }
+
+      fromAccountId = null;
+      toAccountId = toId;
+    } else {
       return {
         success: false,
-        error: "Selected account not found or does not belong to user",
+        error: `Unsupported transaction type: ${txType}`,
       };
     }
 
@@ -143,8 +216,8 @@ export async function createTransactionFromItemAction(
       transaction_date: parsed.occurred_at,
       description: overrides.description || parsed.description || parsed.merchant_name || "Imported transaction",
       note: overrides.note || parsed.note || null,
-      from_account_id: txType === "expense" ? overrides.accountId : null,
-      to_account_id: txType === "income" ? overrides.accountId : null,
+      from_account_id: fromAccountId,
+      to_account_id: toAccountId,
       category_id: overrides.categoryId || null,
       source: "import" as const,
       reference_number: parsed.reference_number || null,

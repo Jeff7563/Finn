@@ -63,6 +63,9 @@ export function UnifiedInboxClient({
   const [reviewedItemId, setReviewedItemId] = useState<string | null>(null);
   const [showStorageSummary, setShowStorageSummary] = useState<boolean>(true);
   const [selectedAccountId, setSelectedAccountId] = useState<string>(accounts[0]?.id || "");
+  const [selectedToAccountId, setSelectedToAccountId] = useState<string>(
+    accounts.length > 1 ? accounts[1].id : accounts[0]?.id || ""
+  );
   const [selectedCategoryId, setSelectedCategoryId] = useState<string>("");
   const [actionMessage, setActionMessage] = useState<{ text: string; isError: boolean } | null>(null);
 
@@ -104,14 +107,31 @@ export function UnifiedInboxClient({
   };
 
   const handleCreate = (itemId: string) => {
+    const item = items.find((i) => i.id === itemId);
+    const parsed = item?.parsed_data;
+    const isTransfer = parsed?.transaction_type === "transfer";
+
     if (!selectedAccountId) {
       setActionMessage({ text: "Please select an account first", isError: true });
       return;
     }
 
+    if (isTransfer) {
+      if (!selectedToAccountId) {
+        setActionMessage({ text: "Please select a destination account for transfer", isError: true });
+        return;
+      }
+      if (selectedAccountId === selectedToAccountId) {
+        setActionMessage({ text: "Source and destination accounts must be distinct for transfer", isError: true });
+        return;
+      }
+    }
+
     startTransition(async () => {
       const res = await createTransactionFromItemAction(itemId, {
         accountId: selectedAccountId,
+        fromAccountId: isTransfer ? selectedAccountId : undefined,
+        toAccountId: isTransfer ? selectedToAccountId : undefined,
         categoryId: selectedCategoryId || null,
       });
       if (res.success && res.transaction) {
@@ -123,7 +143,9 @@ export function UnifiedInboxClient({
           )
         );
         setActionMessage({
-          text: `Created transaction for ${(res.transaction.amount || 0).toFixed(2)} THB`,
+          text: isTransfer
+            ? `Created transfer transaction for ${(res.transaction.amount || 0).toFixed(2)} THB`
+            : `Created transaction for ${(res.transaction.amount || 0).toFixed(2)} THB`,
           isError: false,
         });
       } else {
@@ -354,7 +376,7 @@ export function UnifiedInboxClient({
       {accounts.length > 0 && (
         <div className="flex flex-wrap items-center gap-4 text-xs text-text-secondary px-1">
           <div className="flex items-center gap-2">
-            <span>บัญชีสำหรับสร้างรายการใหม่:</span>
+            <span>บัญชีต้นทาง (หรือบัญชีหลัก):</span>
             <select
               value={selectedAccountId}
               onChange={(e) => setSelectedAccountId(e.target.value)}
@@ -364,6 +386,21 @@ export function UnifiedInboxClient({
                 <option key={acc.id} value={acc.id}>
                   {acc.name} ({acc.institution || "บัญชี"}) - คงเหลือ{" "}
                   {(Number(acc.opening_balance) || 0).toLocaleString()} THB
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <span>บัญชีปลายทาง (สำหรับโอนเงิน):</span>
+            <select
+              value={selectedToAccountId}
+              onChange={(e) => setSelectedToAccountId(e.target.value)}
+              className="bg-surface border border-border rounded-md px-2 py-1 text-xs font-medium text-text-primary focus:outline-none focus:ring-1 focus:ring-primary"
+            >
+              {accounts.map((acc) => (
+                <option key={acc.id} value={acc.id}>
+                  {acc.name} ({acc.institution || "บัญชี"})
                 </option>
               ))}
             </select>
@@ -405,7 +442,8 @@ export function UnifiedInboxClient({
           filteredItems.map((item) => {
             const parsed = item.parsed_data;
             const amountThb = parsed?.amount_decimal || (parsed?.amount ? parsed.amount / 100 : 0);
-            const isIncoming = parsed?.direction === "incoming" || parsed?.transaction_type === "income";
+            const isTransfer = parsed?.transaction_type === "transfer";
+            const isIncoming = !isTransfer && (parsed?.direction === "incoming" || parsed?.transaction_type === "income");
             const doc = docMap.get(item.source_document_id);
             const isReviewOpen = reviewedItemId === item.id;
 
@@ -424,6 +462,11 @@ export function UnifiedInboxClient({
                         <span className="font-semibold text-text-primary text-sm">
                           {parsed?.description || parsed?.merchant_name || "รายการนำเข้า"}
                         </span>
+                        {isTransfer && (
+                          <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-blue-500/10 text-blue-600 border border-blue-500/20">
+                            โอนเงิน (Transfer)
+                          </span>
+                        )}
                         {getMatchBadge(item.match_class)}
                       </div>
                       <div className="flex items-center gap-3 text-xs text-text-secondary mt-0.5">
@@ -448,10 +491,14 @@ export function UnifiedInboxClient({
                   <div className="text-right sm:self-auto self-end">
                     <span
                       className={`text-base font-bold ${
-                        isIncoming ? "text-emerald-600 dark:text-emerald-400" : "text-text-primary"
+                        isTransfer
+                          ? "text-blue-600 dark:text-blue-400"
+                          : isIncoming
+                          ? "text-emerald-600 dark:text-emerald-400"
+                          : "text-text-primary"
                       }`}
                     >
-                      {isIncoming ? "+" : "-"}
+                      {isTransfer ? "⇄" : isIncoming ? "+" : "-"}
                       {amountThb.toLocaleString(undefined, {
                         minimumFractionDigits: 2,
                         maximumFractionDigits: 2,
@@ -579,6 +626,16 @@ export function UnifiedInboxClient({
 
                     {item.status === "pending" && (
                       <>
+                        {isTransfer && (
+                          <span className="text-[11px] text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-950/40 px-2 py-1 rounded border border-blue-200 dark:border-blue-800">
+                            โอน: {accounts.find((a) => a.id === selectedAccountId)?.name || "ต้นทาง"} →{" "}
+                            {accounts.find((a) => a.id === selectedToAccountId)?.name || "ปลายทาง"}
+                            {selectedAccountId === selectedToAccountId && (
+                              <span className="text-red-500 ml-1 font-bold">⚠️ บัญชีต้องต่างกัน</span>
+                            )}
+                          </span>
+                        )}
+
                         {/* Action 2: Link to Existing Transaction Button */}
                         {existingTransactions.length > 0 && (
                           <button
@@ -598,7 +655,7 @@ export function UnifiedInboxClient({
                           className="px-3 py-1.5 rounded-lg bg-primary text-primary-foreground text-xs font-semibold hover:bg-primary-hover transition-colors flex items-center gap-1.5"
                         >
                           <Plus className="w-3.5 h-3.5" />
-                          สร้างรายการใหม่
+                          {isTransfer ? "สร้างรายการโอน" : "สร้างรายการใหม่"}
                         </button>
 
                         {/* Action 4: Ignore (Dismiss) Button */}

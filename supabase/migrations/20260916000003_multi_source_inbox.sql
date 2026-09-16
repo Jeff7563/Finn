@@ -98,9 +98,8 @@ CREATE POLICY "source_documents_update_own"
     USING (auth.uid() = user_id)
     WITH CHECK (auth.uid() = user_id);
 
-CREATE POLICY "source_documents_delete_own"
-    ON public.source_documents FOR DELETE
-    USING (auth.uid() = user_id);
+-- Append-only audit metadata: direct client deletions forbidden
+REVOKE DELETE ON public.source_documents FROM authenticated, anon;
 
 -- ============================================================================
 -- 3. import_batches
@@ -141,9 +140,8 @@ CREATE POLICY "import_batches_update_own"
     USING (auth.uid() = user_id)
     WITH CHECK (auth.uid() = user_id);
 
-CREATE POLICY "import_batches_delete_own"
-    ON public.import_batches FOR DELETE
-    USING (auth.uid() = user_id);
+-- Append-only audit metadata: direct client deletions forbidden
+REVOKE DELETE ON public.import_batches FROM authenticated, anon;
 
 -- ============================================================================
 -- 4. ingestion_items
@@ -151,7 +149,7 @@ CREATE POLICY "import_batches_delete_own"
 CREATE TABLE IF NOT EXISTS public.ingestion_items (
     id                      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id                 UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
-    source_document_id      UUID NOT NULL REFERENCES public.source_documents(id) ON DELETE CASCADE,
+    source_document_id      UUID NOT NULL REFERENCES public.source_documents(id) ON DELETE RESTRICT,
     connection_id           UUID NULL REFERENCES public.source_connections(id) ON DELETE SET NULL,
     batch_id                UUID NULL REFERENCES public.import_batches(id) ON DELETE SET NULL,
     item_type               TEXT NOT NULL CHECK (item_type IN ('email_notification', 'statement_row', 'api_transaction')),
@@ -194,9 +192,8 @@ CREATE POLICY "ingestion_items_update_own"
     USING (auth.uid() = user_id)
     WITH CHECK (auth.uid() = user_id);
 
-CREATE POLICY "ingestion_items_delete_own"
-    ON public.ingestion_items FOR DELETE
-    USING (auth.uid() = user_id);
+-- Append-only audit metadata: direct client deletions forbidden
+REVOKE DELETE ON public.ingestion_items FROM authenticated, anon;
 
 -- ============================================================================
 -- 5. transaction_evidence
@@ -205,8 +202,8 @@ CREATE TABLE IF NOT EXISTS public.transaction_evidence (
     id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id             UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
     transaction_id      UUID NOT NULL REFERENCES public.transactions(id) ON DELETE CASCADE,
-    slip_id             UUID NULL REFERENCES public.slips(id) ON DELETE CASCADE,
-    ingestion_item_id   UUID NULL REFERENCES public.ingestion_items(id) ON DELETE CASCADE,
+    slip_id             UUID NULL REFERENCES public.slips(id) ON DELETE RESTRICT,
+    ingestion_item_id   UUID NULL REFERENCES public.ingestion_items(id) ON DELETE RESTRICT,
     evidence_type       TEXT NOT NULL CHECK (evidence_type IN ('slip', 'email_notification', 'statement_row', 'api_import')),
     created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
     -- Decision 1 Constraint: Exactly ONE of slip_id or ingestion_item_id must be non-null
@@ -229,17 +226,14 @@ CREATE INDEX IF NOT EXISTS idx_transaction_evidence_tx_id ON public.transaction_
 
 ALTER TABLE public.transaction_evidence ENABLE ROW LEVEL SECURITY;
 
+-- Authenticated users may SELECT their own transaction evidence
 CREATE POLICY "transaction_evidence_select_own"
     ON public.transaction_evidence FOR SELECT
     USING (auth.uid() = user_id);
 
-CREATE POLICY "transaction_evidence_insert_own"
-    ON public.transaction_evidence FOR INSERT
-    WITH CHECK (auth.uid() = user_id);
-
-CREATE POLICY "transaction_evidence_delete_own"
-    ON public.transaction_evidence FOR DELETE
-    USING (auth.uid() = user_id);
+-- Explicitly revoke direct INSERT, UPDATE, DELETE from browser-authenticated clients.
+-- All mutation paths MUST happen through trusted SECURITY DEFINER RPCs.
+REVOKE INSERT, UPDATE, DELETE ON public.transaction_evidence FROM authenticated, anon;
 
 -- ============================================================================
 -- Cross-User Ownership Validation Triggers (Decision 1 & Operator Audit 6)

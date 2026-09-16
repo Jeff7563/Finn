@@ -186,6 +186,14 @@ During operator review of commit `4723f69120a23aff25e7639b8e1f85a61874c970`, 11 
 | 52 | Item already has evidence -> cannot link to another tx | `tests/security/multi-source-security-atomicity.test.ts` | `rejects linkIngestionItem when item already has evidence` | **PASS** |
 | 53 | Atomic link rollback on failure | `tests/security/multi-source-security-atomicity.test.ts` | `rolls back completely if target transaction belongs to another user (NO partial evidence)` | **PASS** |
 | 54 | Create RPC returns item without second read | `tests/security/multi-source-security-atomicity.test.ts` | `returns updated item directly from RPC response without performing secondary read` | **PASS** |
+| 55 | Direct INSERT/UPDATE/DELETE revoked on transaction_evidence | `tests/security/multi-source-security-atomicity.test.ts` | `verifies direct INSERT, UPDATE, DELETE on transaction_evidence are revoked from authenticated and anon` | **PASS** |
+| 56 | Direct DELETE revoked on audit tables (source_documents, etc.) | `tests/security/multi-source-security-atomicity.test.ts` | `verifies direct DELETE on source_documents, import_batches, and ingestion_items are revoked` | **PASS** |
+| 57 | Cascade delete protected by ON DELETE RESTRICT | `tests/security/multi-source-security-atomicity.test.ts` | `verifies foreign keys enforce ON DELETE RESTRICT on audit documents and evidence` | **PASS** |
+| 58 | Source document deletion blocked when ingestion items exist | `tests/security/multi-source-security-atomicity.test.ts` | `blocks source_document deletion when child ingestion_items exist (ON DELETE RESTRICT)` | **PASS** |
+| 59 | Ingestion item / slip deletion blocked when evidence exists | `tests/security/multi-source-security-atomicity.test.ts` | `blocks ingestion_item deletion when linked transaction_evidence exists (ON DELETE RESTRICT)` | **PASS** |
+| 60 | Binary retention preserves metadata & evidence intact | `tests/security/multi-source-security-atomicity.test.ts` | `prunes binary storage path while keeping source_document, ingestion item, and evidence intact` | **PASS** |
+| 61 | Transfer Inbox creation validation (both accounts, distinct, owned) | `tests/security/multi-source-security-atomicity.test.ts` | `rejects transfer creation when toAccountId is missing / identical / foreign` | **PASS** |
+| 62 | Transfer creation succeeds with distinct accounts & links evidence | `tests/security/multi-source-security-atomicity.test.ts` | `successfully creates transfer transaction with two distinct owned accounts and records evidence link` | **PASS** |
 
 ---
 
@@ -196,7 +204,7 @@ All 5 verification gates have passed completely:
 ```
 [Gate 1: ESLint]          ──► PASS  (0 errors, 0 warnings)
 [Gate 2: TypeScript]      ──► PASS  (tsc --noEmit exited 0)
-[Gate 3: Vitest Unit]     ──► PASS  (28 test files, 373 tests passed)
+[Gate 3: Vitest Unit]     ──► PASS  (28 test files, 386 tests passed)
 [Gate 4: Next.js Build]   ──► PASS  (Compiled 24 routes + dynamic inbox route)
 [Gate 5: Playwright E2E]  ──► PASS  (78 tests passed on Desktop & Mobile)
 ```
@@ -212,7 +220,7 @@ All 5 verification gates have passed completely:
    - Exit code: 0
 
 3. **Unit & Integration Test Suite (`npm test`)**:
-   - Result: 28 test files passed, 373 tests passed (0 failed).
+   - Result: 28 test files passed, 386 tests passed (0 failed).
    - Exit code: 0
 
 4. **Production Build (`npm run build`)**:

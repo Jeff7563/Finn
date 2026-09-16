@@ -10,6 +10,7 @@ import {
 } from "@/app/actions/inbox";
 import { SourceConnection, SourceDocument, IngestionItem } from "@/types/multi-source";
 import { Account } from "@/types/finance";
+import { pruneSourceDocumentBinary } from "@/lib/storage/retention";
 
 // Mock requireUser to return test user
 const userAlice = "user-alice-1111-1111-1111-111111111111";
@@ -904,6 +905,412 @@ describe("Phase 3 Multi-Source Atomicity & Cross-User Security Suite", () => {
       expect(res.item.status).toBe("linked");
       // OPERATOR FINDING 4 INVARIANT: Must NOT perform secondary read
       expect(getIngestionItemSpy).not.toHaveBeenCalled();
+    });
+  });
+
+  // ==========================================================================
+  // 10. Direct Client Mutation Denied & Static DB Integrity Invariants
+  // ==========================================================================
+  describe("10. Direct Client Mutation Denied & Static DB Integrity Invariants", () => {
+    const migrationPath = path.join(
+      process.cwd(),
+      "supabase/migrations/20260916000003_multi_source_inbox.sql"
+    );
+    const sql = fs.readFileSync(migrationPath, "utf-8");
+
+    it("verifies direct INSERT, UPDATE, DELETE on transaction_evidence are revoked from authenticated and anon", () => {
+      expect(sql).toContain(
+        "REVOKE INSERT, UPDATE, DELETE ON public.transaction_evidence FROM authenticated, anon;"
+      );
+      // SELECT policy exists for users to view their evidence
+      expect(sql).toContain('CREATE POLICY "transaction_evidence_select_own"');
+      // No direct INSERT or DELETE policies exist for authenticated users
+      expect(sql).not.toContain('CREATE POLICY "transaction_evidence_insert_own"');
+      expect(sql).not.toContain('CREATE POLICY "transaction_evidence_delete_own"');
+    });
+
+    it("verifies direct DELETE on source_documents, import_batches, and ingestion_items are revoked", () => {
+      expect(sql).toContain("REVOKE DELETE ON public.source_documents FROM authenticated, anon;");
+      expect(sql).toContain("REVOKE DELETE ON public.import_batches FROM authenticated, anon;");
+      expect(sql).toContain("REVOKE DELETE ON public.ingestion_items FROM authenticated, anon;");
+      expect(sql).not.toContain('CREATE POLICY "source_documents_delete_own"');
+      expect(sql).not.toContain('CREATE POLICY "import_batches_delete_own"');
+      expect(sql).not.toContain('CREATE POLICY "ingestion_items_delete_own"');
+    });
+
+    it("verifies foreign keys enforce ON DELETE RESTRICT on audit documents and evidence", () => {
+      // Ingestion items cannot be cascade-deleted by deleting source documents
+      expect(sql).toMatch(
+        /source_document_id\s+UUID\s+NOT\s+NULL\s+REFERENCES\s+public\.source_documents\(id\)\s+ON\s+DELETE\s+RESTRICT/i
+      );
+      // Evidence cannot be cascade-deleted by deleting slips or ingestion items
+      expect(sql).toMatch(
+        /slip_id\s+UUID\s+NULL\s+REFERENCES\s+public\.slips\(id\)\s+ON\s+DELETE\s+RESTRICT/i
+      );
+      expect(sql).toMatch(
+        /ingestion_item_id\s+UUID\s+NULL\s+REFERENCES\s+public\.ingestion_items\(id\)\s+ON\s+DELETE\s+RESTRICT/i
+      );
+    });
+
+    function evaluateDirectClientTableMutation(
+      table: "transaction_evidence" | "source_documents" | "ingestion_items" | "import_batches",
+      action: "SELECT" | "INSERT" | "UPDATE" | "DELETE",
+      role: "authenticated" | "anon"
+    ): { allowed: boolean; reason?: string } {
+      if (table === "transaction_evidence") {
+        if (action === "SELECT" && role === "authenticated") {
+          return { allowed: true };
+        }
+        return {
+          allowed: false,
+          reason: `Direct ${action} on ${table} is forbidden for ${role} (must use SECURITY DEFINER RPC)`,
+        };
+      }
+      if (action === "DELETE") {
+        return {
+          allowed: false,
+          reason: `Direct DELETE on ${table} is revoked for ${role} (append-only audit log)`,
+        };
+      }
+      return { allowed: true };
+    }
+
+    it("strictly denies direct INSERT, UPDATE, DELETE on transaction_evidence for client roles", () => {
+      const directInsert = evaluateDirectClientTableMutation("transaction_evidence", "INSERT", "authenticated");
+      expect(directInsert.allowed).toBe(false);
+      expect(directInsert.reason).toContain("forbidden");
+
+      const directDelete = evaluateDirectClientTableMutation("transaction_evidence", "DELETE", "authenticated");
+      expect(directDelete.allowed).toBe(false);
+      expect(directDelete.reason).toContain("forbidden");
+
+      const anonInsert = evaluateDirectClientTableMutation("transaction_evidence", "INSERT", "anon");
+      expect(anonInsert.allowed).toBe(false);
+
+      const clientSelect = evaluateDirectClientTableMutation("transaction_evidence", "SELECT", "authenticated");
+      expect(clientSelect.allowed).toBe(true);
+    });
+
+    it("strictly denies direct DELETE on audit tables (source_documents, ingestion_items, import_batches)", () => {
+      expect(evaluateDirectClientTableMutation("source_documents", "DELETE", "authenticated").allowed).toBe(false);
+      expect(evaluateDirectClientTableMutation("ingestion_items", "DELETE", "authenticated").allowed).toBe(false);
+      expect(evaluateDirectClientTableMutation("import_batches", "DELETE", "authenticated").allowed).toBe(false);
+    });
+  });
+
+  // ==========================================================================
+  // 11. Cascade Delete Protection & Foreign Key Restrict
+  // ==========================================================================
+  describe("11. Cascade Delete Protection & Foreign Key Restrict", () => {
+    function simulateDeleteWithForeignKeyCheck(
+      targetEntity: "source_document" | "ingestion_item" | "slip",
+      targetId: string,
+      state: {
+        documents: { id: string }[];
+        items: { id: string; source_document_id: string }[];
+        evidence: { id: string; ingestion_item_id?: string | null; slip_id?: string | null }[];
+      }
+    ): { deleted: boolean; error?: string } {
+      if (targetEntity === "source_document") {
+        const hasDependentItems = state.items.some((i) => i.source_document_id === targetId);
+        if (hasDependentItems) {
+          return {
+            deleted: false,
+            error: `foreign key constraint violation: ingestion_items reference source_document ${targetId} (ON DELETE RESTRICT)`,
+          };
+        }
+      } else if (targetEntity === "ingestion_item") {
+        const hasDependentEvidence = state.evidence.some((e) => e.ingestion_item_id === targetId);
+        if (hasDependentEvidence) {
+          return {
+            deleted: false,
+            error: `foreign key constraint violation: transaction_evidence references ingestion_item ${targetId} (ON DELETE RESTRICT)`,
+          };
+        }
+      } else if (targetEntity === "slip") {
+        const hasDependentEvidence = state.evidence.some((e) => e.slip_id === targetId);
+        if (hasDependentEvidence) {
+          return {
+            deleted: false,
+            error: `foreign key constraint violation: transaction_evidence references slip ${targetId} (ON DELETE RESTRICT)`,
+          };
+        }
+      }
+      return { deleted: true };
+    }
+
+    it("blocks source_document deletion when child ingestion_items exist (ON DELETE RESTRICT)", () => {
+      const state = {
+        documents: [{ id: aliceDoc.id }],
+        items: [{ id: "item-1", source_document_id: aliceDoc.id }],
+        evidence: [],
+      };
+
+      const res = simulateDeleteWithForeignKeyCheck("source_document", aliceDoc.id, state);
+      expect(res.deleted).toBe(false);
+      expect(res.error).toContain("ON DELETE RESTRICT");
+    });
+
+    it("blocks ingestion_item deletion when linked transaction_evidence exists (ON DELETE RESTRICT)", () => {
+      const state = {
+        documents: [{ id: aliceDoc.id }],
+        items: [{ id: "item-1", source_document_id: aliceDoc.id }],
+        evidence: [{ id: "ev-1", ingestion_item_id: "item-1" }],
+      };
+
+      const res = simulateDeleteWithForeignKeyCheck("ingestion_item", "item-1", state);
+      expect(res.deleted).toBe(false);
+      expect(res.error).toContain("ON DELETE RESTRICT");
+    });
+
+    it("blocks slip deletion when linked transaction_evidence exists (ON DELETE RESTRICT)", () => {
+      const state = {
+        documents: [],
+        items: [],
+        evidence: [{ id: "ev-slip-1", slip_id: "slip-test-1" }],
+      };
+
+      const res = simulateDeleteWithForeignKeyCheck("slip", "slip-test-1", state);
+      expect(res.deleted).toBe(false);
+      expect(res.error).toContain("ON DELETE RESTRICT");
+    });
+  });
+
+  // ==========================================================================
+  // 12. Binary Retention Preserving Metadata & Evidence Intact
+  // ==========================================================================
+  describe("12. Binary Retention Preserving Metadata & Evidence Intact", () => {
+    it("prunes binary storage path while keeping source_document, ingestion item, and evidence intact", async () => {
+      const [item] = await MemoryDataStore.createIngestionItems(userAlice, [
+        {
+          source_document_id: aliceDoc.id,
+          connection_id: aliceConnection.id,
+          item_type: "statement_row",
+          status: "pending",
+          raw_data: { line: "2026-09-12,Retained Statement,1200.00" },
+          parsed_data: {
+            amount: 120000,
+            amount_decimal: 1200.0,
+            currency: "THB",
+            occurred_at: "2026-09-12T14:30:00.000Z",
+            transaction_type: "expense",
+            direction: "outgoing",
+          },
+        },
+      ]);
+
+      const createRes = await MemoryDataStore.createTransactionFromIngestionItem(userAlice, item.id, {
+        type: "expense",
+        amount: 1200.0,
+        currency: "THB",
+        transaction_date: "2026-09-12T14:30:00.000Z",
+        description: "Retained Statement Expense",
+        note: null,
+        from_account_id: aliceAccount.id,
+        to_account_id: null,
+        category_id: null,
+        source: "import",
+        reference_number: null,
+        confidence: 1.0,
+        review_status: "confirmed",
+        tax_deductible: false,
+      });
+
+      // Confirm initial evidence link
+      expect(createRes.evidence.transaction_id).toBe(createRes.transaction.id);
+      expect(createRes.evidence.ingestion_item_id).toBe(item.id);
+
+      // Perform binary pruning on source document
+      const pruneTimestamp = "2026-09-16T12:00:00.000Z";
+      const prunedDoc = pruneSourceDocumentBinary(
+        {
+          ...aliceDoc,
+          storage_path: "storage/documents/alice_september.csv",
+          stored_file_size: 1024,
+        },
+        pruneTimestamp
+      );
+
+      // Verify binary fields pruned
+      expect(prunedDoc.storage_path).toBeNull();
+      expect(prunedDoc.binary_deleted_at).toBe(pruneTimestamp);
+      expect(prunedDoc.stored_file_size).toBe(0);
+
+      // Verify audit metadata preserved
+      expect(prunedDoc.id).toBe(aliceDoc.id);
+      expect(prunedDoc.original_filename).toBe("alice_september.csv");
+      expect(prunedDoc.file_hash).toBe(aliceDoc.file_hash);
+      expect(prunedDoc.file_size).toBe(1024);
+
+      // Verify downstream financial transaction and evidence remain completely intact!
+      const txs = await MemoryDataStore.getTransactions(userAlice);
+      expect(txs).toHaveLength(1);
+      expect(txs[0].id).toBe(createRes.transaction.id);
+
+      const evidences = await MemoryDataStore.getTransactionEvidence(userAlice, createRes.transaction.id);
+      expect(evidences).toHaveLength(1);
+      expect(evidences[0].ingestion_item_id).toBe(item.id);
+
+      const refreshedItem = await MemoryDataStore.getIngestionItemById(userAlice, item.id);
+      expect(refreshedItem?.status).toBe("linked");
+      expect(refreshedItem?.matched_transaction_id).toBe(createRes.transaction.id);
+    });
+  });
+
+  // ==========================================================================
+  // 13. Transfer Creation From Inbox & Atomic Evidence Link
+  // ==========================================================================
+  describe("13. Transfer Creation From Inbox & Atomic Evidence Link", () => {
+    let aliceSavings: Account;
+
+    beforeEach(async () => {
+      aliceSavings = await MemoryDataStore.createAccount(userAlice, {
+        name: "Alice High-Yield Savings",
+        type: "bank",
+        currency: "THB",
+        opening_balance: 100000,
+        balance_as_of: "2026-09-01T00:00:00.000Z",
+      });
+    });
+
+    it("rejects transfer creation when toAccountId is missing", async () => {
+      const [item] = await MemoryDataStore.createIngestionItems(userAlice, [
+        {
+          source_document_id: aliceDoc.id,
+          item_type: "statement_row",
+          status: "pending",
+          raw_data: { line: "2026-09-12,Transfer,2000.00" },
+          parsed_data: {
+            amount: 200000,
+            amount_decimal: 2000.0,
+            currency: "THB",
+            occurred_at: "2026-09-12T10:00:00.000Z",
+            transaction_type: "transfer",
+            direction: "outgoing",
+          },
+        },
+      ]);
+
+      const res = await createTransactionFromItemAction(item.id, {
+        fromAccountId: aliceAccount.id,
+        // toAccountId missing!
+      });
+
+      expect(res.success).toBe(false);
+      expect(res.error).toContain("Both fromAccountId and toAccountId are required for transfer");
+
+      const txs = await MemoryDataStore.getTransactions(userAlice);
+      expect(txs).toHaveLength(0);
+    });
+
+    it("rejects transfer creation when fromAccountId and toAccountId are identical", async () => {
+      const [item] = await MemoryDataStore.createIngestionItems(userAlice, [
+        {
+          source_document_id: aliceDoc.id,
+          item_type: "statement_row",
+          status: "pending",
+          raw_data: { line: "2026-09-12,Same Account Transfer,2000.00" },
+          parsed_data: {
+            amount: 200000,
+            amount_decimal: 2000.0,
+            currency: "THB",
+            occurred_at: "2026-09-12T10:00:00.000Z",
+            transaction_type: "transfer",
+            direction: "outgoing",
+          },
+        },
+      ]);
+
+      const res = await createTransactionFromItemAction(item.id, {
+        fromAccountId: aliceAccount.id,
+        toAccountId: aliceAccount.id, // SAME ACCOUNT!
+      });
+
+      expect(res.success).toBe(false);
+      expect(res.error).toContain("Transfer source and destination accounts must be distinct");
+
+      const txs = await MemoryDataStore.getTransactions(userAlice);
+      expect(txs).toHaveLength(0);
+    });
+
+    it("rejects transfer creation when an account belongs to another user (Bob)", async () => {
+      const [item] = await MemoryDataStore.createIngestionItems(userAlice, [
+        {
+          source_document_id: aliceDoc.id,
+          item_type: "statement_row",
+          status: "pending",
+          raw_data: { line: "2026-09-12,Adversarial Transfer,2000.00" },
+          parsed_data: {
+            amount: 200000,
+            amount_decimal: 2000.0,
+            currency: "THB",
+            occurred_at: "2026-09-12T10:00:00.000Z",
+            transaction_type: "transfer",
+            direction: "outgoing",
+          },
+        },
+      ]);
+
+      const res = await createTransactionFromItemAction(item.id, {
+        fromAccountId: aliceAccount.id,
+        toAccountId: bobAccount.id, // Bob's account!
+      });
+
+      expect(res.success).toBe(false);
+      expect(res.error).toContain("Destination account not found or does not belong to user");
+
+      const txs = await MemoryDataStore.getTransactions(userAlice);
+      expect(txs).toHaveLength(0);
+    });
+
+    it("successfully creates transfer transaction with two distinct owned accounts and records evidence link", async () => {
+      const [item] = await MemoryDataStore.createIngestionItems(userAlice, [
+        {
+          source_document_id: aliceDoc.id,
+          connection_id: aliceConnection.id,
+          item_type: "statement_row",
+          status: "pending",
+          raw_data: { line: "2026-09-12,Valid Transfer,3500.00" },
+          parsed_data: {
+            amount: 350000,
+            amount_decimal: 3500.0,
+            currency: "THB",
+            occurred_at: "2026-09-12T10:00:00.000Z",
+            transaction_type: "transfer",
+            direction: "outgoing",
+            description: "Transfer to Savings",
+          },
+        },
+      ]);
+
+      const res = await createTransactionFromItemAction(item.id, {
+        fromAccountId: aliceAccount.id,
+        toAccountId: aliceSavings.id,
+      });
+
+      expect(res.success).toBe(true);
+      expect(res.transaction).toBeTruthy();
+      expect(res.transaction?.type).toBe("transfer");
+      expect(res.transaction?.amount).toBe(3500.0);
+      expect(res.transaction?.from_account_id).toBe(aliceAccount.id);
+      expect(res.transaction?.to_account_id).toBe(aliceSavings.id);
+
+      // Exactly 1 evidence record linking transaction to ingestion item
+      expect(res.evidence).toBeTruthy();
+      expect(res.evidence?.transaction_id).toBe(res.transaction?.id);
+      expect(res.evidence?.ingestion_item_id).toBe(item.id);
+
+      // Ingestion item marked linked
+      const refreshedItem = await MemoryDataStore.getIngestionItemById(userAlice, item.id);
+      expect(refreshedItem?.status).toBe("linked");
+      expect(refreshedItem?.matched_transaction_id).toBe(res.transaction?.id);
+
+      // Verify transaction query
+      const txs = await MemoryDataStore.getTransactions(userAlice);
+      expect(txs).toHaveLength(1);
+      expect(txs[0].type).toBe("transfer");
+      expect(txs[0].from_account_id).toBe(aliceAccount.id);
+      expect(txs[0].to_account_id).toBe(aliceSavings.id);
     });
   });
 });
