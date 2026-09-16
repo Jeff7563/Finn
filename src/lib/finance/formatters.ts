@@ -649,3 +649,42 @@ export function getGreetingThai(timeZone: string = "Asia/Bangkok"): string {
   }
   return "สวัสดีตอนเย็น";
 }
+
+/**
+ * Format imported evidence timestamp strictly in Asia/Bangkok:
+ * e.g. "16/9/2569 20:45:00" using explicit timeZone: "Asia/Bangkok"
+ */
+export function formatBangkokDateTime(
+  dateInput: string | Date | number | null | undefined,
+  timeZone: string = "Asia/Bangkok"
+): string {
+  if (dateInput == null) return "ไม่ระบุเวลา";
+  const date =
+    dateInput instanceof Date
+      ? dateInput
+      : typeof dateInput === "string" || typeof dateInput === "number"
+      ? new Date(dateInput)
+      : null;
+  if (!date || isNaN(date.getTime())) return "ไม่ระบุเวลา";
+  return date.toLocaleString("th-TH", { timeZone });
+}
+
+/**
+ * Format date strictly in Asia/Bangkok:
+ * e.g. "16/9/2569" using explicit timeZone: "Asia/Bangkok"
+ */
+export function formatBangkokDate(
+  dateInput: string | Date | number | null | undefined,
+  timeZone: string = "Asia/Bangkok"
+): string {
+  if (dateInput == null) return "ไม่ระบุวันที่";
+  const date =
+    dateInput instanceof Date
+      ? dateInput
+      : typeof dateInput === "string" || typeof dateInput === "number"
+      ? new Date(dateInput)
+      : null;
+  if (!date || isNaN(date.getTime())) return "ไม่ระบุวันที่";
+  return date.toLocaleDateString("th-TH", { timeZone });
+}
+

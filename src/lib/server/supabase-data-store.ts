@@ -1972,6 +1972,19 @@ export class SupabaseDataStoreImpl implements IDataStore {
     return data;
   }
 
+  async getSourceDocumentByHash(userId: string, hash: string): Promise<SourceDocument | null> {
+    const supabase = await this.getClient();
+    const { data, error } = await supabase
+      .from("source_documents")
+      .select("*")
+      .eq("user_id", userId)
+      .eq("file_hash", hash)
+      .maybeSingle();
+
+    if (error) throw new Error(`Failed to fetch source document by hash: ${error.message}`);
+    return data;
+  }
+
   async createSourceDocument(
     userId: string,
     data: Partial<SourceDocument>
@@ -1980,6 +1993,7 @@ export class SupabaseDataStoreImpl implements IDataStore {
     const { data: created, error } = await supabase
       .from("source_documents")
       .insert({
+        ...(data.id ? { id: data.id } : {}),
         user_id: userId,
         connection_id: data.connection_id,
         document_type: data.document_type,
@@ -1987,6 +2001,7 @@ export class SupabaseDataStoreImpl implements IDataStore {
         original_filename: data.original_filename,
         file_hash: data.file_hash,
         file_size: data.file_size,
+        stored_file_size: data.stored_file_size !== undefined ? data.stored_file_size : 0,
         status: data.status || "received",
         provider_metadata: data.provider_metadata || {},
       })
@@ -1995,6 +2010,24 @@ export class SupabaseDataStoreImpl implements IDataStore {
 
     if (error) throw new Error(`Failed to create source document: ${error.message}`);
     return created;
+  }
+
+  async updateSourceDocument(
+    userId: string,
+    id: string,
+    data: Partial<SourceDocument>
+  ): Promise<SourceDocument> {
+    const supabase = await this.getClient();
+    const { data: updated, error } = await supabase
+      .from("source_documents")
+      .update(data)
+      .eq("user_id", userId)
+      .eq("id", id)
+      .select()
+      .single();
+
+    if (error) throw new Error(`Failed to update source document: ${error.message}`);
+    return updated;
   }
 
   // ============================================================================
@@ -2113,6 +2146,7 @@ export class SupabaseDataStoreImpl implements IDataStore {
       user_id: userId,
       source_document_id: item.source_document_id,
       connection_id: item.connection_id,
+      batch_id: item.batch_id,
       item_type: item.item_type,
       status: item.status || "pending",
       raw_data: item.raw_data,

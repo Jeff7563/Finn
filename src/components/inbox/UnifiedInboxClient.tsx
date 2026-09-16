@@ -1,6 +1,7 @@
 "use client";
 
-import React, { useState, useTransition } from "react";
+import React, { useState, useEffect, useTransition } from "react";
+import { useRouter } from "next/navigation";
 import {
   IngestionItem,
   SourceDocument,
@@ -22,14 +23,18 @@ import {
   EyeOff,
   ChevronDown,
   ChevronUp,
+  Upload,
 } from "lucide-react";
 import {
   linkIngestionItemAction,
   createTransactionFromItemAction,
   dismissIngestionItemAction,
   rejectIngestionItemAction,
+  ImportStatementCsvResult,
 } from "@/app/actions/inbox";
+import { formatBangkokDateTime, formatBangkokDate } from "@/lib/finance/formatters";
 import { getStorageUsageSummary } from "@/lib/storage/retention";
+import { CsvImportModal } from "./CsvImportModal";
 
 export interface UnifiedInboxClientProps {
   userId?: string;
@@ -64,6 +69,7 @@ export function UnifiedInboxClient({
   legacySlipStorageBytes = 0,
   legacySlipStorageCount = 0,
 }: UnifiedInboxClientProps) {
+  const router = useRouter();
   const [items, setItems] = useState<IngestionItem[]>(initialItems);
   const [selectedSourceFilter, setSelectedSourceFilter] = useState<string>("all");
   const [selectedStatusFilter, setSelectedStatusFilter] = useState<string>("pending");
@@ -71,15 +77,132 @@ export function UnifiedInboxClient({
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
   const [reviewedItemId, setReviewedItemId] = useState<string | null>(null);
   const [showStorageSummary, setShowStorageSummary] = useState<boolean>(true);
+  const [isImportModalOpen, setIsImportModalOpen] = useState<boolean>(false);
   const [selectedAccountId, setSelectedAccountId] = useState<string>(accounts[0]?.id || "");
   const [selectedToAccountId, setSelectedToAccountId] = useState<string>(
     accounts.length > 1 ? accounts[1].id : accounts[0]?.id || ""
   );
   const [selectedCategoryId, setSelectedCategoryId] = useState<string>("");
   const [actionMessage, setActionMessage] = useState<{ text: string; isError: boolean } | null>(null);
+  const [reviewFormMap, setReviewFormMap] = useState<
+    Record<
+      string,
+      {
+        type: "expense" | "income" | "transfer";
+        fromAccountId: string;
+        toAccountId: string;
+        categoryId: string;
+        confirmMismatch: boolean;
+      }
+    >
+  >({});
+
+  useEffect(() => {
+    setItems(initialItems);
+  }, [initialItems]);
+
+  const handleImportSuccess = (result: ImportStatementCsvResult) => {
+    setSelectedSourceFilter("statement");
+    setSelectedStatusFilter("pending");
+    router.refresh();
+    setActionMessage({
+      text: result.message || "นำเข้า Statement สำเร็จ",
+      isError: false,
+    });
+  };
 
   const docMap = new Map(sourceDocuments.map((d) => [d.id, d]));
   const storageSummary = getStorageUsageSummary(sourceDocuments, items);
+
+function getStatementAccountId(
+  doc?: SourceDocument,
+  item?: IngestionItem
+): string {
+  if (
+    doc?.provider_metadata?.statementAccountId &&
+    typeof doc.provider_metadata.statementAccountId === "string"
+  ) {
+    return doc.provider_metadata.statementAccountId;
+  }
+  const rawMetadata = item?.raw_data as Record<string, unknown> | null | undefined;
+  if (rawMetadata?.statementAccountId && typeof rawMetadata.statementAccountId === "string") {
+    return rawMetadata.statementAccountId;
+  }
+  return "";
+}
+
+  const getReviewForm = (item: IngestionItem) => {
+    const existing = reviewFormMap[item.id];
+    if (existing) return existing;
+
+    const doc = docMap.get(item.source_document_id);
+    const stmtAccountId = getStatementAccountId(doc, item);
+
+    const parsed = item.parsed_data;
+    const isOriginallyIncoming =
+      parsed?.direction === "incoming" || parsed?.transaction_type === "income";
+    const isOriginallyTransfer = parsed?.transaction_type === "transfer";
+    const type: "expense" | "income" | "transfer" = isOriginallyTransfer
+      ? "transfer"
+      : isOriginallyIncoming
+      ? "income"
+      : "expense";
+
+    let fromAccountId = "";
+    let toAccountId = "";
+
+    if (type === "transfer") {
+      if (isOriginallyIncoming) {
+        toAccountId = stmtAccountId || "";
+        fromAccountId = "";
+      } else {
+        fromAccountId = stmtAccountId || "";
+        toAccountId = "";
+      }
+    } else if (type === "expense") {
+      fromAccountId = stmtAccountId || accounts[0]?.id || "";
+    } else if (type === "income") {
+      toAccountId = stmtAccountId || accounts[0]?.id || "";
+    }
+
+    return {
+      type,
+      fromAccountId,
+      toAccountId,
+      categoryId: "",
+      confirmMismatch: false,
+    };
+  };
+
+  const updateReviewForm = (
+    itemId: string,
+    patch: Partial<{
+      type: "expense" | "income" | "transfer";
+      fromAccountId: string;
+      toAccountId: string;
+      categoryId: string;
+      confirmMismatch: boolean;
+    }>
+  ) => {
+    setReviewFormMap((prev) => {
+      const item = items.find((i) => i.id === itemId);
+      const current =
+        prev[itemId] ||
+        (item
+          ? getReviewForm(item)
+          : {
+              type: "expense",
+              fromAccountId: "",
+              toAccountId: "",
+              categoryId: "",
+              confirmMismatch: false,
+            });
+      return {
+        ...prev,
+        [itemId]: { ...current, ...patch },
+      };
+    });
+  };
 
   const filteredItems = items.filter((item) => {
     if (selectedStatusFilter !== "all" && item.status !== selectedStatusFilter) {
@@ -117,31 +240,73 @@ export function UnifiedInboxClient({
 
   const handleCreate = (itemId: string) => {
     const item = items.find((i) => i.id === itemId);
-    const parsed = item?.parsed_data;
-    const isTransfer = parsed?.transaction_type === "transfer";
+    if (!item) return;
 
-    if (!selectedAccountId) {
-      setActionMessage({ text: "Please select an account first", isError: true });
+    if (item.match_class === "exact_duplicate") {
+      setActionMessage({
+        text: "ไม่อนุญาตให้สร้างรายการจากหลักฐานที่ซ้ำแน่นอน (Exact Duplicate) เพื่อความปลอดภัยทางบัญชี",
+        isError: true,
+      });
       return;
     }
 
-    if (isTransfer) {
-      if (!selectedToAccountId) {
-        setActionMessage({ text: "Please select a destination account for transfer", isError: true });
+    const form = getReviewForm(item);
+    const doc = docMap.get(item.source_document_id);
+    const stmtAccountId = getStatementAccountId(doc, item);
+
+    if (form.type === "transfer") {
+      if (!form.fromAccountId || !form.toAccountId) {
+        setReviewedItemId(item.id);
+        setActionMessage({
+          text: "การโอนเงินต้องระบุทั้งบัญชีต้นทางและบัญชีปลายทาง กรุณาเลือกบัญชีในส่วนตรวจสอบ",
+          isError: true,
+        });
         return;
       }
-      if (selectedAccountId === selectedToAccountId) {
-        setActionMessage({ text: "Source and destination accounts must be distinct for transfer", isError: true });
+      if (form.fromAccountId === form.toAccountId) {
+        setReviewedItemId(item.id);
+        setActionMessage({
+          text: "บัญชีต้นทางและปลายทางต้องไม่เป็นบัญชีเดียวกันสำหรับการโอนเงิน",
+          isError: true,
+        });
+        return;
+      }
+    } else if (form.type === "expense") {
+      if (!form.fromAccountId) {
+        setActionMessage({ text: "กรุณาเลือกบัญชีสำหรับรายจ่าย", isError: true });
+        return;
+      }
+      if (stmtAccountId && form.fromAccountId !== stmtAccountId && !form.confirmMismatch) {
+        setReviewedItemId(item.id);
+        setActionMessage({
+          text: "บัญชีที่เลือกไม่ตรงกับ Statement Account กรุณายืนยันความต้องการในส่วนตรวจสอบ",
+          isError: true,
+        });
+        return;
+      }
+    } else if (form.type === "income") {
+      if (!form.toAccountId) {
+        setActionMessage({ text: "กรุณาเลือกบัญชีสำหรับรายรับ", isError: true });
+        return;
+      }
+      if (stmtAccountId && form.toAccountId !== stmtAccountId && !form.confirmMismatch) {
+        setReviewedItemId(item.id);
+        setActionMessage({
+          text: "บัญชีที่เลือกไม่ตรงกับ Statement Account กรุณายืนยันความต้องการในส่วนตรวจสอบ",
+          isError: true,
+        });
         return;
       }
     }
 
     startTransition(async () => {
       const res = await createTransactionFromItemAction(itemId, {
-        accountId: selectedAccountId,
-        fromAccountId: isTransfer ? selectedAccountId : undefined,
-        toAccountId: isTransfer ? selectedToAccountId : undefined,
-        categoryId: selectedCategoryId || null,
+        type: form.type,
+        accountId: form.type === "expense" ? form.fromAccountId : form.toAccountId,
+        fromAccountId: form.fromAccountId || undefined,
+        toAccountId: form.toAccountId || undefined,
+        categoryId: form.categoryId || null,
+        confirmAccountMismatch: form.confirmMismatch,
       });
       if (res.success && res.transaction) {
         setItems((prev) =>
@@ -151,10 +316,12 @@ export function UnifiedInboxClient({
               : i
           )
         );
+        setReviewedItemId(null);
         setActionMessage({
-          text: isTransfer
-            ? `Created transfer transaction for ${(res.transaction.amount || 0).toFixed(2)} THB`
-            : `Created transaction for ${(res.transaction.amount || 0).toFixed(2)} THB`,
+          text:
+            form.type === "transfer"
+              ? `สร้างรายการโอนเงินสำเร็จ ${(res.transaction.amount || 0).toFixed(2)} THB`
+              : `สร้างรายการสำเร็จ ${(res.transaction.amount || 0).toFixed(2)} THB`,
           isError: false,
         });
       } else {
@@ -219,7 +386,7 @@ export function UnifiedInboxClient({
       case "possible_match":
         return (
           <span className="px-2 py-0.5 rounded text-xs font-medium bg-amber-100 text-amber-700 dark:bg-amber-950/40 dark:text-amber-400">
-            อาจจะตรงกัน (Possible Match)
+            อาจจะตรงกัน (Possible Match — ต้องให้ผู้ใช้ตรวจสอบ)
           </span>
         );
       default:
@@ -244,10 +411,21 @@ export function UnifiedInboxClient({
           </p>
         </div>
 
-        {/* Safety Badge */}
-        <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-surface border border-border text-xs text-text-secondary self-start">
-          <ShieldCheck className="w-4 h-4 text-emerald-500" />
-          <span>ระบบป้องกันการรวมรายการผิดพลาด (Financial Safety Active)</span>
+        <div className="flex flex-wrap items-center gap-3 self-start sm:self-auto">
+          {/* CSV Import Button */}
+          <button
+            onClick={() => setIsImportModalOpen(true)}
+            className="flex items-center gap-2 px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold shadow-sm transition-colors"
+          >
+            <Upload className="w-4 h-4" />
+            <span>นำเข้า Statement CSV</span>
+          </button>
+
+          {/* Safety Badge */}
+          <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-surface border border-border text-xs text-text-secondary">
+            <ShieldCheck className="w-4 h-4 text-emerald-500" />
+            <span>ระบบป้องกันการรวมรายการผิดพลาด (Financial Safety Active)</span>
+          </div>
         </div>
       </div>
 
@@ -464,10 +642,41 @@ export function UnifiedInboxClient({
           filteredItems.map((item) => {
             const parsed = item.parsed_data;
             const amountThb = parsed?.amount_decimal || (parsed?.amount ? parsed.amount / 100 : 0);
-            const isTransfer = parsed?.transaction_type === "transfer";
-            const isIncoming = !isTransfer && (parsed?.direction === "incoming" || parsed?.transaction_type === "income");
             const doc = docMap.get(item.source_document_id);
             const isReviewOpen = reviewedItemId === item.id;
+            const form = getReviewForm(item);
+
+            const stmtAccountId = getStatementAccountId(doc, item);
+            const stmtAccount = accounts.find((a) => a.id === stmtAccountId);
+
+            const isTransfer = form.type === "transfer";
+            const isIncoming = form.type === "income";
+
+            // Check if there is an account mismatch that requires confirmation
+            const isOriginallyIncoming =
+              parsed?.direction === "incoming" || parsed?.transaction_type === "income";
+            let hasMismatch = false;
+            let mismatchMessage = "";
+
+            if (stmtAccountId) {
+              if (form.type === "expense" && form.fromAccountId && form.fromAccountId !== stmtAccountId) {
+                hasMismatch = true;
+                mismatchMessage = `บัญชีต้นทาง (${accounts.find((a) => a.id === form.fromAccountId)?.name || form.fromAccountId}) ไม่ตรงกับบัญชี Statement (${stmtAccount?.name || stmtAccountId})`;
+              } else if (form.type === "income" && form.toAccountId && form.toAccountId !== stmtAccountId) {
+                hasMismatch = true;
+                mismatchMessage = `บัญชีปลายทาง (${accounts.find((a) => a.id === form.toAccountId)?.name || form.toAccountId}) ไม่ตรงกับบัญชี Statement (${stmtAccount?.name || stmtAccountId})`;
+              } else if (form.type === "transfer") {
+                if (isOriginallyIncoming && form.toAccountId && form.toAccountId !== stmtAccountId) {
+                  hasMismatch = true;
+                  mismatchMessage = `รายการรับโอนเงินควรมีบัญชีปลายทางเป็นบัญชี Statement (${stmtAccount?.name || stmtAccountId})`;
+                } else if (!isOriginallyIncoming && form.fromAccountId && form.fromAccountId !== stmtAccountId) {
+                  hasMismatch = true;
+                  mismatchMessage = `รายการโอนออกควรมีบัญชีต้นทางเป็นบัญชี Statement (${stmtAccount?.name || stmtAccountId})`;
+                }
+              }
+            }
+
+            const isDuplicate = item.match_class === "exact_duplicate";
 
             return (
               <div
@@ -491,12 +700,13 @@ export function UnifiedInboxClient({
                         )}
                         {getMatchBadge(item.match_class)}
                       </div>
-                      <div className="flex items-center gap-3 text-xs text-text-secondary mt-0.5">
-                        <span>
-                          {parsed?.occurred_at
-                            ? new Date(parsed.occurred_at).toLocaleString("th-TH")
-                            : "ไม่ระบุเวลา"}
-                        </span>
+                      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-text-secondary mt-0.5">
+                        <span>{formatBangkokDateTime(parsed?.occurred_at)}</span>
+                        {stmtAccount && (
+                          <span className="text-emerald-700 dark:text-emerald-400 font-medium">
+                            Statement account: {stmtAccount.name}
+                          </span>
+                        )}
                         {parsed?.account_number && (
                           <span>บัญชี: {parsed.account_number}</span>
                         )}
@@ -535,25 +745,80 @@ export function UnifiedInboxClient({
                   </div>
                 </div>
 
-                {/* Inline Detailed Review Inspector */}
+                {/* Parse Error Banner if Malformed Row */}
+                {parsed?.parse_error && (
+                  <div className="flex items-center gap-2 p-2.5 rounded-lg bg-amber-500/10 border border-amber-500/20 text-xs text-amber-700 dark:text-amber-300">
+                    <AlertTriangle className="w-4 h-4 shrink-0 text-amber-600" />
+                    <span>
+                      <strong className="font-semibold">ข้อผิดพลาดในการแยกข้อมูล (Parse Error):</strong> {parsed.parse_error}
+                    </span>
+                  </div>
+                )}
+
+                {/* Strong Match Suggested Transaction Banner */}
+                {item.match_class === "strong_match" && item.status === "pending" && item.matched_transaction_id && (() => {
+                  const suggestedTx = existingTransactions.find((t) => t.id === item.matched_transaction_id);
+                  return (
+                    <div className="p-3 bg-emerald-500/10 border border-emerald-500/20 rounded-lg flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs text-emerald-800 dark:text-emerald-300">
+                      <div className="flex items-center gap-2">
+                        <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                        <div>
+                          <span className="font-semibold">พบรายการตรงกันในระบบ (Suggested Match): </span>
+                          {suggestedTx ? (
+                            <span>
+                              {formatBangkokDate(suggestedTx.transaction_date)} — {suggestedTx.description} ({(suggestedTx.amount || 0).toLocaleString()} THB)
+                            </span>
+                          ) : (
+                            <span>รหัสรายการ: {item.matched_transaction_id}</span>
+                          )}
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => handleLink(item.id, item.matched_transaction_id!)}
+                        disabled={isPending}
+                        className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-semibold text-xs transition-colors shrink-0 flex items-center gap-1 self-start sm:self-auto"
+                      >
+                        <LinkIcon className="w-3.5 h-3.5" />
+                        <span>เชื่อมโยงทันที (Link)</span>
+                      </button>
+                    </div>
+                  );
+                })()}
+
+                {/* Possible Match Human Review Notice */}
+                {item.match_class === "possible_match" && item.status === "pending" && (
+                  <div className="p-2.5 bg-amber-500/10 border border-amber-500/20 rounded-lg text-xs text-amber-700 dark:text-amber-300 flex items-center gap-2">
+                    <AlertTriangle className="w-3.5 h-3.5 shrink-0 text-amber-600" />
+                    <span>
+                      สัญญาณความตรงกันไม่สมบูรณ์ — <strong>ต้องให้ผู้ใช้ตรวจสอบและตัดสินใจด้วยตนเอง (Human confirmation required)</strong>
+                    </span>
+                  </div>
+                )}
+
+                {/* Inline Detailed Review & Creation Inspector */}
                 {isReviewOpen && (
-                  <div className="p-3.5 bg-surface-soft rounded-lg border border-border/80 space-y-2 text-xs">
-                    <div className="font-semibold text-text-primary flex items-center justify-between">
-                      <span>รายละเอียดการตรวจสอบ (Item Review & Metadata):</span>
+                  <div className="p-4 bg-surface-soft rounded-xl border border-border/80 space-y-4 text-xs">
+                    <div className="font-semibold text-text-primary flex items-center justify-between border-b border-border/50 pb-2">
+                      <div className="flex items-center gap-2">
+                        <span>รายละเอียดการตรวจสอบ (Item Review & Type Override):</span>
+                        {stmtAccount && (
+                          <span className="px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 font-medium">
+                            Statement account: {stmtAccount.name}
+                          </span>
+                        )}
+                      </div>
                       <span className="text-[11px] text-text-muted font-mono">ID: {item.id}</span>
                     </div>
-                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-1 text-[11px]">
+
+                    {/* Metadata summary */}
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-[11px] bg-surface p-3 rounded-lg border border-border/50">
                       <div>
-                        <span className="text-text-muted block">ประเภทรายการ:</span>
+                        <span className="text-text-muted block">ประเภทข้อมูลนำเข้า:</span>
                         <span className="font-medium text-text-primary">{item.item_type}</span>
                       </div>
                       <div>
-                        <span className="text-text-muted block">ระดับความมั่นใจ:</span>
-                        <span className="font-medium text-text-primary">
-                          {item.confidence_score !== null && item.confidence_score !== undefined
-                            ? `${(item.confidence_score * 100).toFixed(0)}%`
-                            : "N/A"}
-                        </span>
+                        <span className="text-text-muted block">เวลาที่เกิดรายการ:</span>
+                        <span className="font-medium text-text-primary">{formatBangkokDateTime(parsed?.occurred_at)}</span>
                       </div>
                       <div>
                         <span className="text-text-muted block">รหัสอ้างอิง:</span>
@@ -564,20 +829,191 @@ export function UnifiedInboxClient({
                         <span className="font-medium text-text-primary">{parsed?.bank_code || "ไม่ระบุ"}</span>
                       </div>
                     </div>
-                    {item.fingerprint && (
-                      <div className="pt-1 text-[11px]">
-                        <span className="text-text-muted block">Fingerprint:</span>
-                        <span className="font-mono text-text-secondary break-all">{item.fingerprint}</span>
+
+                    {/* Type Override Selector */}
+                    <div className="space-y-1.5">
+                      <label className="font-semibold text-text-primary block">
+                        กำหนดประเภทรายการก่อนบันทึก (Override Transaction Type):
+                      </label>
+                      <div className="flex flex-wrap gap-2">
+                        {[
+                          { id: "expense", label: "รายจ่าย (Expense)" },
+                          { id: "income", label: "รายรับ (Income)" },
+                          { id: "transfer", label: "โอนเงินระหว่างบัญชีตนเอง (Transfer)" },
+                        ].map((t) => (
+                          <button
+                            key={t.id}
+                            type="button"
+                            onClick={() => {
+                              const newType = t.id as "expense" | "income" | "transfer";
+                              let newFrom = form.fromAccountId;
+                              let newTo = form.toAccountId;
+                              if (newType === "transfer") {
+                                if (isOriginallyIncoming) {
+                                  newTo = stmtAccountId || "";
+                                  newFrom = "";
+                                } else {
+                                  newFrom = stmtAccountId || "";
+                                  newTo = "";
+                                }
+                              } else if (newType === "expense") {
+                                newFrom = stmtAccountId || accounts[0]?.id || "";
+                                newTo = "";
+                              } else if (newType === "income") {
+                                newTo = stmtAccountId || accounts[0]?.id || "";
+                                newFrom = "";
+                              }
+                              updateReviewForm(item.id, {
+                                type: newType,
+                                fromAccountId: newFrom,
+                                toAccountId: newTo,
+                              });
+                            }}
+                            className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors ${
+                              form.type === t.id
+                                ? "bg-primary text-primary-foreground shadow-sm"
+                                : "bg-surface border border-border text-text-secondary hover:text-text-primary"
+                            }`}
+                          >
+                            {t.label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Account Controls based on chosen type */}
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+                      {(form.type === "expense" || form.type === "transfer") && (
+                        <div className="space-y-1">
+                          <label className="text-xs font-medium text-text-secondary block">
+                            บัญชีต้นทาง (From Account):
+                          </label>
+                          <select
+                            value={form.fromAccountId}
+                            onChange={(e) => updateReviewForm(item.id, { fromAccountId: e.target.value })}
+                            className="w-full bg-surface border border-border rounded-lg px-2.5 py-1.5 text-xs text-text-primary focus:ring-1 focus:ring-primary focus:outline-none"
+                          >
+                            <option value="">-- เลือกบัญชีต้นทาง --</option>
+                            {accounts.map((acc) => (
+                              <option key={acc.id} value={acc.id}>
+                                {acc.name} ({acc.institution || "บัญชี"}) {acc.id === stmtAccountId ? "★ [Statement Account]" : ""}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                      )}
+
+                      {(form.type === "income" || form.type === "transfer") && (
+                        <div className="space-y-1">
+                          <label className="text-xs font-medium text-text-secondary block">
+                            บัญชีปลายทาง (To Account):
+                          </label>
+                          <select
+                            value={form.toAccountId}
+                            onChange={(e) => updateReviewForm(item.id, { toAccountId: e.target.value })}
+                            className="w-full bg-surface border border-border rounded-lg px-2.5 py-1.5 text-xs text-text-primary focus:ring-1 focus:ring-primary focus:outline-none"
+                          >
+                            <option value="">-- เลือกบัญชีปลายทาง --</option>
+                            {accounts.map((acc) => (
+                              <option key={acc.id} value={acc.id}>
+                                {acc.name} ({acc.institution || "บัญชี"}) {acc.id === stmtAccountId ? "★ [Statement Account]" : ""}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Transfer Distinct Check */}
+                    {form.type === "transfer" && form.fromAccountId && form.toAccountId && form.fromAccountId === form.toAccountId && (
+                      <div className="p-2.5 rounded-lg bg-red-500/10 border border-red-500/20 text-red-600 text-xs flex items-center gap-1.5">
+                        <AlertTriangle className="w-4 h-4 shrink-0" />
+                        <span>บัญชีต้นทางและบัญชีปลายทางต้องไม่เป็นบัญชีเดียวกันสำหรับการโอนเงิน (Accounts must be distinct)</span>
                       </div>
                     )}
-                    {item.raw_data && (
-                      <div className="pt-1 text-[11px]">
-                        <span className="text-text-muted block">ข้อมูลดิบ (Raw Data):</span>
-                        <pre className="p-2 bg-surface rounded border border-border/60 text-[10px] overflow-x-auto text-text-secondary">
-                          {JSON.stringify(item.raw_data, null, 2)}
-                        </pre>
+
+                    {/* Mismatch Warning & Confirmation Checkbox */}
+                    {hasMismatch && (
+                      <div className="p-3 bg-amber-500/10 border border-amber-500/20 rounded-lg space-y-2 text-xs text-amber-800 dark:text-amber-300">
+                        <div className="flex items-center gap-2">
+                          <AlertTriangle className="w-4 h-4 shrink-0 text-amber-600" />
+                          <span>
+                            <strong>คำเตือนเรื่องบัญชี (Account Mismatch Warning):</strong> {mismatchMessage}
+                          </span>
+                        </div>
+                        <label className="flex items-center gap-2 cursor-pointer pt-1">
+                          <input
+                            type="checkbox"
+                            checked={form.confirmMismatch}
+                            onChange={(e) => updateReviewForm(item.id, { confirmMismatch: e.target.checked })}
+                            className="rounded border-border text-primary focus:ring-primary h-4 w-4"
+                          />
+                          <span className="font-semibold text-text-primary">
+                            ยืนยันการใช้บัญชีที่ไม่ตรงกับ Statement (Confirm deliberate account mismatch)
+                          </span>
+                        </label>
                       </div>
                     )}
+
+                    {/* Category Selection (Non-transfer only) */}
+                    {form.type !== "transfer" && categories.length > 0 && (
+                      <div className="space-y-1">
+                        <label className="text-xs font-medium text-text-secondary block">
+                          หมวดหมู่ (ไม่บังคับ):
+                        </label>
+                        <select
+                          value={form.categoryId}
+                          onChange={(e) => updateReviewForm(item.id, { categoryId: e.target.value })}
+                          className="bg-surface border border-border rounded-lg px-2.5 py-1.5 text-xs text-text-primary focus:ring-1 focus:ring-primary focus:outline-none max-w-xs"
+                        >
+                          <option value="">ไม่ระบุหมวดหมู่</option>
+                          {categories.map((cat) => (
+                            <option key={cat.id} value={cat.id}>
+                              {cat.name}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    )}
+
+                    {/* Duplicate Safety Warning or Create Button in Review Form */}
+                    <div className="pt-2 border-t border-border/50 flex flex-wrap items-center justify-between gap-2">
+                      <div className="text-xs text-text-muted">
+                        * ข้อมูลหลักฐานดิบ (Raw Evidence) จะถูกเก็บรักษาไว้โดยไม่มีการแก้ไขดัดแปลง
+                      </div>
+
+                      <div className="flex items-center gap-2">
+                        {isDuplicate ? (
+                          <span className="px-3 py-1.5 bg-red-500/10 border border-red-500/20 text-red-600 rounded-lg text-xs font-semibold">
+                            ⚠️ ห้ามสร้างรายการ: รายการซ้ำแน่นอน (Exact Duplicate Blocked)
+                          </span>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => handleCreate(item.id)}
+                            disabled={
+                              isPending ||
+                              (form.type === "transfer" &&
+                                (!form.fromAccountId ||
+                                  !form.toAccountId ||
+                                  form.fromAccountId === form.toAccountId)) ||
+                              (hasMismatch && !form.confirmMismatch)
+                            }
+                            className="px-4 py-2 bg-primary hover:bg-primary-hover disabled:opacity-50 text-primary-foreground font-semibold rounded-lg text-xs shadow-sm transition-colors flex items-center gap-1.5"
+                          >
+                            <Plus className="w-3.5 h-3.5" />
+                            <span>ยืนยันสร้างรายการ ({form.type === "transfer" ? "โอนเงิน" : form.type === "income" ? "รายรับ" : "รายจ่าย"})</span>
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => setReviewedItemId(null)}
+                          className="px-3 py-2 bg-surface border border-border hover:bg-surface-soft text-text-secondary text-xs rounded-lg transition-colors"
+                        >
+                          ปิด
+                        </button>
+                      </div>
+                    </div>
                   </div>
                 )}
 
@@ -592,7 +1028,7 @@ export function UnifiedInboxClient({
                     >
                       {existingTransactions.map((tx) => (
                         <option key={tx.id} value={tx.id}>
-                          {new Date(tx.transaction_date).toLocaleDateString("th-TH")} - {tx.description} ({(tx.amount || 0).toLocaleString()} THB)
+                          {formatBangkokDate(tx.transaction_date)} - {tx.description} ({(tx.amount || 0).toLocaleString()} THB)
                         </option>
                       ))}
                     </select>
@@ -637,7 +1073,7 @@ export function UnifiedInboxClient({
                   </div>
 
                   <div className="flex items-center gap-1.5 flex-wrap">
-                    {/* Action 1: Review Button (inspect item details) */}
+                    {/* Action 1: Review Button (inspect & configure item details) */}
                     <button
                       onClick={() => setReviewedItemId(isReviewOpen ? null : item.id)}
                       className="px-2.5 py-1.5 rounded-lg bg-surface-soft hover:bg-surface-soft/80 text-text-secondary text-xs font-medium transition-colors flex items-center gap-1"
@@ -648,16 +1084,6 @@ export function UnifiedInboxClient({
 
                     {item.status === "pending" && (
                       <>
-                        {isTransfer && (
-                          <span className="text-[11px] text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-950/40 px-2 py-1 rounded border border-blue-200 dark:border-blue-800">
-                            โอน: {accounts.find((a) => a.id === selectedAccountId)?.name || "ต้นทาง"} →{" "}
-                            {accounts.find((a) => a.id === selectedToAccountId)?.name || "ปลายทาง"}
-                            {selectedAccountId === selectedToAccountId && (
-                              <span className="text-red-500 ml-1 font-bold">⚠️ บัญชีต้องต่างกัน</span>
-                            )}
-                          </span>
-                        )}
-
                         {/* Action 2: Link to Existing Transaction Button */}
                         {existingTransactions.length > 0 && (
                           <button
@@ -670,15 +1096,36 @@ export function UnifiedInboxClient({
                           </button>
                         )}
 
-                        {/* Action 3: Create Transaction Button */}
-                        <button
-                          onClick={() => handleCreate(item.id)}
-                          disabled={isPending}
-                          className="px-3 py-1.5 rounded-lg bg-primary text-primary-foreground text-xs font-semibold hover:bg-primary-hover transition-colors flex items-center gap-1.5"
-                        >
-                          <Plus className="w-3.5 h-3.5" />
-                          {isTransfer ? "สร้างรายการโอน" : "สร้างรายการใหม่"}
-                        </button>
+                        {/* Action 3: Create Transaction Button (BLOCKED FOR EXACT DUPLICATES) */}
+                        {!isDuplicate && (() => {
+                          const form = getReviewForm(item);
+                          const isTransferIncomplete =
+                            form.type === "transfer" &&
+                            (!form.fromAccountId ||
+                              !form.toAccountId ||
+                              form.fromAccountId === form.toAccountId);
+                          return (
+                            <button
+                              onClick={() => {
+                                if (isTransferIncomplete) {
+                                  setReviewedItemId(item.id);
+                                } else {
+                                  handleCreate(item.id);
+                                }
+                              }}
+                              disabled={isPending || isTransferIncomplete}
+                              title={
+                                isTransferIncomplete
+                                  ? "การโอนเงินต้องระบุทั้งบัญชีต้นทางและปลายทาง กรุณาเลือกบัญชีในส่วนตรวจสอบ"
+                                  : undefined
+                              }
+                              className="px-3 py-1.5 rounded-lg bg-primary text-primary-foreground text-xs font-semibold hover:bg-primary-hover disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-1.5"
+                            >
+                              <Plus className="w-3.5 h-3.5" />
+                              {form.type === "transfer" ? "สร้างรายการโอน" : "สร้างรายการใหม่"}
+                            </button>
+                          );
+                        })()}
 
                         {/* Action 4: Ignore (Dismiss) Button */}
                         <button
@@ -704,8 +1151,17 @@ export function UnifiedInboxClient({
               </div>
             );
           })
+
         )}
       </div>
+
+      {/* CSV Import Modal */}
+      <CsvImportModal
+        isOpen={isImportModalOpen}
+        onClose={() => setIsImportModalOpen(false)}
+        accounts={accounts}
+        onSuccess={handleImportSuccess}
+      />
     </div>
   );
 }

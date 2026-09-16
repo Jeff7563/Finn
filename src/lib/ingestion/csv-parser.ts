@@ -18,6 +18,10 @@ export interface ParseCsvOptions {
   connectionId?: string | null;
   filename?: string;
   bankHint?: "KBANK" | "SCB" | "BBL" | "BAY" | "KKP" | "GENERIC";
+  fileHash?: string;
+  fileSize?: number;
+  defaultInstitution?: string | null;
+  defaultMaskedNumber?: string | null;
 }
 
 /**
@@ -73,9 +77,20 @@ export function parseBankStatementCsv(
   csvContent: string,
   options: ParseCsvOptions
 ): ParsedStatementResult {
-  const { userId, sourceDocumentId = "temp-doc-id", connectionId = null, filename = "statement.csv", bankHint = "GENERIC" } = options;
+  const {
+    userId,
+    sourceDocumentId = "temp-doc-id",
+    connectionId = null,
+    filename = "statement.csv",
+    bankHint = "GENERIC",
+    fileHash: providedFileHash,
+    fileSize: providedFileSize,
+    defaultInstitution = null,
+    defaultMaskedNumber = null,
+  } = options;
 
-  const fileHash = computeSha256(csvContent);
+  const fileHash = providedFileHash || computeSha256(csvContent);
+  const fileSize = providedFileSize !== undefined ? providedFileSize : Buffer.byteLength(csvContent, "utf8");
   const lines = csvContent
     .split(/\r?\n/)
     .map((l) => l.trim())
@@ -90,7 +105,7 @@ export function parseBankStatementCsv(
         document_type: "csv_statement",
         original_filename: filename,
         file_hash: fileHash,
-        file_size: Buffer.byteLength(csvContent, "utf8"),
+        file_size: fileSize,
         status: "processed",
         provider_metadata: { bankHint, rowCount: 0 },
       },
@@ -189,14 +204,17 @@ export function parseBankStatementCsv(
       }
       const parseError = parseErrors.join("; ");
 
+      const effectiveBankCode = bankHint !== "GENERIC" ? bankHint : (defaultInstitution || null);
+      const effectiveAccountNumber = accountStr || defaultMaskedNumber || null;
+
       const parsedData: IngestionParsedData = {
         amount: finalSatang ?? 0,
         amount_decimal: finalSatang !== null ? Number((finalSatang / 100).toFixed(2)) : 0,
         currency: "THB",
         description: description || null,
         occurred_at: occurredAtIso,
-        account_number: accountStr,
-        bank_code: bankHint !== "GENERIC" ? bankHint : null,
+        account_number: effectiveAccountNumber,
+        bank_code: effectiveBankCode,
         transaction_type: txType,
         direction,
         reference_number: ref || null,
@@ -204,7 +222,7 @@ export function parseBankStatementCsv(
         raw_metadata: { rowNumber: i + 1, rawRow: row },
       };
 
-      const rawSeed = `${finalSatang || 0}|${rawCombined || "no_date"}|${accountStr || "no_acc"}|${direction}|row-${i + 1}`;
+      const rawSeed = `${finalSatang || 0}|${rawCombined || "no_date"}|${effectiveAccountNumber || "no_acc"}|${direction}|row-${i + 1}`;
       const fingerprint = computeSha256(rawSeed).slice(0, 32);
 
       items.push({
@@ -226,14 +244,17 @@ export function parseBankStatementCsv(
     }
 
     const validSatang = finalSatang as number;
+    const effectiveBankCode = bankHint !== "GENERIC" ? bankHint : (defaultInstitution || null);
+    const effectiveAccountNumber = accountStr || defaultMaskedNumber || null;
+
     const parsedData: IngestionParsedData = {
       amount: validSatang,
       amount_decimal: Number((validSatang / 100).toFixed(2)),
       currency: "THB",
       description: description || null,
       occurred_at: occurredAtIso,
-      account_number: accountStr,
-      bank_code: bankHint !== "GENERIC" ? bankHint : null,
+      account_number: effectiveAccountNumber,
+      bank_code: effectiveBankCode,
       transaction_type: txType,
       direction,
       reference_number: ref || null,
@@ -267,7 +288,7 @@ export function parseBankStatementCsv(
       document_type: "csv_statement",
       original_filename: filename,
       file_hash: fileHash,
-      file_size: Buffer.byteLength(csvContent, "utf8"),
+      file_size: fileSize,
       status: "processed",
       provider_metadata: { bankHint, rowCount: items.length },
     },

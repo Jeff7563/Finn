@@ -405,11 +405,23 @@ export const DataStore: IDataStore = {
     return getActiveStore().getSourceDocumentById(userId, id);
   },
 
+  async getSourceDocumentByHash(userId: string, hash: string): Promise<SourceDocument | null> {
+    return getActiveStore().getSourceDocumentByHash(userId, hash);
+  },
+
   async createSourceDocument(
     userId: string,
     data: Partial<SourceDocument>
   ): Promise<SourceDocument> {
     return getActiveStore().createSourceDocument(userId, data);
+  },
+
+  async updateSourceDocument(
+    userId: string,
+    id: string,
+    data: Partial<SourceDocument>
+  ): Promise<SourceDocument> {
+    return getActiveStore().updateSourceDocument(userId, id, data);
   },
 
   // Import Batches
