@@ -16,6 +16,30 @@ export function computeSha256(content: string | Buffer): string {
 }
 
 /**
+ * Generates a deterministic RFC 4122 v5 UUID for a source document based on:
+ * userId + documentType + fileHash.
+ *
+ * Ensures concurrent requests for the exact same file produce the exact same primary key ID,
+ * allowing database unique constraints to safely reject race conditions without schema migration.
+ */
+export function generateDeterministicDocId(
+  userId: string,
+  documentType: string,
+  fileHash: string
+): string {
+  const seed = `${userId}:${documentType}:${fileHash}`;
+  const hash = createHash("sha1").update(seed).digest("hex");
+  // Form standard UUID format 8-4-4-4-12 with version 5 and variant RFC 4122
+  const p1 = hash.slice(0, 8);
+  const p2 = hash.slice(8, 12);
+  const p3 = "5" + hash.slice(13, 16); // Version 5
+  const hexVariant = (parseInt(hash.slice(16, 18), 16) & 0x3f) | 0x80;
+  const p4 = hexVariant.toString(16).padStart(2, "0") + hash.slice(18, 20);
+  const p5 = hash.slice(20, 32);
+  return `${p1}-${p2}-${p3}-${p4}-${p5}`;
+}
+
+/**
  * Generates a deterministic composite fingerprint for fast lookups and possible_match ranking.
  * Decision 2 Rule:
  * - Composite hash of normalized fields (amount, approximate timestamp, masked account, direction).

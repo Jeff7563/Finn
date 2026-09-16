@@ -5,7 +5,11 @@ import { DataStore } from "@/lib/server/data-store";
 import { TransactionEvidence, SourceDocument, IngestionItem } from "@/types/multi-source";
 import { Transaction, TransactionType } from "@/types/finance";
 import { revalidatePath } from "next/cache";
-import { computeSha256, classifyIngestionMatch } from "@/lib/ingestion/deduplication";
+import {
+  computeSha256,
+  classifyIngestionMatch,
+  generateDeterministicDocId,
+} from "@/lib/ingestion/deduplication";
 import { parseBankStatementCsv } from "@/lib/ingestion/csv-parser";
 
 export interface ImportStatementCsvResult {
@@ -63,12 +67,14 @@ export async function linkIngestionItemAction(
 export async function createTransactionFromItemAction(
   itemId: string,
   overrides: {
+    type?: TransactionType;
     accountId?: string;
     fromAccountId?: string;
     toAccountId?: string;
     categoryId?: string | null;
     description?: string | null;
     note?: string | null;
+    confirmAccountMismatch?: boolean;
   }
 ): Promise<CreateFromItemResult> {
   const user = await requireUser();
@@ -81,6 +87,14 @@ export async function createTransactionFromItemAction(
 
     if (item.status === "linked") {
       return { success: false, error: "Ingestion item is already linked to a transaction" };
+    }
+
+    // Safety rule: Items classified as exact_duplicate MUST NOT create duplicate transactions
+    if (item.match_class === "exact_duplicate") {
+      return {
+        success: false,
+        error: "Cannot create transaction from exact duplicate evidence: this item has already been matched to an existing record.",
+      };
     }
 
     const parsed = item.parsed_data;
@@ -128,24 +142,54 @@ export async function createTransactionFromItemAction(
     }
 
     // 4. Validate direction / type strictly (FAIL CLOSED)
+    // Supports explicit type override: "expense" | "income" | "transfer"
     const txType: TransactionType | undefined =
+      overrides.type ||
       (parsed.transaction_type as TransactionType) ||
       (parsed.direction === "incoming" ? "income" : parsed.direction === "outgoing" ? "expense" : undefined);
 
-    if (!txType) {
+    if (!txType || !["expense", "income", "transfer"].includes(txType)) {
       return {
         success: false,
         error: "Missing transaction direction or type (cannot determine income, expense, or transfer)",
       };
     }
 
-    // 5. Direction-specific account validation (FAIL CLOSED)
+    // 5. Statement Account Context (Binding)
+    let statementAccountId: string | null = null;
+    if (item.source_document_id) {
+      const doc = await DataStore.getSourceDocumentById(user.id, item.source_document_id);
+      if (doc?.provider_metadata?.statementAccountId) {
+        statementAccountId = String(doc.provider_metadata.statementAccountId);
+      }
+    }
+    if (
+      !statementAccountId &&
+      item.raw_data &&
+      typeof (item.raw_data as Record<string, unknown>).statementAccountId === "string"
+    ) {
+      statementAccountId = (item.raw_data as Record<string, unknown>).statementAccountId as string;
+    }
+
+    const statementAccount = statementAccountId
+      ? await DataStore.getAccountById(user.id, statementAccountId)
+      : null;
+
+    // 6. Direction-specific account validation (FAIL CLOSED)
     let fromAccountId: string | null = null;
     let toAccountId: string | null = null;
 
     if (txType === "transfer") {
-      const fromId = overrides.fromAccountId || (overrides.accountId && overrides.toAccountId && overrides.accountId !== overrides.toAccountId ? overrides.accountId : overrides.fromAccountId);
-      const toId = overrides.toAccountId;
+      // For transfer tied to statementAccountId:
+      // Outgoing statement row: statement account defaults as FROM
+      // Incoming statement row: statement account defaults as TO
+      const isOriginallyIncoming = parsed.direction === "incoming" || parsed.transaction_type === "income";
+
+      const defaultFromId = !isOriginallyIncoming ? statementAccountId || undefined : undefined;
+      const defaultToId = isOriginallyIncoming ? statementAccountId || undefined : undefined;
+
+      const fromId = overrides.fromAccountId || defaultFromId;
+      const toId = overrides.toAccountId || defaultToId;
 
       if (!fromId || !toId) {
         return {
@@ -159,6 +203,25 @@ export async function createTransactionFromItemAction(
           success: false,
           error: "Transfer source and destination accounts must be distinct",
         };
+      }
+
+      // Check mismatch against statement account
+      if (statementAccount) {
+        if (isOriginallyIncoming) {
+          if (toId !== statementAccount.id && !overrides.confirmAccountMismatch) {
+            return {
+              success: false,
+              error: `Account mismatch: incoming statement row is bound to destination account "${statementAccount.name}". Explicit confirmation required.`,
+            };
+          }
+        } else {
+          if (fromId !== statementAccount.id && !overrides.confirmAccountMismatch) {
+            return {
+              success: false,
+              error: `Account mismatch: outgoing statement row is bound to source account "${statementAccount.name}". Explicit confirmation required.`,
+            };
+          }
+        }
       }
 
       const [fromAccount, toAccount] = await Promise.all([
@@ -178,15 +241,28 @@ export async function createTransactionFromItemAction(
           error: "Destination account not found or does not belong to user",
         };
       }
+      if (fromAccount.active === false || toAccount.active === false) {
+        return {
+          success: false,
+          error: "One or both transfer accounts are inactive",
+        };
+      }
 
       fromAccountId = fromId;
       toAccountId = toId;
     } else if (txType === "expense") {
-      const fromId = overrides.fromAccountId || overrides.accountId;
+      const fromId = overrides.fromAccountId || overrides.accountId || statementAccountId || undefined;
       if (!fromId) {
         return {
           success: false,
           error: "Source account (fromAccountId or accountId) is required for expense transaction",
+        };
+      }
+
+      if (statementAccount && fromId !== statementAccount.id && !overrides.confirmAccountMismatch) {
+        return {
+          success: false,
+          error: `Account mismatch: statement is bound to account "${statementAccount.name}", but transaction was assigned to a different account. Explicit confirmation required.`,
         };
       }
 
@@ -197,15 +273,28 @@ export async function createTransactionFromItemAction(
           error: "Selected source account not found or does not belong to user",
         };
       }
+      if (account.active === false) {
+        return {
+          success: false,
+          error: "Selected source account is inactive",
+        };
+      }
 
       fromAccountId = fromId;
       toAccountId = null;
     } else if (txType === "income") {
-      const toId = overrides.toAccountId || overrides.accountId;
+      const toId = overrides.toAccountId || overrides.accountId || statementAccountId || undefined;
       if (!toId) {
         return {
           success: false,
           error: "Destination account (toAccountId or accountId) is required for income transaction",
+        };
+      }
+
+      if (statementAccount && toId !== statementAccount.id && !overrides.confirmAccountMismatch) {
+        return {
+          success: false,
+          error: `Account mismatch: statement is bound to account "${statementAccount.name}", but transaction was assigned to a different account. Explicit confirmation required.`,
         };
       }
 
@@ -214,6 +303,12 @@ export async function createTransactionFromItemAction(
         return {
           success: false,
           error: "Selected destination account not found or does not belong to user",
+        };
+      }
+      if (account.active === false) {
+        return {
+          success: false,
+          error: "Selected destination account is inactive",
         };
       }
 
@@ -231,11 +326,15 @@ export async function createTransactionFromItemAction(
       amount: amountThb,
       currency: parsed.currency.trim(),
       transaction_date: parsed.occurred_at,
-      description: overrides.description || parsed.description || parsed.merchant_name || "Imported transaction",
+      description:
+        overrides.description ||
+        parsed.description ||
+        parsed.merchant_name ||
+        (txType === "transfer" ? "โอนเงินระหว่างบัญชี" : "Imported transaction"),
       note: overrides.note || parsed.note || null,
       from_account_id: fromAccountId,
       to_account_id: toAccountId,
-      category_id: overrides.categoryId || null,
+      category_id: txType === "transfer" ? null : (overrides.categoryId || null),
       source: "import" as const,
       reference_number: parsed.reference_number || null,
       confidence: 1.0,
@@ -244,6 +343,7 @@ export async function createTransactionFromItemAction(
     };
 
     // ATOMIC operation: creates transaction, creates evidence, updates item to linked
+    // Original parsed_data remains unmutated!
     const result = await DataStore.createTransactionFromIngestionItem(user.id, item.id, txData);
 
     revalidatePath("/inbox");
@@ -254,6 +354,7 @@ export async function createTransactionFromItemAction(
     return { success: false, error: message };
   }
 }
+
 
 /**
  * Dismisses an ingestion item without linking.
@@ -333,17 +434,20 @@ function deriveBankHint(
  * 1. Validate file metadata (existence, .csv extension, <=5MB, non-empty, active account).
  * 2. Original-byte SHA-256 computed BEFORE text decoding / normalization.
  * 3. Safe decoding (UTF-8, UTF-8 BOM, Windows-874 fallback).
- * 4. Full-file idempotency (dedup on user + document_type + file_hash).
+ * 4. Full-file idempotency (dedup on user + document_type + file_hash) with deterministic UUID concurrency defense.
  * 5. Metadata-only source_document & import_batch created.
  * 6. Parser extracts rows with Bangkok timezone handling & inherited account context.
  * 7. Classification with deduplication engine (NO auto-linking / NO auto-tx creation).
- * 8. Bulk creation of ingestion_items.
- * 9. Revalidate & complete batch.
+ * 8. Resumable recovery: safely finalizes existing items on retry without row duplication.
+ * 9. Fail-closed error handling: marks both batch and doc failed with completed_at timestamp on ANY failure.
  */
 export async function importStatementCsvAction(
   formData: FormData
 ): Promise<ImportStatementCsvResult> {
   const user = await requireUser();
+
+  let sourceDocId: string | null = null;
+  let batchId: string | null = null;
 
   try {
     const rawFile = formData.get("file") || formData.get("csvFile");
@@ -504,9 +608,25 @@ export async function importStatementCsvAction(
       };
     }
 
-    // 12. FULL-FILE IDEMPOTENCY: Check existing source_documents for same hash
-    const existingDoc = await DataStore.getSourceDocumentByHash(user.id, fileHash);
+    // 12. FULL-FILE IDEMPOTENCY & CONCURRENCY DEFENSE
+    // Compute deterministic UUID derived from user + document_type + fileHash
+    const deterministicDocId = generateDeterministicDocId(user.id, "csv_statement", fileHash);
+
+    const existingDoc =
+      (await DataStore.getSourceDocumentById(user.id, deterministicDocId)) ||
+      (await DataStore.getSourceDocumentByHash(user.id, fileHash));
+
     if (existingDoc && existingDoc.document_type === "csv_statement") {
+      if (existingDoc.status === "processing") {
+        return {
+          success: false,
+          status: "duplicate",
+          existingDocumentId: existingDoc.id,
+          originalFilename: existingDoc.original_filename || filename,
+          message: "ไฟล์นี้กำลังอยู่ระหว่างการประมวลผล (File is currently being processed)",
+          error: "ไฟล์นี้กำลังอยู่ระหว่างการประมวลผล (File is currently being processed)",
+        };
+      }
       if (existingDoc.status !== "failed") {
         return {
           success: false,
@@ -517,14 +637,14 @@ export async function importStatementCsvAction(
           error: `ไฟล์นี้เคยถูกนำเข้าแล้ว (${existingDoc.original_filename || filename})`,
         };
       }
-      // If previous document with the same hash was failed, allow a safe retry below!
     }
 
     const bankHint = deriveBankHint(account.institution);
 
-    // 13. SOURCE DOCUMENT CREATION (Metadata only; binary not stored in bucket yet)
+    // 13. SOURCE DOCUMENT CREATION / RETRY UPDATE
     let sourceDoc: SourceDocument;
     if (existingDoc && existingDoc.status === "failed") {
+      sourceDocId = existingDoc.id;
       sourceDoc = await DataStore.updateSourceDocument(user.id, existingDoc.id, {
         status: "processing",
         original_filename: filename,
@@ -541,23 +661,55 @@ export async function importStatementCsvAction(
         },
       });
     } else {
-      sourceDoc = await DataStore.createSourceDocument(user.id, {
-        document_type: "csv_statement",
-        original_filename: filename,
-        file_hash: fileHash,
-        file_size: originalBytes.length,
-        stored_file_size: 0,
-        storage_path: null,
-        status: "processing",
-        provider_metadata: {
-          importMethod: "web_csv",
-          statementAccountId: account.id,
-          statementAccountName: account.name,
-          institution: account.institution || null,
-          binaryStorage: "metadata_only",
-          encoding: encodingUsed,
-        },
-      });
+      try {
+        sourceDoc = await DataStore.createSourceDocument(user.id, {
+          id: deterministicDocId,
+          document_type: "csv_statement",
+          original_filename: filename,
+          file_hash: fileHash,
+          file_size: originalBytes.length,
+          stored_file_size: 0,
+          storage_path: null,
+          status: "processing",
+          provider_metadata: {
+            importMethod: "web_csv",
+            statementAccountId: account.id,
+            statementAccountName: account.name,
+            institution: account.institution || null,
+            binaryStorage: "metadata_only",
+            encoding: encodingUsed,
+          },
+        });
+        sourceDocId = sourceDoc.id;
+      } catch (createErr: unknown) {
+        const errMsg = createErr instanceof Error ? createErr.message : String(createErr);
+        if (
+          errMsg.includes("source_documents_pkey") ||
+          errMsg.includes("duplicate key") ||
+          errMsg.includes("23505") ||
+          errMsg.includes("unique constraint")
+        ) {
+          // Concurrency conflict! Fetch existing document safely
+          const racedDoc =
+            (await DataStore.getSourceDocumentById(user.id, deterministicDocId)) ||
+            (await DataStore.getSourceDocumentByHash(user.id, fileHash));
+          return {
+            success: false,
+            status: "duplicate",
+            existingDocumentId: racedDoc?.id || deterministicDocId,
+            originalFilename: racedDoc?.original_filename || filename,
+            message:
+              racedDoc?.status === "processing"
+                ? "ไฟล์นี้กำลังอยู่ระหว่างการประมวลผล (File is currently being processed)"
+                : `ไฟล์นี้เคยถูกนำเข้าแล้ว (${racedDoc?.original_filename || filename})`,
+            error:
+              racedDoc?.status === "processing"
+                ? "ไฟล์นี้กำลังอยู่ระหว่างการประมวลผล (File is currently being processed)"
+                : `ไฟล์นี้เคยถูกนำเข้าแล้ว (${racedDoc?.original_filename || filename})`,
+          };
+        }
+        throw createErr;
+      }
     }
 
     // 14. IMPORT BATCH CREATION
@@ -572,6 +724,7 @@ export async function importStatementCsvAction(
         filename,
       },
     });
+    batchId = batch.id;
 
     // 15. PARSING
     const parseResult = parseBankStatementCsv(decodedText, {
@@ -585,92 +738,103 @@ export async function importStatementCsvAction(
       defaultMaskedNumber: account.masked_number || null,
     });
 
-    // 16. LOAD CONTEXT FOR DEDUPLICATION CLASSIFICATION
-    const [existingDocs, existingItems, existingTxs, allAccounts] = await Promise.all([
-      DataStore.getSourceDocuments(user.id),
-      DataStore.getIngestionItems(user.id),
-      DataStore.getTransactions(user.id),
-      DataStore.getAccounts(user.id),
-    ]);
+    // 16. RESUMABLE RECOVERY & ITEM CREATION
+    const existingItemsForDoc = await DataStore.getIngestionItems(user.id, {
+      sourceDocumentId: sourceDoc.id,
+    });
 
-    const accountMap = new Map(
-      allAccounts.map((a) => [a.id, { institution: a.institution, masked_number: a.masked_number }])
-    );
-
-    // 17. CLASSIFY EACH ROW
     let successCount = 0;
     let errorCount = 0;
     let duplicateCount = 0;
 
-    const classifiedItems: Array<Partial<IngestionItem>> = [];
-
-    for (const item of parseResult.items) {
-      const hasParseError = Boolean(item.parsed_data?.parse_error);
-      if (hasParseError) {
-        errorCount++;
-      } else {
-        successCount++;
+    if (
+      existingItemsForDoc.length > 0 &&
+      existingItemsForDoc.length === parseResult.items.length
+    ) {
+      // All items were already inserted in a previous attempt before failure!
+      // Safely reuse/finalize them without inserting duplicate rows
+      for (const item of existingItemsForDoc) {
+        if (item.batch_id !== batch.id) {
+          await DataStore.updateIngestionItem(user.id, item.id, { batch_id: batch.id });
+        }
+        if (item.parsed_data?.parse_error) {
+          errorCount++;
+        } else {
+          successCount++;
+        }
+        if (item.match_class === "exact_duplicate") {
+          duplicateCount++;
+        }
+      }
+    } else {
+      // If partial unlinked items exist from a prior failed run, clean them up first
+      if (existingItemsForDoc.length > 0) {
+        await DataStore.deleteIngestionItemsByDocumentId(user.id, sourceDoc.id);
       }
 
-      const match = classifyIngestionMatch({
-        item: item as IngestionItem,
-        sourceDocument: sourceDoc,
-        existingSourceDocuments: existingDocs.filter((d) => d.id !== sourceDoc.id),
-        existingIngestionItems: existingItems,
-        existingTransactions: existingTxs,
-        accountMap,
-      });
+      // Load context for deduplication classification
+      const [existingDocs, existingItems, existingTxs, allAccounts] = await Promise.all([
+        DataStore.getSourceDocuments(user.id),
+        DataStore.getIngestionItems(user.id),
+        DataStore.getTransactions(user.id),
+        DataStore.getAccounts(user.id),
+      ]);
 
-      if (match.matchClass === "exact_duplicate") {
-        duplicateCount++;
+      const accountMap = new Map(
+        allAccounts.map((a) => [a.id, { institution: a.institution, masked_number: a.masked_number }])
+      );
+
+      const classifiedItems: Array<Partial<IngestionItem>> = [];
+
+      for (const item of parseResult.items) {
+        const hasParseError = Boolean(item.parsed_data?.parse_error);
+        if (hasParseError) {
+          errorCount++;
+        } else {
+          successCount++;
+        }
+
+        const match = classifyIngestionMatch({
+          item: item as IngestionItem,
+          sourceDocument: sourceDoc,
+          existingSourceDocuments: existingDocs.filter((d) => d.id !== sourceDoc.id),
+          existingIngestionItems: existingItems,
+          existingTransactions: existingTxs,
+          accountMap,
+        });
+
+        if (match.matchClass === "exact_duplicate") {
+          duplicateCount++;
+        }
+
+        // FINANCIAL SAFETY RULE:
+        // DO NOT auto-create transactions.
+        // DO NOT auto-link transaction evidence during import.
+        // Even strong_match is surfaced in Inbox for explicit user action.
+        classifiedItems.push({
+          ...item,
+          source_document_id: sourceDoc.id,
+          batch_id: batch.id,
+          connection_id: null,
+          item_type: "statement_row",
+          status: "pending",
+          match_class: match.matchClass,
+          matched_transaction_id:
+            match.matchClass === "strong_match" ? match.matchedTransactionId || null : null,
+          confidence_score: match.confidence,
+          raw_data: {
+            ...(item.raw_data || {}),
+            statementAccountId: account.id,
+          },
+        });
       }
 
-      // FINANCIAL SAFETY RULE:
-      // DO NOT auto-create transactions.
-      // DO NOT auto-link transaction evidence during import.
-      // Even strong_match is surfaced in Inbox for explicit user action.
-      // matchedTransactionId is retained as a candidate for 1-click Link, but evidence is NOT created.
-      classifiedItems.push({
-        ...item,
-        source_document_id: sourceDoc.id,
-        batch_id: batch.id,
-        connection_id: null,
-        item_type: "statement_row",
-        status: "pending",
-        match_class: match.matchClass,
-        matched_transaction_id:
-          match.matchClass === "strong_match" ? match.matchedTransactionId || null : null,
-        confidence_score: match.confidence,
-      });
-    }
-
-    // 18. BULK ITEM CREATION
-    try {
       if (classifiedItems.length > 0) {
         await DataStore.createIngestionItems(user.id, classifiedItems);
       }
-    } catch (err: unknown) {
-      // Failure rollback: mark batch and source document failed
-      await DataStore.updateImportBatch(user.id, batch.id, {
-        status: "failed",
-        total_items: parseResult.items.length,
-        error_count: parseResult.items.length,
-        completed_at: new Date().toISOString(),
-      });
-      await DataStore.updateSourceDocument(user.id, sourceDoc.id, {
-        status: "failed",
-      });
-      return {
-        success: false,
-        status: "import_failure",
-        error:
-          err instanceof Error
-            ? err.message
-            : "เกิดข้อผิดพลาดในการบันทึกรายการนำเข้า (Failed to create ingestion items)",
-      };
     }
 
-    // 19. COMPLETE BATCH & SOURCE DOCUMENT
+    // 17. COMPLETE BATCH & SOURCE DOCUMENT
     await DataStore.updateImportBatch(user.id, batch.id, {
       status: "completed",
       total_items: parseResult.items.length,
@@ -698,11 +862,46 @@ export async function importStatementCsvAction(
       message: `นำเข้า Statement สำเร็จทั้งหมด ${parseResult.items.length} รายการ (สมบูรณ์ ${successCount} รายการ, รอตรวจสอบ ${errorCount} รายการ)`,
     };
   } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : "การนำเข้าไฟล์ล้มเหลว (Import failed)";
+    const errorMessage = err instanceof Error ? err.message : "การนำเข้าไฟล์ล้มเหลว (Import failed)";
+
+    // FAIL-CLOSED CLEANUP: Ensure both batch and source document are marked failed with completed_at = now
+    if (batchId) {
+      try {
+        const existingBatch = await DataStore.getImportBatchById(user.id, batchId);
+        await DataStore.updateImportBatch(user.id, batchId, {
+          status: "failed",
+          completed_at: new Date().toISOString(),
+          metadata: {
+            ...(existingBatch?.metadata || {}),
+            error: errorMessage,
+          },
+        });
+      } catch (e) {
+        console.error("Failed to mark import_batch as failed:", e);
+      }
+    }
+
+    if (sourceDocId) {
+      try {
+        const existingDoc = await DataStore.getSourceDocumentById(user.id, sourceDocId);
+        await DataStore.updateSourceDocument(user.id, sourceDocId, {
+          status: "failed",
+          provider_metadata: {
+            ...(existingDoc?.provider_metadata || {}),
+            error: errorMessage,
+            failedAt: new Date().toISOString(),
+          },
+        });
+      } catch (e) {
+        console.error("Failed to mark source_document as failed:", e);
+      }
+    }
+
     return {
       success: false,
       status: "import_failure",
-      error: message,
+      error: errorMessage,
     };
   }
 }
+

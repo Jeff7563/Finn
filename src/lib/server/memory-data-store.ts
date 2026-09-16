@@ -1535,8 +1535,13 @@ export const MemoryDataStore: IDataStore = {
       }
     }
 
+    const newDocId = data.id || crypto.randomUUID();
+    if (dbState.source_documents.some((d) => d.id === newDocId)) {
+      throw new Error('duplicate key value violates unique constraint "source_documents_pkey"');
+    }
+
     const newDoc: SourceDocument = {
-      id: data.id || crypto.randomUUID(),
+      id: newDocId,
       user_id: userId,
       connection_id: data.connection_id || null,
       document_type: data.document_type || "csv_statement",
@@ -1761,6 +1766,23 @@ export const MemoryDataStore: IDataStore = {
     };
     dbState.ingestion_items[idx] = updated;
     return updated;
+  },
+
+  async deleteIngestionItemsByDocumentId(
+    userId: string,
+    sourceDocumentId: string
+  ): Promise<number> {
+    const dbState = getDbState();
+    const initialLen = dbState.ingestion_items.length;
+    dbState.ingestion_items = dbState.ingestion_items.filter(
+      (item) =>
+        !(
+          item.user_id === userId &&
+          item.source_document_id === sourceDocumentId &&
+          item.status !== "linked"
+        )
+    );
+    return initialLen - dbState.ingestion_items.length;
   },
 
   // ============================================================================

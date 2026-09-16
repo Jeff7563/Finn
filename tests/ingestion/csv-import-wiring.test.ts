@@ -1,10 +1,12 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { MemoryDataStore } from "@/lib/server/memory-data-store";
 import { DataStore } from "@/lib/server/data-store";
-import { importStatementCsvAction } from "@/app/actions/inbox";
+import { importStatementCsvAction, createTransactionFromItemAction } from "@/app/actions/inbox";
 import { computeSha256 } from "@/lib/ingestion/deduplication";
-import { calculateAccountBalance } from "@/lib/finance/balances";
+import { calculateAccountBalance, calculateTotalActiveBalance } from "@/lib/finance/balances";
 import { Account, Transaction } from "@/types/finance";
+import * as csvParser from "@/lib/ingestion/csv-parser";
+import { formatBangkokDateTime, formatBangkokDate } from "@/lib/finance/formatters";
 
 const userAlice = "user-alice-1111-1111-1111-111111111111";
 const userBob = "user-bob-2222-2222-2222-222222222222";
@@ -37,6 +39,7 @@ function createSyntheticFile(
 
 describe("FINN — Phase 3 CSV Import Wiring (20 Required Verification Scenarios)", () => {
   let aliceAccount: Account;
+  let aliceSavingsAccount: Account;
   let bobAccount: Account;
 
   beforeEach(async () => {
@@ -51,6 +54,16 @@ describe("FINN — Phase 3 CSV Import Wiring (20 Required Verification Scenarios
       masked_number: "x-1234",
       currency: "THB",
       opening_balance: 5000,
+      balance_as_of: "2026-09-01T00:00:00.000Z",
+    });
+
+    aliceSavingsAccount = await DataStore.createAccount(userAlice, {
+      name: "Alice SCB Savings",
+      type: "bank",
+      institution: "SCB",
+      masked_number: "x-5678",
+      currency: "THB",
+      opening_balance: 10000,
       balance_as_of: "2026-09-01T00:00:00.000Z",
     });
 
@@ -574,5 +587,443 @@ bad-date,Malformed Row,300.00`;
     const items = await DataStore.getIngestionItems(userAlice);
     expect(items).toHaveLength(1);
     expect(items[0].parsed_data?.description).toBe("การ");
+  });
+
+  // =========================================================================
+  // OPERATOR AUDIT FIXES: 6 CRITICAL SECTIONS
+  // =========================================================================
+
+  describe("Section 1: Failure-Injection, Fail-Closed State & Resumable Recovery", () => {
+    it("1.1 parse failure marks both source_document and import_batch as failed with completed_at set, retry succeeds", async () => {
+      const csv = `Date,Description,Amount\n2026-09-10,Failure Injection 1,500.00`;
+      const file = createSyntheticFile(csv, "parse_fail.csv");
+      const formData = new FormData();
+      formData.append("file", file);
+      formData.append("accountId", aliceAccount.id);
+
+      const spy = vi.spyOn(csvParser, "parseBankStatementCsv").mockImplementationOnce(() => {
+        throw new Error("Catastrophic simulated parse error");
+      });
+
+      const res = await importStatementCsvAction(formData);
+      spy.mockRestore();
+
+      expect(res.success).toBe(false);
+      expect(res.status).toBe("import_failure");
+      expect(res.error).toContain("Catastrophic simulated parse error");
+
+      // Verify persistent fail-closed state
+      const docs = await DataStore.getSourceDocuments(userAlice);
+      expect(docs).toHaveLength(1);
+      expect(docs[0].status).toBe("failed");
+      expect(docs[0].provider_metadata?.error).toContain("Catastrophic simulated parse error");
+
+      const batches = await DataStore.getImportBatches(userAlice);
+      expect(batches).toHaveLength(1);
+      expect(batches[0].status).toBe("failed");
+      expect(batches[0].completed_at).toBeTruthy();
+      expect(batches[0].metadata?.error).toContain("Catastrophic simulated parse error");
+
+      // Now retry: should detect previous failure and succeed cleanly without duplicates
+      const retryRes = await importStatementCsvAction(formData);
+      expect(retryRes.success).toBe(true);
+      expect(retryRes.status).toBe("success");
+      expect(retryRes.totalItems).toBe(1);
+
+      const updatedDocs = await DataStore.getSourceDocuments(userAlice);
+      expect(updatedDocs).toHaveLength(1);
+      expect(updatedDocs[0].status).toBe("processed");
+
+      const items = await DataStore.getIngestionItems(userAlice);
+      expect(items).toHaveLength(1);
+      expect(items[0].parsed_data?.description).toBe("Failure Injection 1");
+    });
+
+    it("1.2 bulk insert failure marks failed and subsequent retry succeeds without duplicate rows", async () => {
+      const csv = `Date,Description,Amount\n2026-09-10,Bulk Fail 1,100.00\n2026-09-11,Bulk Fail 2,200.00`;
+      const file = createSyntheticFile(csv, "bulk_fail.csv");
+      const formData = new FormData();
+      formData.append("file", file);
+      formData.append("accountId", aliceAccount.id);
+
+      const spy = vi.spyOn(DataStore, "createIngestionItems").mockRejectedValueOnce(
+        new Error("Simulated bulk insert DB error")
+      );
+
+      const res = await importStatementCsvAction(formData);
+      spy.mockRestore();
+
+      expect(res.success).toBe(false);
+      expect(res.status).toBe("import_failure");
+
+      // Both marked failed
+      const docs = await DataStore.getSourceDocuments(userAlice);
+      expect(docs[0].status).toBe("failed");
+      const batches = await DataStore.getImportBatches(userAlice);
+      expect(batches[0].status).toBe("failed");
+      expect(batches[0].completed_at).toBeTruthy();
+
+      // Retry
+      const retryRes = await importStatementCsvAction(formData);
+      expect(retryRes.success).toBe(true);
+      expect(retryRes.totalItems).toBe(2);
+
+      // Ingestion items have exact expected row count (2 rows, no duplicates)
+      const items = await DataStore.getIngestionItems(userAlice);
+      expect(items).toHaveLength(2);
+    });
+
+    it("1.3 batch completion failure marks state failed and retry recovers cleanly", async () => {
+      const csv = `Date,Description,Amount\n2026-09-10,Batch Complete Fail,350.00`;
+      const file = createSyntheticFile(csv, "batch_complete_fail.csv");
+      const formData = new FormData();
+      formData.append("file", file);
+      formData.append("accountId", aliceAccount.id);
+
+      let callCount = 0;
+      const originalUpdateImportBatch = DataStore.updateImportBatch.bind(DataStore);
+      vi.spyOn(DataStore, "updateImportBatch").mockImplementation(async (userId, id, data) => {
+        callCount++;
+        // First call is completion update
+        if (callCount === 1) {
+          throw new Error("Simulated batch completion failure");
+        }
+        // Second call is fail-closed cleanup in catch
+        return originalUpdateImportBatch(userId, id, data);
+      });
+
+      const res = await importStatementCsvAction(formData);
+      vi.restoreAllMocks();
+
+      expect(res.success).toBe(false);
+      expect(res.status).toBe("import_failure");
+
+      const docs = await DataStore.getSourceDocuments(userAlice);
+      expect(docs[0].status).toBe("failed");
+      const batches = await DataStore.getImportBatches(userAlice);
+      expect(batches[0].status).toBe("failed");
+
+      // Retry recovers cleanly
+      const retryRes = await importStatementCsvAction(formData);
+      expect(retryRes.success).toBe(true);
+      expect(retryRes.status).toBe("success");
+
+      const items = await DataStore.getIngestionItems(userAlice);
+      expect(items).toHaveLength(1);
+    });
+
+    it("1.4 doc processed update failure marks state failed and retry recovers cleanly", async () => {
+      const csv = `Date,Description,Amount\n2026-09-10,Doc Update Fail,450.00`;
+      const file = createSyntheticFile(csv, "doc_update_fail.csv");
+      const formData = new FormData();
+      formData.append("file", file);
+      formData.append("accountId", aliceAccount.id);
+
+      let docCallCount = 0;
+      const originalUpdateDoc = DataStore.updateSourceDocument.bind(DataStore);
+      vi.spyOn(DataStore, "updateSourceDocument").mockImplementation(async (userId, id, data) => {
+        docCallCount++;
+        if (docCallCount === 1) {
+          throw new Error("Simulated doc processed update error");
+        }
+        return originalUpdateDoc(userId, id, data);
+      });
+
+      const res = await importStatementCsvAction(formData);
+      vi.restoreAllMocks();
+
+      expect(res.success).toBe(false);
+      expect(res.status).toBe("import_failure");
+
+      const docs = await DataStore.getSourceDocuments(userAlice);
+      expect(docs[0].status).toBe("failed");
+
+      // Retry recovers cleanly
+      const retryRes = await importStatementCsvAction(formData);
+      expect(retryRes.success).toBe(true);
+      expect(retryRes.status).toBe("success");
+
+      const items = await DataStore.getIngestionItems(userAlice);
+      expect(items).toHaveLength(1);
+    });
+  });
+
+  describe("Section 2: Concurrency & Idempotency Hardening", () => {
+    it("simultaneous imports with same file result in exactly 1 doc, 1 item set, and duplicate/processing response for runner-up", async () => {
+      const csv = `Date,Description,Amount\n2026-09-10,Concurrent Row 1,120.00\n2026-09-11,Concurrent Row 2,240.00`;
+      const file1 = createSyntheticFile(csv, "concurrent.csv");
+      const file2 = createSyntheticFile(csv, "concurrent.csv");
+
+      const formData1 = new FormData();
+      formData1.append("file", file1);
+      formData1.append("accountId", aliceAccount.id);
+
+      const formData2 = new FormData();
+      formData2.append("file", file2);
+      formData2.append("accountId", aliceAccount.id);
+
+      // Launch both simultaneously
+      const [res1, res2] = await Promise.all([
+        importStatementCsvAction(formData1),
+        importStatementCsvAction(formData2),
+      ]);
+
+      const successResults = [res1, res2].filter((r) => r.success && r.status === "success");
+      const duplicateResults = [res1, res2].filter((r) => !r.success && r.status === "duplicate");
+
+      expect(successResults).toHaveLength(1);
+      expect(duplicateResults).toHaveLength(1);
+
+      // Verify database invariant: exactly 1 source_document and exactly 2 ingestion_items
+      const docs = await DataStore.getSourceDocuments(userAlice);
+      expect(docs).toHaveLength(1);
+
+      const items = await DataStore.getIngestionItems(userAlice);
+      expect(items).toHaveLength(2);
+    });
+  });
+
+  describe("Section 3: Statement Account Binding & Mismatch Validation", () => {
+    it("binds statementAccountId to item raw_data and document metadata, and defaults accounts on create", async () => {
+      const csv = `Date,Description,Withdrawal,Deposit
+2026-09-10,Expense Item,150.00,
+2026-09-11,Income Item,,800.00`;
+      const file = createSyntheticFile(csv, "binding.csv");
+      const formData = new FormData();
+      formData.append("file", file);
+      formData.append("accountId", aliceAccount.id);
+
+      const importRes = await importStatementCsvAction(formData);
+      expect(importRes.success).toBe(true);
+
+      const items = await DataStore.getIngestionItems(userAlice);
+      expect(items).toHaveLength(2);
+
+      const expenseItem = items.find((i) => i.parsed_data?.direction === "outgoing")!;
+      const incomeItem = items.find((i) => i.parsed_data?.direction === "incoming")!;
+
+      expect(expenseItem.raw_data).toMatchObject({ statementAccountId: aliceAccount.id });
+      expect(incomeItem.raw_data).toMatchObject({ statementAccountId: aliceAccount.id });
+
+      // Expense create with no account specified defaults fromAccountId to statementAccount
+      const expRes = await createTransactionFromItemAction(expenseItem.id, {});
+      expect(expRes.success).toBe(true);
+      expect(expRes.transaction?.from_account_id).toBe(aliceAccount.id);
+      expect(expRes.transaction?.to_account_id).toBeNull();
+      expect(expRes.transaction?.type).toBe("expense");
+
+      // Income create with no account specified defaults toAccountId to statementAccount
+      const incRes = await createTransactionFromItemAction(incomeItem.id, {});
+      expect(incRes.success).toBe(true);
+      expect(incRes.transaction?.to_account_id).toBe(aliceAccount.id);
+      expect(incRes.transaction?.from_account_id).toBeNull();
+      expect(incRes.transaction?.type).toBe("income");
+    });
+
+    it("mismatch without confirmAccountMismatch fails closed; succeeds with confirmAccountMismatch=true", async () => {
+      const csv = `Date,Description,Withdrawal\n2026-09-10,Office Supplies,300.00`;
+      const file = createSyntheticFile(csv, "mismatch.csv");
+      const formData = new FormData();
+      formData.append("file", file);
+      formData.append("accountId", aliceAccount.id);
+
+      await importStatementCsvAction(formData);
+      const items = await DataStore.getIngestionItems(userAlice);
+      const item = items[0];
+
+      // Attempt to assign to aliceSavingsAccount without confirmAccountMismatch
+      const failRes = await createTransactionFromItemAction(item.id, {
+        fromAccountId: aliceSavingsAccount.id,
+        confirmAccountMismatch: false,
+      });
+
+      expect(failRes.success).toBe(false);
+      expect(failRes.error).toContain("Account mismatch");
+
+      // Now with confirmAccountMismatch: true
+      const successRes = await createTransactionFromItemAction(item.id, {
+        fromAccountId: aliceSavingsAccount.id,
+        confirmAccountMismatch: true,
+      });
+
+      expect(successRes.success).toBe(true);
+      expect(successRes.transaction?.from_account_id).toBe(aliceSavingsAccount.id);
+      expect(successRes.evidence).toBeDefined();
+    });
+  });
+
+  describe("Section 4: Transfer Override Pre-Create", () => {
+    it("converts withdrawal to transfer with zero net impact on total active balance and untouched parsed data", async () => {
+      const csv = `Date,Description,Withdrawal\n2026-09-10,ATM Transfer Out,1000.00`;
+      const file = createSyntheticFile(csv, "transfer_withdrawal.csv");
+      const formData = new FormData();
+      formData.append("file", file);
+      formData.append("accountId", aliceAccount.id);
+
+      await importStatementCsvAction(formData);
+      const items = await DataStore.getIngestionItems(userAlice);
+      const item = items[0];
+
+      // Balance before: aliceAccount=5000, aliceSavingsAccount=10000. Total = 15000.
+      const initialAccounts = await DataStore.getAccounts(userAlice);
+      const initialTxs = await DataStore.getTransactions(userAlice);
+      const totalBefore = calculateTotalActiveBalance(initialAccounts, initialTxs);
+      expect(totalBefore).toBe(15000);
+
+      // Convert withdrawal to transfer into aliceSavingsAccount
+      // Outgoing statement row defaults fromAccountId = aliceAccount. User specifies toAccountId.
+      const txRes = await createTransactionFromItemAction(item.id, {
+        type: "transfer",
+        toAccountId: aliceSavingsAccount.id,
+      });
+
+      expect(txRes.success).toBe(true);
+      expect(txRes.transaction?.type).toBe("transfer");
+      expect(txRes.transaction?.from_account_id).toBe(aliceAccount.id);
+      expect(txRes.transaction?.to_account_id).toBe(aliceSavingsAccount.id);
+      expect(txRes.transaction?.amount).toBe(1000);
+
+      // Verify original parsed data on the ingestion item is UNTOUCHED
+      const itemAfter = await DataStore.getIngestionItemById(userAlice, item.id);
+      expect(itemAfter?.parsed_data?.direction).toBe("outgoing");
+      expect(itemAfter?.parsed_data?.amount).toBe(100000); // satang
+      expect(itemAfter?.status).toBe("linked");
+
+      // Verify ledger balance: aliceAccount reduced by 1000, aliceSavingsAccount increased by 1000, total remains 15000
+      const txsAfter = await DataStore.getTransactions(userAlice);
+      const balAlice = calculateAccountBalance(aliceAccount, txsAfter).current_balance;
+      const balSavings = calculateAccountBalance(aliceSavingsAccount, txsAfter).current_balance;
+      const totalAfter = calculateTotalActiveBalance(initialAccounts, txsAfter);
+
+      expect(balAlice).toBe(4000);
+      expect(balSavings).toBe(11000);
+      expect(totalAfter).toBe(15000); // Net 0 impact on total balance
+    });
+
+    it("converts deposit to transfer with statementAccount as destination", async () => {
+      const csv = `Date,Description,Deposit\n2026-09-10,Transfer In,2000.00`;
+      const file = createSyntheticFile(csv, "transfer_deposit.csv");
+      const formData = new FormData();
+      formData.append("file", file);
+      formData.append("accountId", aliceAccount.id);
+
+      await importStatementCsvAction(formData);
+      const items = await DataStore.getIngestionItems(userAlice);
+      const item = items[0];
+
+      // Convert deposit to transfer from aliceSavingsAccount
+      // Incoming statement row defaults toAccountId = aliceAccount. User specifies fromAccountId.
+      const txRes = await createTransactionFromItemAction(item.id, {
+        type: "transfer",
+        fromAccountId: aliceSavingsAccount.id,
+      });
+
+      expect(txRes.success).toBe(true);
+      expect(txRes.transaction?.type).toBe("transfer");
+      expect(txRes.transaction?.from_account_id).toBe(aliceSavingsAccount.id);
+      expect(txRes.transaction?.to_account_id).toBe(aliceAccount.id);
+      expect(txRes.transaction?.amount).toBe(2000);
+    });
+
+    it("fails closed if transfer source and destination accounts are identical", async () => {
+      const csv = `Date,Description,Withdrawal\n2026-09-10,Self Loop,500.00`;
+      const file = createSyntheticFile(csv, "self_transfer.csv");
+      const formData = new FormData();
+      formData.append("file", file);
+      formData.append("accountId", aliceAccount.id);
+
+      await importStatementCsvAction(formData);
+      const items = await DataStore.getIngestionItems(userAlice);
+      const item = items[0];
+
+      const res = await createTransactionFromItemAction(item.id, {
+        type: "transfer",
+        fromAccountId: aliceAccount.id,
+        toAccountId: aliceAccount.id,
+      });
+
+      expect(res.success).toBe(false);
+      expect(res.error).toContain("distinct");
+    });
+
+    it("fails closed if either transfer account is inactive", async () => {
+      // Archive aliceSavingsAccount
+      await DataStore.archiveAccount(userAlice, aliceSavingsAccount.id);
+
+      const csv = `Date,Description,Withdrawal\n2026-09-10,Inactive Transfer,500.00`;
+      const file = createSyntheticFile(csv, "inactive_transfer.csv");
+      const formData = new FormData();
+      formData.append("file", file);
+      formData.append("accountId", aliceAccount.id);
+
+      await importStatementCsvAction(formData);
+      const items = await DataStore.getIngestionItems(userAlice);
+      const item = items[0];
+
+      const res = await createTransactionFromItemAction(item.id, {
+        type: "transfer",
+        toAccountId: aliceSavingsAccount.id,
+      });
+
+      expect(res.success).toBe(false);
+      expect(res.error).toContain("inactive");
+    });
+  });
+
+  describe("Section 5: Exact Duplicate Blocks Transaction Creation", () => {
+    it("fails closed and prevents creating transaction for item with match_class exact_duplicate", async () => {
+      const csv = `Date,Description,Amount\n2026-09-10,Duplicate Item,1000.00`;
+      const file = createSyntheticFile(csv, "duplicate_block.csv");
+      const formData = new FormData();
+      formData.append("file", file);
+      formData.append("accountId", aliceAccount.id);
+
+      await importStatementCsvAction(formData);
+      const items = await DataStore.getIngestionItems(userAlice);
+      const item = items[0];
+
+      // Mark item as exact_duplicate
+      await DataStore.updateIngestionItem(userAlice, item.id, {
+        match_class: "exact_duplicate",
+      });
+
+      const res = await createTransactionFromItemAction(item.id, {});
+      expect(res.success).toBe(false);
+      expect(res.error).toContain("exact duplicate");
+
+      // Verify no transaction was created
+      const txs = await DataStore.getTransactions(userAlice);
+      expect(txs).toHaveLength(0);
+    });
+  });
+
+  describe("Section 6: Bangkok Display Time (UTC+7 Formatting)", () => {
+    it("formats ISO timestamps strictly to Asia/Bangkok wall clock regardless of environment timezone", () => {
+      // 07:30 UTC = 14:30 Bangkok (UTC+7)
+      const utcIso = "2026-09-15T07:30:00.000Z";
+
+      const dateTimeStr = formatBangkokDateTime(utcIso);
+      // Bangkok is UTC+7 -> 14:30
+      expect(dateTimeStr).toContain("14:30");
+      expect(dateTimeStr).toContain("15");
+
+      const dateStr = formatBangkokDate(utcIso);
+      expect(dateStr).toContain("15");
+
+      // Requirement explicit check: 2026-09-16T00:30:00Z displays as 07:30 Bangkok time, not 00:30 UTC
+      const promptExample = "2026-09-16T00:30:00Z";
+      const promptFormatted = formatBangkokDateTime(promptExample);
+      expect(promptFormatted).toContain("07:30");
+      expect(promptFormatted).not.toContain("00:30");
+
+      // Midnight UTC (00:00 UTC) = 07:00 Bangkok same day
+      const midnightUtc = "2026-09-15T00:00:00.000Z";
+      expect(formatBangkokDateTime(midnightUtc)).toContain("07:00");
+
+      // Late night UTC (19:00 UTC) = 02:00 next day (16th) in Bangkok!
+      const lateUtc = "2026-09-15T19:00:00.000Z";
+      expect(formatBangkokDateTime(lateUtc)).toContain("02:00");
+      expect(formatBangkokDate(lateUtc)).toContain("16");
+    });
   });
 });

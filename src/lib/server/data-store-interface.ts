@@ -157,6 +157,7 @@ export interface IDataStore {
   getIngestionItemById(userId: string, id: string): Promise<IngestionItem | null>;
   createIngestionItems(userId: string, items: Array<Partial<IngestionItem>>): Promise<IngestionItem[]>;
   updateIngestionItem(userId: string, id: string, data: Partial<IngestionItem>): Promise<IngestionItem>;
+  deleteIngestionItemsByDocumentId(userId: string, sourceDocumentId: string): Promise<number>;
 
   // Transaction Evidence Bridge
   getTransactionEvidence(userId: string, transactionId: string): Promise<TransactionEvidence[]>;
