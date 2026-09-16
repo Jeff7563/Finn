@@ -2,10 +2,45 @@ import { Account, AccountBalance, Transaction } from "@/types/finance";
 import { roundToTwoDecimals } from "./formatters";
 
 /**
+ * Determines whether a transaction is eligible to affect an account's current balance.
+ *
+ * Rules:
+ * 1. If account.balance_as_of is NULL, undefined, or empty:
+ *    Preserves legacy Finn behavior exactly: all transactions affect balance (returns true).
+ * 2. If account.balance_as_of is set:
+ *    The baseline timestamp is INCLUSIVE. Transactions with transaction_date <= balance_as_of
+ *    are already accounted for in the baseline opening_balance and MUST NOT affect current balance.
+ *    Only transactions strictly AFTER balance_as_of (transaction_date > balance_as_of) affect current balance.
+ */
+export function doesTransactionAffectAccountBalance(
+  account: Account,
+  transaction: Transaction
+): boolean {
+  if (!account.balance_as_of) {
+    return true;
+  }
+  if (!transaction.transaction_date) {
+    return false;
+  }
+
+  const txTime = new Date(transaction.transaction_date).getTime();
+  const baselineTime = new Date(account.balance_as_of).getTime();
+
+  if (isNaN(txTime) || isNaN(baselineTime)) {
+    return true;
+  }
+
+  // Strictly after baseline
+  return txTime > baselineTime;
+}
+
+/**
  * Deterministically calculates the current balance for a single account based on:
- * - Opening balance
- * - Inflows (income, refund, reimbursement, gift, loan_received, adjustment in, transfers in)
- * - Outflows (expense, loan_payment, investment, adjustment out, transfers out)
+ * - Authoritative baseline opening_balance
+ * - Inflows strictly after balance_as_of (or all inflows if balance_as_of is null)
+ * - Outflows strictly after balance_as_of (or all outflows if balance_as_of is null)
+ *
+ * Transaction count continues to include ALL transactions associated with the account.
  */
 export function calculateAccountBalance(
   account: Account,
@@ -23,7 +58,13 @@ export function calculateAccountBalance(
       continue;
     }
 
+    // Historical count includes all transactions linked to this account
     txCount++;
+
+    // Only transactions strictly after balance_as_of affect current balance
+    if (!doesTransactionAffectAccountBalance(account, tx)) {
+      continue;
+    }
 
     if (tx.type === "transfer") {
       if (isFromAccount && isToAccount) {

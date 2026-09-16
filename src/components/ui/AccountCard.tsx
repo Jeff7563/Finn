@@ -2,6 +2,7 @@ import React from "react";
 import Link from "next/link";
 import { AccountBalance } from "@/types/finance";
 import { MoneyAmount } from "./MoneyAmount";
+import { formatMoney, formatDateTimeThai } from "@/lib/finance/formatters";
 import { Landmark, Wallet, CreditCard, Layers, TrendingUp, HelpCircle } from "lucide-react";
 
 interface AccountCardProps {
@@ -85,6 +86,12 @@ export function AccountCard({ accountBalance }: AccountCardProps) {
             currency={account.currency}
             size="xl"
           />
+          {account.balance_as_of && (
+            <p className="text-[11px] text-text-muted mt-1">
+              ยอดอ้างอิง: {formatMoney(account.opening_balance, account.currency)} ณ{" "}
+              {formatDateTimeThai(account.balance_as_of)}
+            </p>
+          )}
         </div>
       </div>
 

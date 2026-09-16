@@ -15,6 +15,15 @@ export const accountSchema = z.object({
     .default(0),
   currency: z.string().trim().default("THB"),
   active: z.boolean().default(true),
+  balance_as_of: z
+    .string()
+    .trim()
+    .optional()
+    .nullable()
+    .refine(
+      (v) => !v || !isNaN(Date.parse(v)),
+      "Balance as of must be a valid timestamp"
+    ),
 });
 
 export type AccountInput = z.input<typeof accountSchema>;

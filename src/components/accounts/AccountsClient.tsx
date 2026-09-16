@@ -9,6 +9,7 @@ import {
 } from "@/app/actions/accounts";
 import { AccountCard } from "@/components/ui/AccountCard";
 import { EmptyState } from "@/components/ui/EmptyState";
+import { canonicalInstantToBangkokDateTimeLocal } from "@/lib/finance/formatters";
 import {
   Plus,
   Landmark,
@@ -27,6 +28,8 @@ export function AccountsClient({
 }: AccountsClientProps) {
   const [showAddModal, setShowAddModal] = useState(false);
   const [editingAccount, setEditingAccount] = useState<Account | null>(null);
+  const [addHasBaseline, setAddHasBaseline] = useState(false);
+  const [editHasBaseline, setEditHasBaseline] = useState(false);
 
   // Create Form State
   const [createState, createAction, isCreating] = useActionState(
@@ -70,7 +73,10 @@ export function AccountsClient({
         </p>
 
         <button
-          onClick={() => setShowAddModal(true)}
+          onClick={() => {
+            setAddHasBaseline(false);
+            setShowAddModal(true);
+          }}
           aria-label="Add Account"
           className="flex items-center gap-1.5 px-3.5 py-2 bg-slate-900 hover:bg-slate-800 dark:bg-primary dark:text-primary-foreground dark:hover:bg-primary-hover text-white text-xs sm:text-sm font-semibold rounded-xl shadow-sm transition-all active:scale-[0.98]"
         >
@@ -84,7 +90,10 @@ export function AccountsClient({
           icon={<Landmark className="w-8 h-8 text-text-muted" />}
           title="ยังไม่มีบัญชี"
           description="เพิ่มบัญชีธนาคาร เงินสด หรือ E-wallet เพื่อเริ่มติดตามยอดเงิน"
-          onAction={() => setShowAddModal(true)}
+          onAction={() => {
+            setAddHasBaseline(false);
+            setShowAddModal(true);
+          }}
           actionLabel="+ เพิ่มบัญชี"
         />
       ) : (
@@ -94,7 +103,10 @@ export function AccountsClient({
               <AccountCard accountBalance={ab} />
               <div className="absolute top-3.5 right-3.5 flex items-center gap-1 bg-surface/90 p-1 rounded-lg border border-border opacity-0 group-hover:opacity-100 transition-opacity">
                 <button
-                  onClick={() => setEditingAccount(ab.account)}
+                  onClick={() => {
+                    setEditingAccount(ab.account);
+                    setEditHasBaseline(Boolean(ab.account.balance_as_of));
+                  }}
                   className="p-1 text-text-muted hover:text-text-primary rounded"
                   title="แก้ไขบัญชี"
                   aria-label="Edit Account"
@@ -212,6 +224,59 @@ export function AccountsClient({
                     className="w-full px-3 py-2 text-xs bg-surface border border-border text-text-primary rounded-xl"
                   />
                 </div>
+              </div>
+
+              {/* Baseline Choice */}
+              <div className="p-3 bg-surface-soft rounded-xl border border-border space-y-2.5">
+                <div className="flex items-center justify-between">
+                  <label className="text-xs font-semibold text-text-primary">
+                    การกำหนดจุดอ้างอิงยอดคงเหลือ (Balance Baseline)
+                  </label>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2 text-xs">
+                  <button
+                    type="button"
+                    onClick={() => setAddHasBaseline(false)}
+                    className={`px-2.5 py-1.5 rounded-lg border text-center font-medium transition-all ${
+                      !addHasBaseline
+                        ? "bg-surface text-text-primary border-primary/50 shadow-xs font-semibold"
+                        : "bg-surface/50 text-text-muted border-transparent hover:text-text-secondary"
+                    }`}
+                  >
+                    ยอดตั้งต้นทั่วไป
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setAddHasBaseline(true)}
+                    className={`px-2.5 py-1.5 rounded-lg border text-center font-medium transition-all ${
+                      addHasBaseline
+                        ? "bg-surface text-text-primary border-primary/50 shadow-xs font-semibold"
+                        : "bg-surface/50 text-text-muted border-transparent hover:text-text-secondary"
+                    }`}
+                  >
+                    กำหนดยอดคงเหลือ ณ วันที่/เวลา
+                  </button>
+                </div>
+
+                {addHasBaseline ? (
+                  <div className="space-y-1.5 pt-1">
+                    <label className="block text-[11px] font-medium text-text-secondary">
+                      ยอดคงเหลือ ณ วันที่และเวลา (Asia/Bangkok)
+                    </label>
+                    <input
+                      type="datetime-local"
+                      name="balance_as_of"
+                      defaultValue={canonicalInstantToBangkokDateTimeLocal(new Date())}
+                      className="w-full px-3 py-1.5 text-xs bg-surface border border-border text-text-primary rounded-xl"
+                    />
+                    <p className="text-[11px] text-text-muted leading-relaxed">
+                      รายการก่อนหรือเท่ากับเวลานี้จะยังอยู่ในประวัติ แต่จะไม่ถูกนำมาคำนวณยอดคงเหลือปัจจุบันซ้ำ
+                    </p>
+                  </div>
+                ) : (
+                  <input type="hidden" name="balance_as_of" value="" />
+                )}
               </div>
 
               <div className="flex items-center justify-end gap-3 pt-3 border-t border-border">
@@ -333,6 +398,63 @@ export function AccountsClient({
                     className="w-full px-3 py-2 text-xs bg-surface border border-border text-text-primary rounded-xl"
                   />
                 </div>
+              </div>
+
+              {/* Baseline Choice */}
+              <div className="p-3 bg-surface-soft rounded-xl border border-border space-y-2.5">
+                <div className="flex items-center justify-between">
+                  <label className="text-xs font-semibold text-text-primary">
+                    การกำหนดจุดอ้างอิงยอดคงเหลือ (Balance Baseline)
+                  </label>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2 text-xs">
+                  <button
+                    type="button"
+                    onClick={() => setEditHasBaseline(false)}
+                    className={`px-2.5 py-1.5 rounded-lg border text-center font-medium transition-all ${
+                      !editHasBaseline
+                        ? "bg-surface text-text-primary border-primary/50 shadow-xs font-semibold"
+                        : "bg-surface/50 text-text-muted border-transparent hover:text-text-secondary"
+                    }`}
+                  >
+                    ยอดตั้งต้นทั่วไป
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setEditHasBaseline(true)}
+                    className={`px-2.5 py-1.5 rounded-lg border text-center font-medium transition-all ${
+                      editHasBaseline
+                        ? "bg-surface text-text-primary border-primary/50 shadow-xs font-semibold"
+                        : "bg-surface/50 text-text-muted border-transparent hover:text-text-secondary"
+                    }`}
+                  >
+                    กำหนดยอดคงเหลือ ณ วันที่/เวลา
+                  </button>
+                </div>
+
+                {editHasBaseline ? (
+                  <div className="space-y-1.5 pt-1">
+                    <label className="block text-[11px] font-medium text-text-secondary">
+                      ยอดคงเหลือ ณ วันที่และเวลา (Asia/Bangkok)
+                    </label>
+                    <input
+                      type="datetime-local"
+                      name="balance_as_of"
+                      defaultValue={
+                        editingAccount.balance_as_of
+                          ? canonicalInstantToBangkokDateTimeLocal(editingAccount.balance_as_of)
+                          : canonicalInstantToBangkokDateTimeLocal(new Date())
+                      }
+                      className="w-full px-3 py-1.5 text-xs bg-surface border border-border text-text-primary rounded-xl"
+                    />
+                    <p className="text-[11px] text-text-muted leading-relaxed">
+                      รายการก่อนหรือเท่ากับเวลานี้จะยังอยู่ในประวัติ แต่จะไม่ถูกนำมาคำนวณยอดคงเหลือปัจจุบันซ้ำ
+                    </p>
+                  </div>
+                ) : (
+                  <input type="hidden" name="balance_as_of" value="" />
+                )}
               </div>
 
               <div className="flex items-center justify-end gap-3 pt-3 border-t border-border">

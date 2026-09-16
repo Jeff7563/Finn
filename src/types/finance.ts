@@ -41,6 +41,7 @@ export interface Account {
   opening_balance: number;
   currency: string;
   active: boolean;
+  balance_as_of?: string | null;
   created_at: string;
   updated_at: string;
 }

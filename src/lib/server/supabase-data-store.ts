@@ -112,6 +112,7 @@ function mapAccount(row: Record<string, unknown>): Account {
     opening_balance: Number(row.opening_balance) || 0,
     currency: row.currency ? String(row.currency) : "THB",
     active: Boolean(row.active),
+    balance_as_of: row.balance_as_of ? String(row.balance_as_of) : null,
     created_at: String(row.created_at),
     updated_at: String(row.updated_at),
   };
@@ -422,6 +423,7 @@ export class SupabaseDataStoreImpl implements IDataStore {
       opening_balance: Number(data.opening_balance) || 0,
       currency: data.currency || "THB",
       active: data.active ?? true,
+      balance_as_of: data.balance_as_of || null,
     };
 
     const { data: created, error } = await client
@@ -453,6 +455,7 @@ export class SupabaseDataStoreImpl implements IDataStore {
     if (data.masked_number !== undefined) updatePayload.masked_number = data.masked_number;
     if (data.opening_balance !== undefined) updatePayload.opening_balance = Number(data.opening_balance);
     if (data.active !== undefined) updatePayload.active = data.active;
+    if (data.balance_as_of !== undefined) updatePayload.balance_as_of = data.balance_as_of || null;
 
     const { data: updated, error } = await client
       .from("accounts")

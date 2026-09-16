@@ -101,6 +101,15 @@ export function TransactionItem({ transaction }: TransactionItemProps) {
 
   const formattedDateTime = formatDateTimeThai(transaction.transaction_date);
 
+  const isPreBaseline = Boolean(
+    (transaction.from_account?.balance_as_of &&
+      new Date(transaction.transaction_date).getTime() <=
+        new Date(transaction.from_account.balance_as_of).getTime()) ||
+    (transaction.to_account?.balance_as_of &&
+      new Date(transaction.transaction_date).getTime() <=
+        new Date(transaction.to_account.balance_as_of).getTime())
+  );
+
   return (
     <Link
       href={`/transactions/${transaction.id}`}
@@ -137,6 +146,14 @@ export function TransactionItem({ transaction }: TransactionItemProps) {
             )}
             <span>·</span>
             <span>{formattedDateTime}</span>
+            {isPreBaseline && (
+              <>
+                <span>·</span>
+                <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-surface-soft text-text-muted border border-border">
+                  ก่อนจุดอ้างอิงยอดคงเหลือ
+                </span>
+              </>
+            )}
           </div>
         </div>
       </div>

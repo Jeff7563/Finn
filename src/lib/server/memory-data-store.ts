@@ -200,6 +200,7 @@ export const MemoryDataStore: IDataStore = {
       opening_balance: Number(data.opening_balance) || 0,
       currency: data.currency || "THB",
       active: data.active ?? true,
+      balance_as_of: data.balance_as_of || null,
       created_at: now,
       updated_at: now,
     };
@@ -236,6 +237,10 @@ export const MemoryDataStore: IDataStore = {
           ? Number(data.opening_balance)
           : current.opening_balance,
       active: data.active ?? current.active,
+      balance_as_of:
+        data.balance_as_of !== undefined
+          ? (data.balance_as_of || null)
+          : current.balance_as_of,
       updated_at: new Date().toISOString(),
     };
 

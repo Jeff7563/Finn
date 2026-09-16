@@ -4,6 +4,7 @@ import { revalidatePath } from "next/cache";
 import { requireUser } from "@/lib/server/auth";
 import { DataStore } from "@/lib/server/data-store";
 import { accountSchema } from "@/lib/validation/schemas";
+import { bangkokDateTimeLocalToCanonicalInstant } from "@/lib/finance/formatters";
 import { ActionResult } from "./auth";
 
 export async function createAccountAction(
@@ -13,6 +14,11 @@ export async function createAccountAction(
   try {
     const user = await requireUser();
 
+    const balanceAsOfRaw = (formData.get("balance_as_of") as string)?.trim();
+    const balanceAsOf = balanceAsOfRaw
+      ? bangkokDateTimeLocalToCanonicalInstant(balanceAsOfRaw)
+      : null;
+
     const rawData = {
       name: formData.get("name") as string,
       institution: (formData.get("institution") as string) || undefined,
@@ -21,6 +27,7 @@ export async function createAccountAction(
       opening_balance: Number(formData.get("opening_balance") || 0),
       currency: (formData.get("currency") as string) || "THB",
       active: true,
+      balance_as_of: balanceAsOf,
     };
 
     const parsed = accountSchema.safeParse(rawData);
@@ -52,6 +59,11 @@ export async function updateAccountAction(
   try {
     const user = await requireUser();
 
+    const balanceAsOfRaw = (formData.get("balance_as_of") as string)?.trim();
+    const balanceAsOf = balanceAsOfRaw
+      ? bangkokDateTimeLocalToCanonicalInstant(balanceAsOfRaw)
+      : null;
+
     const rawData = {
       name: formData.get("name") as string,
       institution: (formData.get("institution") as string) || undefined,
@@ -60,6 +72,7 @@ export async function updateAccountAction(
       opening_balance: Number(formData.get("opening_balance") || 0),
       currency: (formData.get("currency") as string) || "THB",
       active: formData.get("active") !== "false",
+      balance_as_of: balanceAsOf,
     };
 
     const parsed = accountSchema.safeParse(rawData);
