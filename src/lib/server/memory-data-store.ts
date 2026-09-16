@@ -1040,17 +1040,20 @@ export const MemoryDataStore: IDataStore = {
       throw new Error(`Account ${data.account_id} not found or access denied`);
     }
 
-    const normBank = data.institution ? normalizeBankName(data.institution) : null;
+    const normBank = (data.institution && normalizeBankName(data.institution)) || "UNKNOWN";
     const existing = dbState.account_match_aliases.find(
       (a) =>
         a.user_id === userId &&
         a.account_id === data.account_id &&
-        (a.institution || null) === normBank &&
+        (a.institution || "UNKNOWN") === normBank &&
         a.normalized_masked_pattern === data.normalized_masked_pattern
     );
 
     if (existing) {
-      existing.confirmed_count += 1;
+      // Idempotency: backfill reruns must NOT artificially inflate confirmed_count!
+      if (data.source !== "backfill") {
+        existing.confirmed_count += 1;
+      }
       existing.updated_at = new Date().toISOString();
       if (data.source) existing.source = data.source;
       return existing;
@@ -1081,11 +1084,13 @@ export const MemoryDataStore: IDataStore = {
     let created = 0;
     let skipped = 0;
 
+    // Filter strictly by human-verified transactions (review_status = 'corrected')
+    // Old auto-created confirmed transactions are NOT used for backfill.
     const verifiedTxs = dbState.transactions.filter(
       (t) =>
         t.user_id === userId &&
         Boolean(t.source_slip_id) &&
-        (t.review_status === "confirmed" || t.review_status === "corrected")
+        t.review_status === "corrected"
     );
 
     // Group verified slips by sender/receiver patterns to ensure unambiguous relationships

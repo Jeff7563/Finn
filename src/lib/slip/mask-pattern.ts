@@ -70,22 +70,16 @@ export function hasVisibleDigits(pattern?: string | null): boolean {
 }
 
 /**
- * Determines whether two normalized positional patterns match positionally.
- *
- * Rules:
- * 1. Must have the same length.
- * 2. At every position i:
- *    - If both are digits, they must be equal.
- *    - If one is '*' and other is digit, compatible.
- *    - If both are '*', compatible.
- * 3. Must share at least one visible digit (to prevent matching pure masks).
+ * Counts the number of matching identical digits at identical positions.
+ * Returns 0 if there is any contradictory digit at the same position,
+ * or if lengths differ.
  */
-export function isPositionalPatternMatch(
+export function countSharedPositionalDigits(
   patternA: string,
   patternB: string
-): boolean {
-  if (!patternA || !patternB) return false;
-  if (patternA.length !== patternB.length) return false;
+): number {
+  if (!patternA || !patternB) return 0;
+  if (patternA.length !== patternB.length) return 0;
 
   let sharedDigits = 0;
   for (let i = 0; i < patternA.length; i++) {
@@ -96,13 +90,31 @@ export function isPositionalPatternMatch(
     const isDigitB = cB >= "0" && cB <= "9";
 
     if (isDigitA && isDigitB) {
-      if (cA !== cB) return false;
+      if (cA !== cB) return 0; // Contradictory digit at identical index
       sharedDigits++;
     }
   }
 
-  // Must have at least one matching digit between the patterns
-  return sharedDigits > 0;
+  return sharedDigits;
+}
+
+/**
+ * Determines whether two normalized positional patterns match positionally.
+ *
+ * Rules:
+ * 1. Must have the same length.
+ * 2. At every position i:
+ *    - If both are digits, they must be equal.
+ *    - If one is '*' and other is digit, compatible.
+ *    - If both are '*', compatible.
+ * 3. Must share at least minSharedDigits visible digits (default: 1).
+ */
+export function isPositionalPatternMatch(
+  patternA: string,
+  patternB: string,
+  minSharedDigits: number = 1
+): boolean {
+  return countSharedPositionalDigits(patternA, patternB) >= minSharedDigits;
 }
 
 /**

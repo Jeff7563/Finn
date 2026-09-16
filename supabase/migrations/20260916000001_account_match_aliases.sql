@@ -2,8 +2,7 @@
 -- Description: Account Match Pattern Intelligence & Safe Auto-Confirm
 -- 1. Creates public.account_match_aliases table for learned masked pattern mappings.
 -- 2. Enables RLS with strict per-user ownership and cross-entity validation.
--- 3. Idempotent backfill from existing confirmed slips and transactions.
--- 4. Updates confirm_slip_transaction RPC to allow 'processing' status for atomic auto-confirm.
+-- 3. Idempotent backfill from verified human-corrected transactions (review_status = 'corrected').
 
 -- ============================================================================
 -- 1. Create account_match_aliases table
@@ -12,7 +11,7 @@ CREATE TABLE IF NOT EXISTS public.account_match_aliases (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
     account_id UUID NOT NULL REFERENCES public.accounts(id) ON DELETE CASCADE,
-    institution TEXT,
+    institution TEXT NOT NULL DEFAULT 'UNKNOWN',
     raw_masked_pattern TEXT,
     normalized_masked_pattern TEXT NOT NULL,
     source TEXT NOT NULL DEFAULT 'manual_confirm',
@@ -92,11 +91,13 @@ CREATE TRIGGER trg_check_alias_account_ownership
     EXECUTE FUNCTION public.check_alias_account_ownership();
 
 -- ============================================================================
--- 5. Safe, Rerunnable Backfill from Verified Transactions
+-- 5. Safe, Rerunnable Backfill from Verified Human Decisions (review_status = 'corrected')
+-- Does NOT learn from unverified auto-created transactions.
+-- Rerunnable without artificial count growth (idempotent).
 -- ============================================================================
 DO $$
 BEGIN
-    -- Backfill expense & transfer sender patterns
+    -- Backfill expense & transfer sender patterns from human-verified transactions
     INSERT INTO public.account_match_aliases (
         user_id,
         account_id,
@@ -111,7 +112,7 @@ BEGIN
     SELECT
         t.user_id,
         t.from_account_id,
-        LOWER(TRIM(COALESCE(s.extracted_json->'sender'->>'bank', ''))),
+        COALESCE(NULLIF(UPPER(TRIM(s.extracted_json->'sender'->>'bank')), ''), 'UNKNOWN'),
         s.extracted_json->'sender'->>'accountMasked',
         REGEXP_REPLACE(
             REGEXP_REPLACE(s.extracted_json->'sender'->>'accountMasked', '[- /.]', '', 'g'),
@@ -126,12 +127,12 @@ BEGIN
     WHERE t.from_account_id IS NOT NULL
       AND s.extracted_json->'sender'->>'accountMasked' IS NOT NULL
       AND LENGTH(REGEXP_REPLACE(s.extracted_json->'sender'->>'accountMasked', '[- /.]', '', 'g')) >= 3
-      AND t.review_status IN ('confirmed', 'corrected')
+      AND t.review_status = 'corrected'
       AND s.status = 'created'
     GROUP BY
         t.user_id,
         t.from_account_id,
-        LOWER(TRIM(COALESCE(s.extracted_json->'sender'->>'bank', ''))),
+        COALESCE(NULLIF(UPPER(TRIM(s.extracted_json->'sender'->>'bank')), ''), 'UNKNOWN'),
         s.extracted_json->'sender'->>'accountMasked',
         REGEXP_REPLACE(
             REGEXP_REPLACE(s.extracted_json->'sender'->>'accountMasked', '[- /.]', '', 'g'),
@@ -139,10 +140,10 @@ BEGIN
         )
     ON CONFLICT (user_id, account_id, institution, normalized_masked_pattern)
     DO UPDATE SET
-        confirmed_count = account_match_aliases.confirmed_count + EXCLUDED.confirmed_count,
+        confirmed_count = EXCLUDED.confirmed_count,
         updated_at = NOW();
 
-    -- Backfill income & transfer receiver patterns
+    -- Backfill income & transfer receiver patterns from human-verified transactions
     INSERT INTO public.account_match_aliases (
         user_id,
         account_id,
@@ -157,7 +158,7 @@ BEGIN
     SELECT
         t.user_id,
         t.to_account_id,
-        LOWER(TRIM(COALESCE(s.extracted_json->'receiver'->>'bank', ''))),
+        COALESCE(NULLIF(UPPER(TRIM(s.extracted_json->'receiver'->>'bank')), ''), 'UNKNOWN'),
         s.extracted_json->'receiver'->>'accountMasked',
         REGEXP_REPLACE(
             REGEXP_REPLACE(s.extracted_json->'receiver'->>'accountMasked', '[- /.]', '', 'g'),
@@ -172,12 +173,12 @@ BEGIN
     WHERE t.to_account_id IS NOT NULL
       AND s.extracted_json->'receiver'->>'accountMasked' IS NOT NULL
       AND LENGTH(REGEXP_REPLACE(s.extracted_json->'receiver'->>'accountMasked', '[- /.]', '', 'g')) >= 3
-      AND t.review_status IN ('confirmed', 'corrected')
+      AND t.review_status = 'corrected'
       AND s.status = 'created'
     GROUP BY
         t.user_id,
         t.to_account_id,
-        LOWER(TRIM(COALESCE(s.extracted_json->'receiver'->>'bank', ''))),
+        COALESCE(NULLIF(UPPER(TRIM(s.extracted_json->'receiver'->>'bank')), ''), 'UNKNOWN'),
         s.extracted_json->'receiver'->>'accountMasked',
         REGEXP_REPLACE(
             REGEXP_REPLACE(s.extracted_json->'receiver'->>'accountMasked', '[- /.]', '', 'g'),
@@ -185,6 +186,6 @@ BEGIN
         )
     ON CONFLICT (user_id, account_id, institution, normalized_masked_pattern)
     DO UPDATE SET
-        confirmed_count = account_match_aliases.confirmed_count + EXCLUDED.confirmed_count,
+        confirmed_count = EXCLUDED.confirmed_count,
         updated_at = NOW();
 END $$;

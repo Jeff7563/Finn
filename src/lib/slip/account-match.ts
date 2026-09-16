@@ -2,10 +2,10 @@ import { Account } from "@/types/finance";
 import { AccountMatchAlias, AccountMatchResult, SlipParty } from "@/types/slip";
 import { normalizeBankName } from "./bank-normalization";
 import {
+  countSharedPositionalDigits,
   extractDigitsFromPattern,
   hasContradictingDigits,
   hasVisibleDigits,
-  isPositionalPatternMatch,
   isSafeSuffixMatch,
   normalizeMaskedPattern,
 } from "./mask-pattern";
@@ -72,6 +72,21 @@ export function matchOwnedAccount(
       })
     : [];
 
+  // RULE 1: If partyBank is recognized/non-empty:
+  // Positional, suffix, name and bank matching must stay within accounts belonging to that institution.
+  // If there are zero accounts for that known bank, return no_match.
+  if (partyBank && bankCandidates.length === 0) {
+    return {
+      accountId: null,
+      confidence: 0,
+      matchMethod: "no_match",
+      reason: `Known bank ${partyBank} has no corresponding user accounts`,
+    };
+  }
+
+  // Only search across all accounts when slip bank/institution is genuinely unknown/unrecognized
+  const candidatesToSearch = partyBank ? bankCandidates : activeAccounts;
+
   // -------------------------------------------------------------------------
   // Priority A: VERIFIED LEARNED ALIAS
   // -------------------------------------------------------------------------
@@ -79,12 +94,10 @@ export function matchOwnedAccount(
     const matchingAliases = aliases.filter((al) => {
       if (al.normalized_masked_pattern !== partyPattern) return false;
       // If alias specifies an institution, it must match partyBank
-      if (al.institution && partyBank) {
-        const alBank = normalizeBankName(al.institution);
-        if (alBank && alBank !== partyBank) return false;
-      }
-      // Must map to an active account
-      return activeAccounts.some((a) => a.id === al.account_id);
+      const alBank = al.institution && al.institution !== "UNKNOWN" ? normalizeBankName(al.institution) : null;
+      if (alBank && partyBank && alBank !== partyBank) return false;
+      // Must map to an account in candidatesToSearch
+      return candidatesToSearch.some((a) => a.id === al.account_id);
     });
 
     const uniqueAccountIds = Array.from(
@@ -92,18 +105,18 @@ export function matchOwnedAccount(
     );
 
     if (uniqueAccountIds.length === 1) {
-      const matchedAcc = activeAccounts.find((a) => a.id === uniqueAccountIds[0])!;
+      const matchedAcc = candidatesToSearch.find((a) => a.id === uniqueAccountIds[0])!;
       return {
         accountId: matchedAcc.id,
         accountName: matchedAcc.name,
-        confidence: 0.99,
+        confidence: 1.0,
         matchMethod: "verified_alias",
         reason: `Matched by verified learned alias for ${partyBank || "bank"} and pattern ${partyPattern}`,
       };
     }
 
     if (uniqueAccountIds.length > 1) {
-      const ambiguousList = activeAccounts
+      const ambiguousList = candidatesToSearch
         .filter((a) => uniqueAccountIds.includes(a.id))
         .map((a) => ({ id: a.id, name: a.name }));
       return {
@@ -118,23 +131,42 @@ export function matchOwnedAccount(
 
   // -------------------------------------------------------------------------
   // Priority B: UNIQUE POSITIONAL PATTERN MATCH
+  // Requires at least 3 shared digits for auto-confirm-safe match.
+  // 1 or 2 shared digits produce a weak match eligible only for Review Inbox.
   // -------------------------------------------------------------------------
   if (partyPattern && hasVisibleDigits(partyPattern)) {
-    const candidatesToSearch = bankCandidates.length > 0 ? bankCandidates : activeAccounts;
-    const positionalMatches = candidatesToSearch.filter((acc) => {
-      if (!acc.masked_number) return false;
-      const accPattern = normalizeMaskedPattern(acc.masked_number);
-      return isPositionalPatternMatch(partyPattern, accPattern);
-    });
+    const positionalMatches = candidatesToSearch
+      .map((acc) => {
+        if (!acc.masked_number) return null;
+        const accPattern = normalizeMaskedPattern(acc.masked_number);
+        const shared = countSharedPositionalDigits(partyPattern, accPattern);
+        if (shared <= 0) return null;
+        return { acc, sharedDigits: shared };
+      })
+      .filter((item): item is { acc: Account; sharedDigits: number } => item !== null);
 
     if (positionalMatches.length === 1) {
-      return {
-        accountId: positionalMatches[0].id,
-        accountName: positionalMatches[0].name,
-        confidence: 0.95,
-        matchMethod: "positional_mask",
-        reason: `Matched by unique positional mask pattern (${partyPattern})`,
-      };
+      const { acc, sharedDigits } = positionalMatches[0];
+      if (sharedDigits >= 3) {
+        return {
+          accountId: acc.id,
+          accountName: acc.name,
+          confidence: 0.95,
+          matchMethod: "positional_mask",
+          sharedDigits,
+          reason: `Matched by unique positional mask pattern (${partyPattern}) with ${sharedDigits} shared digits`,
+        };
+      } else {
+        // Weak positional match (1 or 2 digits): low confidence, NEVER auto-confirms
+        return {
+          accountId: acc.id,
+          accountName: acc.name,
+          confidence: 0.70,
+          matchMethod: "weak_pattern_match",
+          sharedDigits,
+          reason: `Weak positional pattern match with only ${sharedDigits} shared digit(s) (requires review)`,
+        };
+      }
     }
 
     if (positionalMatches.length > 1) {
@@ -143,7 +175,7 @@ export function matchOwnedAccount(
         confidence: 0.5,
         matchMethod: "ambiguous",
         reason: `Multiple accounts matched positional pattern ${partyPattern}`,
-        ambiguousCandidates: positionalMatches.map((a) => ({ id: a.id, name: a.name })),
+        ambiguousCandidates: positionalMatches.map((item) => ({ id: item.acc.id, name: item.acc.name })),
       };
     }
   }
@@ -153,75 +185,52 @@ export function matchOwnedAccount(
   // Only valid when party pattern does NOT end with a trailing mask '*'!
   // -------------------------------------------------------------------------
   if (!partyPattern.endsWith("*") && partyDigits.length >= 3) {
-    // Search among bank candidates first
-    if (bankCandidates.length > 0) {
-      const suffixMatches = bankCandidates.filter((acc) => {
-        if (!acc.masked_number) return false;
-        if (hasContradictingDigits(acc.masked_number, partyPattern)) return false;
-        return isSafeSuffixMatch(acc.masked_number, partyPattern);
-      });
+    const suffixMatches = candidatesToSearch.filter((acc) => {
+      if (!acc.masked_number) return false;
+      if (hasContradictingDigits(acc.masked_number, partyPattern)) return false;
+      return isSafeSuffixMatch(acc.masked_number, partyPattern);
+    });
 
-      if (suffixMatches.length === 1) {
+    if (suffixMatches.length === 1) {
+      return {
+        accountId: suffixMatches[0].id,
+        accountName: suffixMatches[0].name,
+        confidence: partyBank ? 0.95 : 0.90,
+        matchMethod: "masked_suffix",
+        reason: `Matched by ${partyBank ? `bank (${partyBank}) and ` : ""}account digits (...${partyDigits.slice(-4)})`,
+      };
+    }
+
+    if (suffixMatches.length > 1) {
+      const firstName = suffixMatches[0].name.trim().toLowerCase();
+      const allIdentical = suffixMatches.every(
+        (a) => a.name.trim().toLowerCase() === firstName
+      );
+      if (allIdentical) {
         return {
           accountId: suffixMatches[0].id,
           accountName: suffixMatches[0].name,
-          confidence: 0.95,
+          confidence: 0.92,
           matchMethod: "masked_suffix",
-          reason: `Matched by bank (${partyBank}) and account digits (...${partyDigits.slice(-4)})`,
+          reason: `Matched by ${partyBank ? `bank (${partyBank}) and ` : ""}account digits (...${partyDigits.slice(-4)})`,
         };
       }
 
-      if (suffixMatches.length > 1) {
-        const firstName = suffixMatches[0].name.trim().toLowerCase();
-        const allIdentical = suffixMatches.every(
-          (a) => a.name.trim().toLowerCase() === firstName
-        );
-        if (allIdentical) {
-          return {
-            accountId: suffixMatches[0].id,
-            accountName: suffixMatches[0].name,
-            confidence: 0.92,
-            matchMethod: "masked_suffix",
-            reason: `Matched by bank (${partyBank}) and account digits (...${partyDigits.slice(-4)})`,
-          };
-        }
-
-        return {
-          accountId: null,
-          confidence: 0.5,
-          matchMethod: "ambiguous",
-          reason: `Multiple accounts matched bank ${partyBank} and digits ${partyDigits}`,
-          ambiguousCandidates: suffixMatches.map((a) => ({ id: a.id, name: a.name })),
-        };
-      }
-    }
-
-    // If bank was not identified, check unique across all accounts
-    if (!partyBank) {
-      const allSuffixMatches = activeAccounts.filter((acc) => {
-        if (!acc.masked_number) return false;
-        if (hasContradictingDigits(acc.masked_number, partyPattern)) return false;
-        return isSafeSuffixMatch(acc.masked_number, partyPattern);
-      });
-
-      if (allSuffixMatches.length === 1) {
-        return {
-          accountId: allSuffixMatches[0].id,
-          accountName: allSuffixMatches[0].name,
-          confidence: 0.90,
-          matchMethod: "masked_suffix",
-          reason: `Matched by distinctive account digits (...${partyDigits.slice(-4)})`,
-        };
-      }
+      return {
+        accountId: null,
+        confidence: 0.5,
+        matchMethod: "ambiguous",
+        reason: `Multiple accounts matched bank ${partyBank || "all"} and digits ${partyDigits}`,
+        ambiguousCandidates: suffixMatches.map((a) => ({ id: a.id, name: a.name })),
+      };
     }
   }
 
   // -------------------------------------------------------------------------
-  // Priority D: Account name / known alias evidence
+  // Priority D: Account name / known alias evidence (always requires review)
   // -------------------------------------------------------------------------
   if (partyName && partyName.length >= 3) {
-    const candidates = bankCandidates.length > 0 ? bankCandidates : activeAccounts;
-    const nameMatches = candidates.filter((acc) => {
+    const nameMatches = candidatesToSearch.filter((acc) => {
       const accName = acc.name.toLowerCase();
       const matches = accName.includes(partyName) || partyName.includes(accName);
       if (!matches) return false;
@@ -235,7 +244,7 @@ export function matchOwnedAccount(
       return {
         accountId: nameMatches[0].id,
         accountName: nameMatches[0].name,
-        confidence: 0.88,
+        confidence: 0.80,
         matchMethod: "name_alias",
         reason: `Matched by account name alias (${nameMatches[0].name})`,
       };
@@ -254,8 +263,9 @@ export function matchOwnedAccount(
 
   // -------------------------------------------------------------------------
   // Priority E: Bank-only match (Single account for this bank)
+  // MUST NEVER auto-confirm: confidence is kept strictly below auto-confirm threshold
   // -------------------------------------------------------------------------
-  if (bankCandidates.length === 1) {
+  if (partyBank && bankCandidates.length === 1) {
     const acc = bankCandidates[0];
 
     // Check if account has digits or pattern that contradicts slip
@@ -286,17 +296,18 @@ export function matchOwnedAccount(
       }
     }
 
+    // STRICT POLICY: bank_only is weak evidence and MUST NOT auto-confirm
     return {
       accountId: acc.id,
       accountName: acc.name,
-      confidence: partyDigits ? 0.95 : 0.85,
+      confidence: partyDigits ? 0.70 : 0.60,
       matchMethod: "bank_only",
-      reason: `Single account found for bank ${partyBank}`,
+      reason: `Single account found for bank ${partyBank} (requires review)`,
     };
   }
 
   // RULE: NEVER match solely by bank when multiple accounts exist!
-  if (bankCandidates.length > 1) {
+  if (partyBank && bankCandidates.length > 1) {
     return {
       accountId: null,
       confidence: 0.3,

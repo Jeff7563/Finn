@@ -1545,7 +1545,7 @@ export class SupabaseDataStoreImpl implements IDataStore {
   ): Promise<AccountMatchAlias> {
     assertUserId(userId);
     const client = await this.getClient(userId);
-    const normBank = data.institution ? normalizeBankName(data.institution) : null;
+    const normBank = (data.institution && normalizeBankName(data.institution)) || "UNKNOWN";
     const payload = {
       user_id: userId,
       account_id: data.account_id,
@@ -1577,10 +1577,12 @@ export class SupabaseDataStoreImpl implements IDataStore {
     let skipped = 0;
 
     const verifiedTxs = await this.getTransactions(userId);
+    // Filter strictly by human-verified transactions (review_status = 'corrected')
+    // Old auto-created confirmed transactions are NOT used for backfill.
     const filteredTxs = verifiedTxs.filter(
       (t) =>
         Boolean(t.source_slip_id) &&
-        (t.review_status === "confirmed" || t.review_status === "corrected")
+        t.review_status === "corrected"
     );
 
     for (const tx of filteredTxs) {

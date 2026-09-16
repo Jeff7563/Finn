@@ -1,4 +1,10 @@
-import { Direction, FieldConfidence } from "@/types/slip";
+import { Direction, FieldConfidence, AccountMatchMethod } from "@/types/slip";
+
+export const AUTOCONFIRM_SAFE_MATCH_METHODS: readonly AccountMatchMethod[] = [
+  "verified_alias",
+  "positional_mask",
+  "masked_suffix",
+] as const;
 
 export interface ConfidenceEvaluationParams {
   amount?: number;
@@ -7,8 +13,10 @@ export interface ConfidenceEvaluationParams {
   directionRequiresReview: boolean;
   senderAccountId?: string | null;
   senderAccountConfidence?: number;
+  senderMatchMethod?: AccountMatchMethod;
   receiverAccountId?: string | null;
   receiverAccountConfidence?: number;
+  receiverMatchMethod?: AccountMatchMethod;
   fieldConfidence: FieldConfidence;
   duplicateWarning?: boolean;
   duplicateRequiresReview?: boolean;
@@ -72,14 +80,26 @@ export function evaluateConfidence(
       canAutoCreate = false;
       reasons.push("การโอนระหว่างบัญชีตนเองต้องการความมั่นใจของทั้งสองบัญชีอย่างน้อย 95%");
     }
+    if (params.senderMatchMethod && !AUTOCONFIRM_SAFE_MATCH_METHODS.includes(params.senderMatchMethod)) {
+      canAutoCreate = false;
+      reasons.push(`วิธีการระบุบัญชีต้นทาง (${params.senderMatchMethod}) ไม่อยู่ในเกณฑ์ที่สามารถบันทึกอัตโนมัติได้`);
+    }
+    if (params.receiverMatchMethod && !AUTOCONFIRM_SAFE_MATCH_METHODS.includes(params.receiverMatchMethod)) {
+      canAutoCreate = false;
+      reasons.push(`วิธีการระบุบัญชีปลายทาง (${params.receiverMatchMethod}) ไม่อยู่ในเกณฑ์ที่สามารถบันทึกอัตโนมัติได้`);
+    }
   } else if (params.direction === "outgoing") {
     const sConf = params.senderAccountConfidence ?? 0;
     if (sConf < THRESHOLDS.ACCOUNT_CONFIDENCE_MIN) {
       canAutoCreate = false;
       reasons.push(`ความมั่นใจของบัญชีต้นทาง (${Math.round(sConf * 100)}%) ต่ำกว่าเกณฑ์ 95%`);
     }
+    if (params.senderMatchMethod && !AUTOCONFIRM_SAFE_MATCH_METHODS.includes(params.senderMatchMethod)) {
+      canAutoCreate = false;
+      reasons.push(`วิธีการระบุบัญชีต้นทาง (${params.senderMatchMethod}) ไม่อยู่ในเกณฑ์ที่สามารถบันทึกอัตโนมัติได้`);
+    }
   } else if (params.direction === "incoming") {
-    // MANDATORY CONSTRAINT: Incoming external money must always require review
+    // MANDATORY CONSTRAINT: ALL incoming external funds remain needs_review
     canAutoCreate = false;
     reasons.push("เงินโอนเข้าบัญชีต้องได้รับการยืนยันประเภทรายการจากผู้ใช้เสมอ (Incoming funds require user review)");
   }

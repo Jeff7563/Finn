@@ -503,8 +503,10 @@ export class SlipProcessor {
         directionRequiresReview: directionClass.requiresReview || qrMismatch,
         senderAccountId: senderMatch.accountId,
         senderAccountConfidence: senderMatch.confidence,
+        senderMatchMethod: senderMatch.matchMethod,
         receiverAccountId: receiverMatch.accountId,
         receiverAccountConfidence: receiverMatch.confidence,
+        receiverMatchMethod: receiverMatch.matchMethod,
         fieldConfidence: extraction.fieldConfidence,
         duplicateWarning: duplicateResult.duplicateType === "fuzzy_match",
         duplicateRequiresReview: duplicateResult.requiresReview,
@@ -541,9 +543,10 @@ export class SlipProcessor {
           extraction.transactionDate ||
           new Date().toISOString();
 
+        let confirmRes;
         try {
           // Atomically confirm slip transaction via PostgreSQL RPC / DataStore
-          const confirmRes = await DataStore.confirmSlipTransaction(userId, {
+          confirmRes = await DataStore.confirmSlipTransaction(userId, {
             slipId: slip.id,
             type: directionClass.suggestedType,
             amount: extraction.amount!,
@@ -562,53 +565,22 @@ export class SlipProcessor {
             confidence: confidenceDecision.overallConfidence,
             review_status: "confirmed",
           });
-
-          const newTx = confirmRes.transaction;
-
-          await DataStore.updateSlipJob(userId, job.id, {
-            status: "created",
-            safe_error_message: isReprocess ? jobDiagnostics : null,
-            finished_at: new Date().toISOString(),
-          });
-
-          const primaryMatchedAccount = ownedAccounts.find(
-            (a) => a.id === (senderMatch.accountId || receiverMatch.accountId)
-          );
-
-          return {
-            jobId: job.id,
-            slipId: slip.id,
-            status: "created",
-            amount: extraction.amount,
-            currency: "THB",
-            transactionId: newTx.id,
-            extracted: extraction,
-            overallConfidence: confidenceDecision.overallConfidence,
-            direction: directionClass.direction,
-            matchedFromAccountId: senderMatch.accountId,
-            matchedToAccountId: receiverMatch.accountId,
-            matchedAccountInfo: primaryMatchedAccount
-              ? {
-                  id: primaryMatchedAccount.id,
-                  name: primaryMatchedAccount.name,
-                  institution: primaryMatchedAccount.institution,
-                }
-              : undefined,
-            preservedPrevious: false,
-            completenessScore: mergedScore,
-          };
         } catch (rpcErr: unknown) {
           // Fail-closed guarantee: If atomic RPC fails, NEVER create transaction through a fallback.
           // The slip remains safely stored in needs_review for manual confirmation.
           const rpcMsg =
             rpcErr instanceof Error ? rpcErr.message : "RPC confirmation failed";
 
-          await DataStore.updateSlipJob(userId, job.id, {
-            status: "needs_review",
-            error_code: "CONFIRM_RPC_FAILED",
-            safe_error_message: `Auto-confirm failed: ${rpcMsg}`,
-            finished_at: new Date().toISOString(),
-          });
+          try {
+            await DataStore.updateSlipJob(userId, job.id, {
+              status: "needs_review",
+              error_code: "CONFIRM_RPC_FAILED",
+              safe_error_message: `Auto-confirm failed: ${rpcMsg}`,
+              finished_at: new Date().toISOString(),
+            });
+          } catch {
+            // Ignore secondary job update failure
+          }
 
           return {
             jobId: job.id,
@@ -622,13 +594,54 @@ export class SlipProcessor {
             direction: directionClass.direction,
             matchedFromAccountId: senderMatch.accountId,
             matchedToAccountId: receiverMatch.accountId,
-            warningMessage:
-              "ระบบยืนยันรายการอัตโนมัติขัดข้อง กรุณาตรวจสอบและยืนยันด้วยตนเอง",
             errorMessage: rpcMsg,
             preservedPrevious,
-            completenessScore: mergedScore,
           };
         }
+
+        // AFTER RPC SUCCESS: transaction and slip state are authoritative!
+        const newTx = confirmRes.transaction;
+        try {
+          await DataStore.updateSlipJob(userId, job.id, {
+            status: "created",
+            safe_error_message: isReprocess ? jobDiagnostics : null,
+            finished_at: new Date().toISOString(),
+          });
+        } catch (jobErr) {
+          console.warn(
+            "[SlipProcessor] Failed to update slip job after successful transaction confirmation:",
+            jobErr
+          );
+          // DO NOT downgrade financial result
+          // DO NOT return needs_review
+        }
+
+        const primaryMatchedAccount = ownedAccounts.find(
+          (a) => a.id === (senderMatch.accountId || receiverMatch.accountId)
+        );
+
+        return {
+          jobId: job.id,
+          slipId: slip.id,
+          status: "created",
+          amount: extraction.amount,
+          currency: "THB",
+          transactionId: newTx.id,
+          extracted: extraction,
+          overallConfidence: confidenceDecision.overallConfidence,
+          direction: directionClass.direction,
+          matchedFromAccountId: senderMatch.accountId,
+          matchedToAccountId: receiverMatch.accountId,
+          matchedAccountInfo: primaryMatchedAccount
+            ? {
+                id: primaryMatchedAccount.id,
+                name: primaryMatchedAccount.name,
+                institution: primaryMatchedAccount.institution,
+              }
+            : undefined,
+          preservedPrevious: false,
+          completenessScore: mergedScore,
+        };
       } else {
         // Send to Review Inbox
         await DataStore.updateSlip(userId, slip.id, {

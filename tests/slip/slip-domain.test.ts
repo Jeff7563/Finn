@@ -193,7 +193,10 @@ describe("Phase 2 — Slip Domain Engine", () => {
         mockAccounts
       );
       expect(match.accountId).toBe("acc-kbank");
-      expect(match.confidence).toBeGreaterThanOrEqual(0.85);
+      // Hardened safety: bank-only confidence is kept below auto-confirm threshold (< 0.85)
+      expect(match.confidence).toBeLessThan(0.85);
+      expect(match.confidence).toBeGreaterThanOrEqual(0.60);
+      expect(match.matchMethod).toBe("bank_only");
     });
 
     it("STRICT SAFETY: Never matches solely by bank when user has multiple accounts at that bank", () => {

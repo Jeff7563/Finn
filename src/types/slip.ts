@@ -110,6 +110,7 @@ export interface SlipCorrection {
 export type AccountMatchMethod =
   | "verified_alias"
   | "positional_mask"
+  | "weak_pattern_match"
   | "masked_suffix"
   | "name_alias"
   | "bank_only"
@@ -127,6 +128,7 @@ export interface AccountMatchResult {
   confidence: number;
   reason: string;
   matchMethod?: AccountMatchMethod;
+  sharedDigits?: number;
   ambiguousCandidates?: AccountMatchCandidate[];
 }
 
