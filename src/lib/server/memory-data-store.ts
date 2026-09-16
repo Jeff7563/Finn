@@ -1514,6 +1514,12 @@ export const MemoryDataStore: IDataStore = {
     );
   },
 
+  async getSourceDocumentByHash(userId: string, hash: string): Promise<SourceDocument | null> {
+    return (
+      getDbState().source_documents.find((d) => d.user_id === userId && d.file_hash === hash) || null
+    );
+  },
+
   async createSourceDocument(
     userId: string,
     data: Partial<SourceDocument>
@@ -1538,6 +1544,9 @@ export const MemoryDataStore: IDataStore = {
       original_filename: data.original_filename || null,
       file_hash: data.file_hash || null,
       file_size: data.file_size || null,
+      stored_file_size: data.stored_file_size !== undefined ? data.stored_file_size : null,
+      is_pinned: data.is_pinned ?? false,
+      binary_deleted_at: data.binary_deleted_at || null,
       status: data.status || "received",
       provider_metadata: data.provider_metadata || {},
       received_at: data.received_at || new Date().toISOString(),
@@ -1547,6 +1556,24 @@ export const MemoryDataStore: IDataStore = {
 
     dbState.source_documents.push(newDoc);
     return newDoc;
+  },
+
+  async updateSourceDocument(
+    userId: string,
+    id: string,
+    data: Partial<SourceDocument>
+  ): Promise<SourceDocument> {
+    const dbState = getDbState();
+    const idx = dbState.source_documents.findIndex((d) => d.user_id === userId && d.id === id);
+    if (idx === -1) throw new Error("Source document not found");
+
+    const updated: SourceDocument = {
+      ...dbState.source_documents[idx],
+      ...data,
+      updated_at: new Date().toISOString(),
+    };
+    dbState.source_documents[idx] = updated;
+    return updated;
   },
 
   // ============================================================================

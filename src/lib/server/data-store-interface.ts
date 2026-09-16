@@ -142,7 +142,9 @@ export interface IDataStore {
   // Source Documents
   getSourceDocuments(userId: string): Promise<SourceDocument[]>;
   getSourceDocumentById(userId: string, id: string): Promise<SourceDocument | null>;
+  getSourceDocumentByHash(userId: string, hash: string): Promise<SourceDocument | null>;
   createSourceDocument(userId: string, data: Partial<SourceDocument>): Promise<SourceDocument>;
+  updateSourceDocument(userId: string, id: string, data: Partial<SourceDocument>): Promise<SourceDocument>;
 
   // Import Batches
   getImportBatches(userId: string): Promise<ImportBatch[]>;

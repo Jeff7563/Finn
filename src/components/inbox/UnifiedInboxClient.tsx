@@ -1,6 +1,7 @@
 "use client";
 
-import React, { useState, useTransition } from "react";
+import React, { useState, useEffect, useTransition } from "react";
+import { useRouter } from "next/navigation";
 import {
   IngestionItem,
   SourceDocument,
@@ -22,14 +23,17 @@ import {
   EyeOff,
   ChevronDown,
   ChevronUp,
+  Upload,
 } from "lucide-react";
 import {
   linkIngestionItemAction,
   createTransactionFromItemAction,
   dismissIngestionItemAction,
   rejectIngestionItemAction,
+  ImportStatementCsvResult,
 } from "@/app/actions/inbox";
 import { getStorageUsageSummary } from "@/lib/storage/retention";
+import { CsvImportModal } from "./CsvImportModal";
 
 export interface UnifiedInboxClientProps {
   userId?: string;
@@ -64,6 +68,7 @@ export function UnifiedInboxClient({
   legacySlipStorageBytes = 0,
   legacySlipStorageCount = 0,
 }: UnifiedInboxClientProps) {
+  const router = useRouter();
   const [items, setItems] = useState<IngestionItem[]>(initialItems);
   const [selectedSourceFilter, setSelectedSourceFilter] = useState<string>("all");
   const [selectedStatusFilter, setSelectedStatusFilter] = useState<string>("pending");
@@ -71,12 +76,27 @@ export function UnifiedInboxClient({
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
   const [reviewedItemId, setReviewedItemId] = useState<string | null>(null);
   const [showStorageSummary, setShowStorageSummary] = useState<boolean>(true);
+  const [isImportModalOpen, setIsImportModalOpen] = useState<boolean>(false);
   const [selectedAccountId, setSelectedAccountId] = useState<string>(accounts[0]?.id || "");
   const [selectedToAccountId, setSelectedToAccountId] = useState<string>(
     accounts.length > 1 ? accounts[1].id : accounts[0]?.id || ""
   );
   const [selectedCategoryId, setSelectedCategoryId] = useState<string>("");
   const [actionMessage, setActionMessage] = useState<{ text: string; isError: boolean } | null>(null);
+
+  useEffect(() => {
+    setItems(initialItems);
+  }, [initialItems]);
+
+  const handleImportSuccess = (result: ImportStatementCsvResult) => {
+    setSelectedSourceFilter("statement");
+    setSelectedStatusFilter("pending");
+    router.refresh();
+    setActionMessage({
+      text: result.message || "นำเข้า Statement สำเร็จ",
+      isError: false,
+    });
+  };
 
   const docMap = new Map(sourceDocuments.map((d) => [d.id, d]));
   const storageSummary = getStorageUsageSummary(sourceDocuments, items);
@@ -219,7 +239,7 @@ export function UnifiedInboxClient({
       case "possible_match":
         return (
           <span className="px-2 py-0.5 rounded text-xs font-medium bg-amber-100 text-amber-700 dark:bg-amber-950/40 dark:text-amber-400">
-            อาจจะตรงกัน (Possible Match)
+            อาจจะตรงกัน (Possible Match — ต้องให้ผู้ใช้ตรวจสอบ)
           </span>
         );
       default:
@@ -244,10 +264,21 @@ export function UnifiedInboxClient({
           </p>
         </div>
 
-        {/* Safety Badge */}
-        <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-surface border border-border text-xs text-text-secondary self-start">
-          <ShieldCheck className="w-4 h-4 text-emerald-500" />
-          <span>ระบบป้องกันการรวมรายการผิดพลาด (Financial Safety Active)</span>
+        <div className="flex flex-wrap items-center gap-3 self-start sm:self-auto">
+          {/* CSV Import Button */}
+          <button
+            onClick={() => setIsImportModalOpen(true)}
+            className="flex items-center gap-2 px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold shadow-sm transition-colors"
+          >
+            <Upload className="w-4 h-4" />
+            <span>นำเข้า Statement CSV</span>
+          </button>
+
+          {/* Safety Badge */}
+          <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-surface border border-border text-xs text-text-secondary">
+            <ShieldCheck className="w-4 h-4 text-emerald-500" />
+            <span>ระบบป้องกันการรวมรายการผิดพลาด (Financial Safety Active)</span>
+          </div>
         </div>
       </div>
 
@@ -535,6 +566,56 @@ export function UnifiedInboxClient({
                   </div>
                 </div>
 
+                {/* Parse Error Banner if Malformed Row */}
+                {parsed?.parse_error && (
+                  <div className="flex items-center gap-2 p-2.5 rounded-lg bg-amber-500/10 border border-amber-500/20 text-xs text-amber-700 dark:text-amber-300">
+                    <AlertTriangle className="w-4 h-4 shrink-0 text-amber-600" />
+                    <span>
+                      <strong className="font-semibold">ข้อผิดพลาดในการแยกข้อมูล (Parse Error):</strong> {parsed.parse_error}
+                    </span>
+                  </div>
+                )}
+
+                {/* Strong Match Suggested Transaction Banner */}
+                {item.match_class === "strong_match" && item.status === "pending" && item.matched_transaction_id && (() => {
+                  const suggestedTx = existingTransactions.find((t) => t.id === item.matched_transaction_id);
+                  return (
+                    <div className="p-3 bg-emerald-500/10 border border-emerald-500/20 rounded-lg flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs text-emerald-800 dark:text-emerald-300">
+                      <div className="flex items-center gap-2">
+                        <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                        <div>
+                          <span className="font-semibold">พบรายการตรงกันในระบบ (Suggested Match): </span>
+                          {suggestedTx ? (
+                            <span>
+                              {new Date(suggestedTx.transaction_date).toLocaleDateString("th-TH")} — {suggestedTx.description} ({(suggestedTx.amount || 0).toLocaleString()} THB)
+                            </span>
+                          ) : (
+                            <span>รหัสรายการ: {item.matched_transaction_id}</span>
+                          )}
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => handleLink(item.id, item.matched_transaction_id!)}
+                        disabled={isPending}
+                        className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-semibold text-xs transition-colors shrink-0 flex items-center gap-1 self-start sm:self-auto"
+                      >
+                        <LinkIcon className="w-3.5 h-3.5" />
+                        <span>เชื่อมโยงทันที (Link)</span>
+                      </button>
+                    </div>
+                  );
+                })()}
+
+                {/* Possible Match Human Review Notice */}
+                {item.match_class === "possible_match" && item.status === "pending" && (
+                  <div className="p-2.5 bg-amber-500/10 border border-amber-500/20 rounded-lg text-xs text-amber-700 dark:text-amber-300 flex items-center gap-2">
+                    <AlertTriangle className="w-3.5 h-3.5 shrink-0 text-amber-600" />
+                    <span>
+                      สัญญาณความตรงกันไม่สมบูรณ์ — <strong>ต้องให้ผู้ใช้ตรวจสอบและตัดสินใจด้วยตนเอง (Human confirmation required)</strong>
+                    </span>
+                  </div>
+                )}
+
                 {/* Inline Detailed Review Inspector */}
                 {isReviewOpen && (
                   <div className="p-3.5 bg-surface-soft rounded-lg border border-border/80 space-y-2 text-xs">
@@ -706,6 +787,14 @@ export function UnifiedInboxClient({
           })
         )}
       </div>
+
+      {/* CSV Import Modal */}
+      <CsvImportModal
+        isOpen={isImportModalOpen}
+        onClose={() => setIsImportModalOpen(false)}
+        accounts={accounts}
+        onSuccess={handleImportSuccess}
+      />
     </div>
   );
 }
