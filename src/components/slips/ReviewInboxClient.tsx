@@ -29,6 +29,7 @@ import { matchOwnedAccount } from "@/lib/slip/account-match";
 import { classifyDirection } from "@/lib/slip/direction";
 import { matchCounterparty } from "@/lib/slip/counterparty-match";
 import { suggestCategory } from "@/lib/slip/category-suggest";
+import { getCategoryDisplayName } from "@/lib/finance/category-labels";
 import { useSlipsRealtime } from "@/lib/slip/realtime/slips-realtime";
 import {
   Check,
@@ -890,7 +891,7 @@ export function ReviewInboxClient({
                       .filter((c) => c.type === editFormData.type)
                       .map((c) => (
                         <option key={c.id} value={c.id}>
-                          {c.name}
+                          {getCategoryDisplayName(c)}
                         </option>
                       ))}
                   </select>

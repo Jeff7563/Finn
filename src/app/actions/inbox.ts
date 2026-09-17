@@ -10,7 +10,7 @@ import {
   classifyIngestionMatch,
   generateDeterministicDocId,
 } from "@/lib/ingestion/deduplication";
-import { parseBankStatementCsv } from "@/lib/ingestion/csv-parser";
+import { parseBankStatementCsv, splitCsvRow } from "@/lib/ingestion/csv-parser";
 
 export interface ImportStatementCsvResult {
   success: boolean;
@@ -737,6 +737,75 @@ export async function importStatementCsvAction(
       defaultInstitution: account.institution || null,
       defaultMaskedNumber: account.masked_number || null,
     });
+
+    // 15.1. FAIL CLOSED ON ZERO PARSED TRANSACTION ROWS
+    // If CSV contains content but produces 0 parsed rows (e.g. single quoted cell, header-only, malformed structure),
+    // fail closed: mark source_document and batch failed, create 0 items/transactions/evidence, leave balance untouched.
+    if (parseResult.items.length === 0) {
+      let failureCode = "NO_TRANSACTION_ROWS";
+      if (nonBlankLines.length < 2) {
+        failureCode = "HEADER_ONLY";
+      } else {
+        const sampleRow = splitCsvRow(nonBlankLines[1]);
+        if (sampleRow.length <= 1) {
+          failureCode = "MALFORMED_CSV_STRUCTURE";
+        }
+      }
+
+      const failureMessage =
+        "ไม่พบรายการธุรกรรมในไฟล์ CSV กรุณาตรวจสอบรูปแบบไฟล์ (อาจเกิดจากคั่นด้วยเครื่องหมายที่ไม่ถูกต้อง เช่น semicolon หรือคอมมาถูกครอบด้วยเครื่องหมายคำพูดทั้งแถว หรือมีเฉพาะหัวตาราง หรือรูปแบบการส่งออกจากธนาคารไม่ตรงกับมาตรฐาน)";
+
+      await DataStore.updateImportBatch(user.id, batch.id, {
+        status: "failed",
+        total_items: 0,
+        success_count: 0,
+        error_count: 1,
+        duplicate_count: 0,
+        completed_at: new Date().toISOString(),
+        metadata: {
+          statementAccountId: account.id,
+          statementAccountName: account.name,
+          institution: account.institution || null,
+          filename,
+          failureCode,
+          failureMessage,
+          parsedRowCount: 0,
+          rawLineCount: nonBlankLines.length,
+        },
+      });
+
+      await DataStore.updateSourceDocument(user.id, sourceDoc.id, {
+        status: "failed",
+        provider_metadata: {
+          importMethod: "web_csv",
+          statementAccountId: account.id,
+          statementAccountName: account.name,
+          institution: account.institution || null,
+          binaryStorage: "metadata_only",
+          encoding: encodingUsed,
+          failureCode,
+          failureMessage,
+          failedAt: new Date().toISOString(),
+          parsedRowCount: 0,
+          rawLineCount: nonBlankLines.length,
+        },
+      });
+
+      revalidatePath("/inbox");
+
+      return {
+        success: false,
+        status: "import_failure",
+        sourceDocumentId: sourceDoc.id,
+        batchId: batch.id,
+        totalItems: 0,
+        successCount: 0,
+        errorCount: 1,
+        duplicateCount: 0,
+        error: failureMessage,
+        message: failureMessage,
+      };
+    }
 
     // 16. AUDIT-SAFE RECONCILIATION & ITEM CREATION (ZERO DELETE OPERATIONS)
     // Production DB enforces REVOKE DELETE ON public.ingestion_items.

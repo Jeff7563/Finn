@@ -23,6 +23,7 @@ import {
 } from "lucide-react";
 import { SlipUploadModal } from "@/components/slips/SlipUploadModal";
 import { RestoreTransactionModal } from "@/components/transactions/RestoreTransactionModal";
+import { getCategoryDisplayName } from "@/lib/finance/category-labels";
 
 interface TransactionListClientProps {
   initialTransactions: TransactionWithRelations[];
@@ -320,7 +321,7 @@ export function TransactionListClient({
                 <option value="">ทุกหมวดหมู่</option>
                 {categories.map((c) => (
                   <option key={c.id} value={c.id}>
-                    {c.name} ({c.type === "expense" ? "รายจ่าย" : "รายรับ"})
+                    {getCategoryDisplayName(c)} ({c.type === "expense" ? "รายจ่าย" : "รายรับ"})
                   </option>
                 ))}
               </select>
@@ -444,7 +445,7 @@ export function TransactionListClient({
             restoreTarget.description ||
             restoreTarget.merchant?.display_name ||
             restoreTarget.person?.display_name ||
-            restoreTarget.category?.name
+            getCategoryDisplayName(restoreTarget.category)
           }
           amount={restoreTarget.amount}
           currency={restoreTarget.currency}

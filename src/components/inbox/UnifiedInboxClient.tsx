@@ -35,6 +35,7 @@ import {
 import { formatBangkokDateTime, formatBangkokDate } from "@/lib/finance/formatters";
 import { getStorageUsageSummary } from "@/lib/storage/retention";
 import { CsvImportModal } from "./CsvImportModal";
+import { getCategoryDisplayName } from "@/lib/finance/category-labels";
 
 export interface UnifiedInboxClientProps {
   userId?: string;
@@ -617,7 +618,7 @@ function getStatementAccountId(
                 <option value="">ไม่ระบุหมวดหมู่</option>
                 {categories.map((cat) => (
                   <option key={cat.id} value={cat.id}>
-                    {cat.name}
+                    {getCategoryDisplayName(cat)}
                   </option>
                 ))}
               </select>
@@ -969,7 +970,7 @@ function getStatementAccountId(
                           <option value="">ไม่ระบุหมวดหมู่</option>
                           {categories.map((cat) => (
                             <option key={cat.id} value={cat.id}>
-                              {cat.name}
+                              {getCategoryDisplayName(cat)}
                             </option>
                           ))}
                         </select>
