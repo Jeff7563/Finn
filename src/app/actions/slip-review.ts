@@ -428,7 +428,7 @@ export async function getSlipSignedPreviewUrlAction(
   }
 
   try {
-    const url = await DataStore.createSignedSlipUrl(user.id, slipId, 900);
+    const url = await DataStore.createSignedSlipUrl(user.id, slipId, 120);
     return { success: true, url };
   } catch (err: unknown) {
     return {
@@ -455,9 +455,13 @@ export async function reprocessSlipAction(
       return { success: false, error: "ไม่พบข้อมูลสลิป" };
     }
 
+    if (slip.binary_deleted_at || !slip.storage_path) {
+      return { success: false, error: "ไฟล์ต้นฉบับถูกลบแล้ว ไม่สามารถประมวลผลสลิปใหม่ได้" };
+    }
+
     const buffer = await DataStore.getSlipFile(slip.storage_path);
     if (!buffer) {
-      return { success: false, error: "ไม่พบไฟล์สลิปในที่จัดเก็บข้อมูลส่วนตัว" };
+      return { success: false, error: "ไฟล์ต้นฉบับถูกลบแล้ว ไม่สามารถประมวลผลสลิปใหม่ได้" };
     }
 
     const result = await defaultSlipProcessor.reprocessSlip({

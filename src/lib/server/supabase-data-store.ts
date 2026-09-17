@@ -35,6 +35,7 @@ import {
   TransactionEvidence,
   ReconciliationRun,
 } from "@/types/multi-source";
+import { StorageRetentionSettings, StorageBinaryEvent } from "@/types/storage";
 import { normalizeBankName } from "../slip/bank-normalization";
 import {
   countVisibleDigits,
@@ -240,6 +241,12 @@ function mapSlip(row: Record<string, unknown>): Slip {
     created_at: String(row.created_at),
     processed_at: row.processed_at ? String(row.processed_at) : null,
     deleted_at: row.deleted_at ? String(row.deleted_at) : null,
+    stored_file_size:
+      row.stored_file_size !== undefined && row.stored_file_size !== null
+        ? Number(row.stored_file_size)
+        : Number(row.file_size),
+    binary_deleted_at: row.binary_deleted_at ? String(row.binary_deleted_at) : null,
+    is_pinned: Boolean(row.is_pinned),
   };
 }
 
@@ -1333,7 +1340,7 @@ export class SupabaseDataStoreImpl implements IDataStore {
       .select("*")
       .eq("user_id", userId)
       .eq("transaction_id", transactionId)
-      .order("created_at", { ascending: false });
+      .order("created_at", { ascending: true });
 
     if (error) {
       throw new Error(`Failed to fetch transaction void events: ${error.message}`);
@@ -1551,6 +1558,12 @@ export class SupabaseDataStoreImpl implements IDataStore {
       file_hash_sha256: data.file_hash_sha256 || "",
       mime_type: data.mime_type || "image/jpeg",
       file_size: data.file_size || 0,
+      stored_file_size:
+        data.stored_file_size !== undefined
+          ? data.stored_file_size
+          : (data.file_size || 0),
+      binary_deleted_at: data.binary_deleted_at || null,
+      is_pinned: data.is_pinned ?? false,
       source: data.source || "web_upload",
       parser_version: data.parser_version || "v1",
       qr_payload: data.qr_payload || null,
@@ -1580,7 +1593,6 @@ export class SupabaseDataStoreImpl implements IDataStore {
     data: Partial<Slip>
   ): Promise<Slip> {
     assertUserId(userId);
-    const client = await this.getClient(userId);
 
     // Validate linked transaction ownership
     if (data.linked_transaction_id) {
@@ -1601,6 +1613,16 @@ export class SupabaseDataStoreImpl implements IDataStore {
     if (data.duplicate_of_slip_id !== undefined) updatePayload.duplicate_of_slip_id = data.duplicate_of_slip_id;
     if (data.processed_at !== undefined) updatePayload.processed_at = data.processed_at;
     if (data.deleted_at !== undefined) updatePayload.deleted_at = data.deleted_at;
+    if (data.stored_file_size !== undefined) updatePayload.stored_file_size = data.stored_file_size;
+    if (data.binary_deleted_at !== undefined) updatePayload.binary_deleted_at = data.binary_deleted_at;
+    if (data.is_pinned !== undefined) updatePayload.is_pinned = data.is_pinned;
+
+    // Use admin client if updating sensitive storage metadata to satisfy trigger guard
+    const isSensitiveUpdate =
+      data.storage_path !== undefined ||
+      data.stored_file_size !== undefined ||
+      data.binary_deleted_at !== undefined;
+    const client = await this.getClient(userId, { requireAdmin: isSensitiveUpdate });
 
     const { data: updated, error } = await client
       .from("slips")
@@ -1943,7 +1965,7 @@ export class SupabaseDataStoreImpl implements IDataStore {
   async saveSlipFile(storagePath: string, buffer: Buffer): Promise<void> {
     const parts = storagePath.split("/");
     const userId = parts[0];
-    const client = await this.getClient(userId);
+    const client = await this.getClient(userId, { requireAdmin: true });
     const mimeType = detectMimeFromPath(storagePath);
 
     const { error } = await client.storage
@@ -1975,10 +1997,36 @@ export class SupabaseDataStoreImpl implements IDataStore {
     return Buffer.from(arrayBuffer);
   }
 
+  async deleteSlipFile(storagePath: string): Promise<void> {
+    const parts = storagePath.split("/");
+    const userId = parts[0];
+    const client = await this.getClient(userId, { requireAdmin: true });
+
+    const { error } = await client.storage
+      .from("slips")
+      .remove([storagePath]);
+
+    if (error) {
+      throw new Error(`Failed to delete slip from Supabase storage: ${error.message}`);
+    }
+  }
+
+  async slipFileExists(storagePath: string): Promise<boolean> {
+    const parts = storagePath.split("/");
+    const userId = parts[0];
+    const client = await this.getClient(userId, { requireAdmin: true });
+
+    const { data, error } = await client.storage
+      .from("slips")
+      .download(storagePath);
+
+    return !error && Boolean(data);
+  }
+
   async createSignedSlipUrl(
     userId: string,
     slipId: string,
-    expiresInSeconds = 900
+    expiresInSeconds = 120
   ): Promise<string> {
     assertUserId(userId);
     const slip = await this.getSlipById(userId, slipId);
@@ -1986,7 +2034,12 @@ export class SupabaseDataStoreImpl implements IDataStore {
       throw new Error("Slip not found or access denied");
     }
 
-    const exp = Date.now() + expiresInSeconds * 1000;
+    if (slip.binary_deleted_at || !slip.storage_path) {
+      throw new Error("ไฟล์ต้นฉบับถูกลบตามนโยบายการเก็บรักษาแล้ว (Original binary was pruned per retention policy)");
+    }
+
+    const clampedTtl = Math.max(1, Math.min(expiresInSeconds, 300));
+    const exp = Date.now() + clampedTtl * 1000;
     const secret =
       process.env.SESSION_SECRET || "finn-preview-signature-secret-2026";
     const sig = crypto
@@ -2016,6 +2069,205 @@ export class SupabaseDataStoreImpl implements IDataStore {
     } catch {
       return false;
     }
+  }
+
+  // Storage Retention Settings
+  async getStorageRetentionSettings(userId: string): Promise<StorageRetentionSettings> {
+    assertUserId(userId);
+    const client = await this.getClient(userId);
+    const { data, error } = await client
+      .from("storage_retention_settings")
+      .select()
+      .eq("user_id", userId)
+      .maybeSingle();
+
+    if (error || !data) {
+      const now = new Date().toISOString();
+      return {
+        user_id: userId,
+        slip_retention_days: 90,
+        failed_retention_days: 7,
+        source_document_retention_days: 90,
+        created_at: now,
+        updated_at: now,
+      };
+    }
+
+    return {
+      user_id: String(data.user_id),
+      slip_retention_days: Number(data.slip_retention_days),
+      failed_retention_days: Number(data.failed_retention_days),
+      source_document_retention_days: Number(data.source_document_retention_days),
+      created_at: String(data.created_at),
+      updated_at: String(data.updated_at),
+    };
+  }
+
+  async updateStorageRetentionSettings(
+    userId: string,
+    data: Partial<StorageRetentionSettings>
+  ): Promise<StorageRetentionSettings> {
+    assertUserId(userId);
+    const client = await this.getClient(userId);
+
+    const updatePayload: Record<string, unknown> = {
+      user_id: userId,
+      updated_at: new Date().toISOString(),
+    };
+    if (data.slip_retention_days !== undefined) updatePayload.slip_retention_days = data.slip_retention_days;
+    if (data.failed_retention_days !== undefined) updatePayload.failed_retention_days = data.failed_retention_days;
+    if (data.source_document_retention_days !== undefined)
+      updatePayload.source_document_retention_days = data.source_document_retention_days;
+
+    const { data: updated, error } = await client
+      .from("storage_retention_settings")
+      .upsert(updatePayload, { onConflict: "user_id" })
+      .select()
+      .single();
+
+    if (error) {
+      throw new Error(`Failed to update retention settings: ${error.message}`);
+    }
+
+    return {
+      user_id: String(updated.user_id),
+      slip_retention_days: Number(updated.slip_retention_days),
+      failed_retention_days: Number(updated.failed_retention_days),
+      source_document_retention_days: Number(updated.source_document_retention_days),
+      created_at: String(updated.created_at),
+      updated_at: String(updated.updated_at),
+    };
+  }
+
+  async createStorageBinaryEvent(
+    userId: string,
+    data: Omit<StorageBinaryEvent, "id" | "created_at">
+  ): Promise<StorageBinaryEvent> {
+    assertUserId(userId);
+    const client = await this.getClient(userId, { requireAdmin: true });
+    const payload = {
+      user_id: userId,
+      slip_id: data.slip_id || null,
+      source_document_id: data.source_document_id || null,
+      action: data.action,
+      storage_path_snapshot: data.storage_path_snapshot || null,
+      file_hash_snapshot: data.file_hash_snapshot || null,
+      bytes_affected: data.bytes_affected ?? null,
+      reason: data.reason || null,
+      safe_error_message: data.safe_error_message || null,
+    };
+
+    const { data: created, error } = await client
+      .from("storage_binary_events")
+      .insert(payload)
+      .select()
+      .single();
+
+    if (error) {
+      throw new Error(`Failed to record storage binary event: ${error.message}`);
+    }
+
+    return {
+      id: String(created.id),
+      user_id: String(created.user_id),
+      slip_id: created.slip_id ? String(created.slip_id) : null,
+      source_document_id: created.source_document_id ? String(created.source_document_id) : null,
+      action: created.action as StorageBinaryEvent["action"],
+      storage_path_snapshot: created.storage_path_snapshot ? String(created.storage_path_snapshot) : null,
+      file_hash_snapshot: created.file_hash_snapshot ? String(created.file_hash_snapshot) : null,
+      bytes_affected: created.bytes_affected !== null ? Number(created.bytes_affected) : null,
+      reason: created.reason ? String(created.reason) : null,
+      safe_error_message: created.safe_error_message ? String(created.safe_error_message) : null,
+      created_at: String(created.created_at),
+    };
+  }
+
+  async getStorageBinaryEvents(
+    userId: string,
+    filter?: { slipId?: string; sourceDocumentId?: string; limit?: number }
+  ): Promise<StorageBinaryEvent[]> {
+    assertUserId(userId);
+    const client = await this.getClient(userId);
+    let query = client
+      .from("storage_binary_events")
+      .select()
+      .eq("user_id", userId)
+      .order("created_at", { ascending: false });
+
+    if (filter?.slipId) {
+      query = query.eq("slip_id", filter.slipId);
+    }
+    if (filter?.sourceDocumentId) {
+      query = query.eq("source_document_id", filter.sourceDocumentId);
+    }
+    if (filter?.limit) {
+      query = query.limit(filter.limit);
+    }
+
+    const { data, error } = await query;
+    if (error) {
+      throw new Error(`Failed to fetch storage binary events: ${error.message}`);
+    }
+
+    return (data || []).map((row) => ({
+      id: String(row.id),
+      user_id: String(row.user_id),
+      slip_id: row.slip_id ? String(row.slip_id) : null,
+      source_document_id: row.source_document_id ? String(row.source_document_id) : null,
+      action: row.action as StorageBinaryEvent["action"],
+      storage_path_snapshot: row.storage_path_snapshot ? String(row.storage_path_snapshot) : null,
+      file_hash_snapshot: row.file_hash_snapshot ? String(row.file_hash_snapshot) : null,
+      bytes_affected: row.bytes_affected !== null ? Number(row.bytes_affected) : null,
+      reason: row.reason ? String(row.reason) : null,
+      safe_error_message: row.safe_error_message ? String(row.safe_error_message) : null,
+      created_at: String(row.created_at),
+    }));
+  }
+
+  async setSlipPinned(userId: string, slipId: string, isPinned: boolean): Promise<Slip> {
+    assertUserId(userId);
+    const slip = await this.getSlipById(userId, slipId);
+    if (!slip) {
+      throw new Error("Slip not found or access denied");
+    }
+
+    const updated = await this.updateSlip(userId, slipId, { is_pinned: isPinned });
+
+    await this.createStorageBinaryEvent(userId, {
+      user_id: userId,
+      slip_id: slip.id,
+      action: isPinned ? "pin" : "unpin",
+      storage_path_snapshot: slip.storage_path,
+      file_hash_snapshot: slip.file_hash_sha256,
+      bytes_affected: slip.stored_file_size ?? slip.file_size,
+    });
+
+    return updated;
+  }
+
+  async setSourceDocumentPinned(
+    userId: string,
+    docId: string,
+    isPinned: boolean
+  ): Promise<SourceDocument> {
+    assertUserId(userId);
+    const doc = await this.getSourceDocumentById(userId, docId);
+    if (!doc) {
+      throw new Error("Source document not found or access denied");
+    }
+
+    const updated = await this.updateSourceDocument(userId, docId, { is_pinned: isPinned });
+
+    await this.createStorageBinaryEvent(userId, {
+      user_id: userId,
+      source_document_id: doc.id,
+      action: isPinned ? "pin" : "unpin",
+      storage_path_snapshot: doc.storage_path,
+      file_hash_snapshot: doc.file_hash,
+      bytes_affected: doc.stored_file_size ?? doc.file_size,
+    });
+
+    return updated;
   }
 
   // Atomic Slip Confirmation

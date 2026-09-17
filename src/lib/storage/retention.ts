@@ -1,4 +1,5 @@
 import { SourceDocument, IngestionItem } from "@/types/multi-source";
+import { Slip } from "@/types/slip";
 
 /**
  * ARCHITECTURAL NOTICE — STORAGE RETENTION & IMAGE OPTIMIZATION:
@@ -30,6 +31,30 @@ export interface StorageCleanupCandidate {
   receivedAt: string;
 }
 
+export interface SlipCleanupCandidate {
+  slipId: string;
+  originalFilename: string | null;
+  fileHash: string | null;
+  fileSize: number;
+  storedFileSize: number;
+  ageDays: number;
+  createdAt: string;
+  status: string;
+}
+
+export interface UnifiedCleanupCandidate {
+  id: string;
+  kind: "slip" | "source_document";
+  originalFilename: string | null;
+  fileHash: string | null;
+  fileSize: number;
+  storedFileSize: number;
+  ageDays: number;
+  createdAt: string;
+  status?: string;
+  isPinned: boolean;
+}
+
 export interface StorageCleanupDryRunResult {
   candidates: StorageCleanupCandidate[];
   exemptPinnedCount: number;
@@ -37,6 +62,18 @@ export interface StorageCleanupDryRunResult {
   alreadyPrunedCount: number;
   totalDocuments: number;
   bytesRecoverable: number;
+}
+
+export interface UnifiedCleanupDryRunResult {
+  candidates: UnifiedCleanupCandidate[];
+  exemptPinnedCount: number;
+  exemptRecentCount: number;
+  exemptUnresolvedCount: number;
+  alreadyPrunedCount: number;
+  totalItems: number;
+  bytesRecoverable: number;
+  slipCandidatesCount: number;
+  sourceDocumentCandidatesCount: number;
 }
 
 export interface StorageUsageSummary {
@@ -126,6 +163,85 @@ export function isDocumentRetentionEligible(
 }
 
 /**
+ * Checks if a slip is eligible for binary retention cleanup.
+ *
+ * Rules:
+ * 1. Pinned slips are NEVER cleanup candidates (pinned behavior).
+ * 2. Slips whose binary has already been pruned are skipped.
+ * 3. Unresolved slips (uploaded, processing, needs_review) are NOT eligible.
+ * 4. Slips must be older than the retention threshold.
+ *    - Failed or rejected slips: failedRetentionDays (default 7)
+ *    - Confirmed/created/duplicate slips: retentionDays (default 90)
+ */
+export function isSlipRetentionEligible(
+  slip: Slip,
+  options: StorageCleanupOptions = {}
+): { eligible: boolean; reason: string; ageDays: number } {
+  const now = options.now ? new Date(options.now) : new Date();
+  const retentionDays = options.retentionDays ?? DEFAULT_RETENTION_DAYS;
+
+  // Rule 1: Pinned behavior - NEVER clean up pinned slips
+  if (slip.is_pinned) {
+    return {
+      eligible: false,
+      reason: "Pinned slip: is pinned by user, protected from retention deletion",
+      ageDays: 0,
+    };
+  }
+
+  // Rule 2: Already pruned
+  if (slip.binary_deleted_at || !slip.storage_path) {
+    return {
+      eligible: false,
+      reason: "Binary already deleted (already pruned)",
+      ageDays: 0,
+    };
+  }
+
+  // Rule 3: Unresolved review status - protect active inbox items
+  const unresolvedStatuses = ["uploaded", "processing", "needs_review"];
+  if (unresolvedStatuses.includes(slip.status)) {
+    return {
+      eligible: false,
+      reason: `Slip is in unresolved review status (${slip.status}), protected from cleanup`,
+      ageDays: 0,
+    };
+  }
+
+  const dateStr = slip.created_at || slip.processed_at;
+  const slipDate = dateStr ? new Date(dateStr) : null;
+  if (!slipDate || isNaN(slipDate.getTime())) {
+    return {
+      eligible: false,
+      reason: "Invalid slip timestamp",
+      ageDays: 0,
+    };
+  }
+
+  const ageMs = now.getTime() - slipDate.getTime();
+  const ageDays = Math.floor(ageMs / (1000 * 60 * 60 * 24));
+
+  const isFailedOrRejected = slip.status === "failed" || slip.status === "rejected";
+  const thresholdDays = isFailedOrRejected ? (options.failedRetentionDays ?? 7) : retentionDays;
+
+  if (ageDays < thresholdDays) {
+    return {
+      eligible: false,
+      reason: `Within retention window (${ageDays}/${thresholdDays} days)`,
+      ageDays,
+    };
+  }
+
+  return {
+    eligible: true,
+    reason: isFailedOrRejected
+      ? `Failed or rejected slip exceeded cleanup threshold (${ageDays} >= ${thresholdDays} days)`
+      : `Exceeded retention threshold (${ageDays} >= ${retentionDays} days) and not pinned`,
+    ageDays,
+  };
+}
+
+/**
  * Performs a dry-run evaluation of storage cleanup across a user's documents.
  * Returns candidate documents, recoverable bytes, and exemption breakdowns.
  */
@@ -179,6 +295,109 @@ export function evaluateStorageCleanupDryRun(
 }
 
 /**
+ * Evaluates cleanup candidates across both source documents and slips.
+ * Returns candidate items, recoverable bytes, and exemption breakdowns.
+ */
+export function evaluateUnifiedStorageCleanupDryRun(
+  documents: SourceDocument[],
+  slips: Slip[] = [],
+  options: StorageCleanupOptions = {}
+): UnifiedCleanupDryRunResult {
+  const candidates: UnifiedCleanupCandidate[] = [];
+  let exemptPinnedCount = 0;
+  let exemptRecentCount = 0;
+  let exemptUnresolvedCount = 0;
+  let alreadyPrunedCount = 0;
+  let bytesRecoverable = 0;
+  let slipCandidatesCount = 0;
+  let sourceDocumentCandidatesCount = 0;
+
+  for (const doc of documents) {
+    if (doc.binary_deleted_at || !doc.storage_path) {
+      alreadyPrunedCount++;
+      continue;
+    }
+
+    if (doc.is_pinned) {
+      exemptPinnedCount++;
+      continue;
+    }
+
+    const { eligible, ageDays } = isDocumentRetentionEligible(doc, options);
+    if (eligible) {
+      const activeSize = doc.stored_file_size || doc.file_size || 0;
+      candidates.push({
+        id: doc.id,
+        kind: "source_document",
+        originalFilename: doc.original_filename ?? null,
+        fileHash: doc.file_hash ?? null,
+        fileSize: doc.file_size || 0,
+        storedFileSize: activeSize,
+        ageDays,
+        createdAt: doc.received_at || doc.created_at,
+        status: doc.status,
+        isPinned: false,
+      });
+      sourceDocumentCandidatesCount++;
+      bytesRecoverable += activeSize;
+    } else {
+      exemptRecentCount++;
+    }
+  }
+
+  for (const slip of slips) {
+    if (slip.binary_deleted_at || !slip.storage_path) {
+      alreadyPrunedCount++;
+      continue;
+    }
+
+    if (slip.is_pinned) {
+      exemptPinnedCount++;
+      continue;
+    }
+
+    const unresolvedStatuses = ["uploaded", "processing", "needs_review"];
+    if (unresolvedStatuses.includes(slip.status)) {
+      exemptUnresolvedCount++;
+      continue;
+    }
+
+    const { eligible, ageDays } = isSlipRetentionEligible(slip, options);
+    if (eligible) {
+      const activeSize = slip.stored_file_size ?? slip.file_size ?? 0;
+      candidates.push({
+        id: slip.id,
+        kind: "slip",
+        originalFilename: null,
+        fileHash: slip.file_hash_sha256,
+        fileSize: slip.file_size,
+        storedFileSize: activeSize,
+        ageDays,
+        createdAt: slip.created_at,
+        status: slip.status,
+        isPinned: false,
+      });
+      slipCandidatesCount++;
+      bytesRecoverable += activeSize;
+    } else {
+      exemptRecentCount++;
+    }
+  }
+
+  return {
+    candidates,
+    exemptPinnedCount,
+    exemptRecentCount,
+    exemptUnresolvedCount,
+    alreadyPrunedCount,
+    totalItems: documents.length + slips.length,
+    bytesRecoverable,
+    slipCandidatesCount,
+    sourceDocumentCandidatesCount,
+  };
+}
+
+/**
  * Prunes the storage binary for a document while preserving all metadata in the DB.
  *
  * Integrity Guarantee:
@@ -201,11 +420,35 @@ export function deleteSourceDocumentBinary(
 }
 
 /**
- * Summarizes storage usage, compression savings, and retention metrics.
+ * Prunes the storage binary for a slip while preserving all metadata in the DB.
+ *
+ * Integrity Guarantee:
+ * - `id, user_id, file_hash_sha256, file_size, extracted_json, raw_ocr_text, linked_transaction_id`
+ *   remain completely intact.
+ * - Deduplication indexes and linked transactions continue to reference this slip.
+ */
+export function deleteSlipBinary(
+  slip: Slip,
+  deletedAt: string = new Date().toISOString()
+): Slip {
+  return {
+    ...slip,
+    storage_path: null,
+    stored_file_size: 0,
+    binary_deleted_at: deletedAt,
+  };
+}
+
+export const pruneSlipBinary = deleteSlipBinary;
+
+/**
+ * Summarizes storage usage, compression savings, and retention metrics across
+ * source documents and slips.
  */
 export function getStorageUsageSummary(
   documents: SourceDocument[],
-  ingestionItems: IngestionItem[] = []
+  ingestionItems: IngestionItem[] = [],
+  slips: Slip[] = []
 ): StorageUsageSummary {
   let totalOriginalBytes = 0;
   let totalStoredBytes = 0;
@@ -251,8 +494,37 @@ export function getStorageUsageSummary(
     }
   }
 
+  for (const slip of slips) {
+    const origSize = slip.file_size || 0;
+    totalOriginalBytes += origSize;
+
+    if (slip.status === "failed" || slip.status === "rejected") {
+      failedOrRejectedCount++;
+    }
+    if (slip.status === "duplicate") {
+      duplicateCount++;
+    }
+
+    if (slip.binary_deleted_at) {
+      binariesDeletedCount++;
+    } else {
+      const stored =
+        slip.stored_file_size !== null && slip.stored_file_size !== undefined
+          ? slip.stored_file_size
+          : origSize;
+      totalStoredBytes += stored;
+      bytesSavedByOptimization += Math.max(0, origSize - stored);
+    }
+
+    if (slip.is_pinned) {
+      pinnedCount++;
+    } else if (!slip.binary_deleted_at && isSlipRetentionEligible(slip).eligible) {
+      cleanupEligibleCount++;
+    }
+  }
+
   return {
-    totalDocuments: documents.length,
+    totalDocuments: documents.length + slips.length,
     totalOriginalBytes,
     totalStoredBytes,
     bytesSavedByOptimization,

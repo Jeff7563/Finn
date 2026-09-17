@@ -36,6 +36,7 @@ import {
   TransactionEvidence,
   ReconciliationRun,
 } from "@/types/multi-source";
+import { StorageRetentionSettings, StorageBinaryEvent } from "@/types/storage";
 import { normalizeBankName } from "../slip/bank-normalization";
 import {
   countVisibleDigits,
@@ -112,6 +113,8 @@ export interface MemoryDatabaseState {
   transaction_evidence: TransactionEvidence[];
   reconciliation_runs: ReconciliationRun[];
   transaction_void_events: TransactionVoidEvent[];
+  storage_retention_settings: StorageRetentionSettings[];
+  storage_binary_events: StorageBinaryEvent[];
 }
 
 function getInitialState(): MemoryDatabaseState {
@@ -140,6 +143,8 @@ function getInitialState(): MemoryDatabaseState {
     transaction_evidence: [],
     reconciliation_runs: [],
     transaction_void_events: [],
+    storage_retention_settings: [],
+    storage_binary_events: [],
   };
 }
 
@@ -936,7 +941,7 @@ export const MemoryDataStore: IDataStore = {
     assertUserId(userId);
     return dbState.transaction_void_events
       .filter((e) => e.user_id === userId && e.transaction_id === transactionId)
-      .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+      .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
   },
 
   // INGEST TOKENS
@@ -1067,9 +1072,15 @@ export const MemoryDataStore: IDataStore = {
       status: data.status || "uploaded",
       linked_transaction_id: data.linked_transaction_id || null,
       duplicate_of_slip_id: data.duplicate_of_slip_id || null,
-      created_at: now,
+      created_at: data.created_at || now,
       processed_at: data.processed_at || null,
       deleted_at: null,
+      stored_file_size:
+        data.stored_file_size !== undefined
+          ? data.stored_file_size
+          : (data.file_size || 0),
+      binary_deleted_at: data.binary_deleted_at || null,
+      is_pinned: data.is_pinned ?? false,
     };
 
     dbState.slips.push(newSlip);
@@ -1104,6 +1115,10 @@ export const MemoryDataStore: IDataStore = {
       user_id: userId,
       id: current.id,
     };
+
+    if (data.stored_file_size !== undefined) updated.stored_file_size = data.stored_file_size;
+    if (data.binary_deleted_at !== undefined) updated.binary_deleted_at = data.binary_deleted_at;
+    if (data.is_pinned !== undefined) updated.is_pinned = data.is_pinned;
 
     dbState.slips[idx] = updated;
     return updated;
@@ -1211,10 +1226,18 @@ export const MemoryDataStore: IDataStore = {
     return memorySlipFiles.get(storagePath) || null;
   },
 
+  async deleteSlipFile(storagePath: string): Promise<void> {
+    memorySlipFiles.delete(storagePath);
+  },
+
+  async slipFileExists(storagePath: string): Promise<boolean> {
+    return memorySlipFiles.has(storagePath);
+  },
+
   async createSignedSlipUrl(
     userId: string,
     slipId: string,
-    expiresInSeconds = 900
+    expiresInSeconds = 120
   ): Promise<string> {
     assertUserId(userId);
     const slip = await this.getSlipById(userId, slipId);
@@ -1222,7 +1245,13 @@ export const MemoryDataStore: IDataStore = {
       throw new Error("Slip not found or access denied");
     }
 
-    const exp = Date.now() + expiresInSeconds * 1000;
+    if (slip.binary_deleted_at || !slip.storage_path) {
+      throw new Error("ไฟล์ต้นฉบับถูกลบตามนโยบายการเก็บรักษาแล้ว (Original binary was pruned per retention policy)");
+    }
+
+    // Clamp TTL: default 120s, maximum 300s
+    const clampedTtl = Math.max(1, Math.min(expiresInSeconds, 300));
+    const exp = Date.now() + clampedTtl * 1000;
     const secret =
       process.env.SESSION_SECRET || "finn-preview-signature-secret-2026";
     const sig = crypto
@@ -1252,6 +1281,163 @@ export const MemoryDataStore: IDataStore = {
     } catch {
       return false;
     }
+  },
+
+  // Storage Retention Settings
+  async getStorageRetentionSettings(userId: string): Promise<StorageRetentionSettings> {
+    assertUserId(userId);
+    const existing = dbState.storage_retention_settings.find((s) => s.user_id === userId);
+    if (existing) return existing;
+
+    const now = new Date().toISOString();
+    const defaultSettings: StorageRetentionSettings = {
+      user_id: userId,
+      slip_retention_days: 90,
+      failed_retention_days: 7,
+      source_document_retention_days: 90,
+      created_at: now,
+      updated_at: now,
+    };
+    dbState.storage_retention_settings.push(defaultSettings);
+    return defaultSettings;
+  },
+
+  async updateStorageRetentionSettings(
+    userId: string,
+    data: Partial<StorageRetentionSettings>
+  ): Promise<StorageRetentionSettings> {
+    assertUserId(userId);
+    let settings = dbState.storage_retention_settings.find((s) => s.user_id === userId);
+    const now = new Date().toISOString();
+
+    if (data.slip_retention_days !== undefined) {
+      if (data.slip_retention_days < 7 || data.slip_retention_days > 3650) {
+        throw new Error("slip_retention_days must be between 7 and 3650 days");
+      }
+    }
+    if (data.failed_retention_days !== undefined) {
+      if (data.failed_retention_days < 1 || data.failed_retention_days > 365) {
+        throw new Error("failed_retention_days must be between 1 and 365 days");
+      }
+    }
+    if (data.source_document_retention_days !== undefined) {
+      if (data.source_document_retention_days < 7 || data.source_document_retention_days > 3650) {
+        throw new Error("source_document_retention_days must be between 7 and 3650 days");
+      }
+    }
+
+    if (!settings) {
+      settings = {
+        user_id: userId,
+        slip_retention_days: data.slip_retention_days ?? 90,
+        failed_retention_days: data.failed_retention_days ?? 7,
+        source_document_retention_days: data.source_document_retention_days ?? 90,
+        created_at: now,
+        updated_at: now,
+      };
+      dbState.storage_retention_settings.push(settings);
+    } else {
+      if (data.slip_retention_days !== undefined) settings.slip_retention_days = data.slip_retention_days;
+      if (data.failed_retention_days !== undefined) settings.failed_retention_days = data.failed_retention_days;
+      if (data.source_document_retention_days !== undefined) settings.source_document_retention_days = data.source_document_retention_days;
+      settings.updated_at = now;
+    }
+
+    return settings;
+  },
+
+  // Storage Binary Events
+  async createStorageBinaryEvent(
+    userId: string,
+    data: Omit<StorageBinaryEvent, "id" | "created_at">
+  ): Promise<StorageBinaryEvent> {
+    assertUserId(userId);
+    const event: StorageBinaryEvent = {
+      id: crypto.randomUUID(),
+      user_id: userId,
+      slip_id: data.slip_id || null,
+      source_document_id: data.source_document_id || null,
+      action: data.action,
+      storage_path_snapshot: data.storage_path_snapshot || null,
+      file_hash_snapshot: data.file_hash_snapshot || null,
+      bytes_affected: data.bytes_affected ?? null,
+      reason: data.reason || null,
+      safe_error_message: data.safe_error_message || null,
+      created_at: new Date().toISOString(),
+    };
+
+    dbState.storage_binary_events.push(event);
+    return event;
+  },
+
+  async getStorageBinaryEvents(
+    userId: string,
+    filter?: { slipId?: string; sourceDocumentId?: string; limit?: number }
+  ): Promise<StorageBinaryEvent[]> {
+    assertUserId(userId);
+    let events = dbState.storage_binary_events.filter((e) => e.user_id === userId);
+    if (filter?.slipId) {
+      events = events.filter((e) => e.slip_id === filter.slipId);
+    }
+    if (filter?.sourceDocumentId) {
+      events = events.filter((e) => e.source_document_id === filter.sourceDocumentId);
+    }
+
+    // Sort descending by created_at
+    events.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+
+    if (filter?.limit) {
+      events = events.slice(0, filter.limit);
+    }
+
+    return events;
+  },
+
+  // Pinned Evidence
+  async setSlipPinned(userId: string, slipId: string, isPinned: boolean): Promise<Slip> {
+    assertUserId(userId);
+    const slip = await this.getSlipById(userId, slipId);
+    if (!slip) {
+      throw new Error("Slip not found or access denied");
+    }
+
+    const updated = await this.updateSlip(userId, slipId, { is_pinned: isPinned });
+
+    await this.createStorageBinaryEvent(userId, {
+      user_id: userId,
+      slip_id: slip.id,
+      action: isPinned ? "pin" : "unpin",
+      storage_path_snapshot: slip.storage_path,
+      file_hash_snapshot: slip.file_hash_sha256,
+      bytes_affected: slip.stored_file_size ?? slip.file_size,
+    });
+
+    return updated;
+  },
+
+  async setSourceDocumentPinned(
+    userId: string,
+    docId: string,
+    isPinned: boolean
+  ): Promise<SourceDocument> {
+    assertUserId(userId);
+    const doc = await this.getSourceDocumentById(userId, docId);
+    if (!doc) {
+      throw new Error("Source document not found or access denied");
+    }
+
+    const updated = await this.updateSourceDocument(userId, docId, { is_pinned: isPinned });
+
+    await this.createStorageBinaryEvent(userId, {
+      user_id: userId,
+      source_document_id: doc.id,
+      action: isPinned ? "pin" : "unpin",
+      storage_path_snapshot: doc.storage_path,
+      file_hash_snapshot: doc.file_hash,
+      bytes_affected: doc.stored_file_size ?? doc.file_size,
+    });
+
+    return updated;
   },
 
   // Account Match Aliases

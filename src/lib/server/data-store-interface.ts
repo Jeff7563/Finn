@@ -29,6 +29,7 @@ import {
   TransactionEvidence,
   ReconciliationRun,
 } from "@/types/multi-source";
+import { StorageRetentionSettings, StorageBinaryEvent } from "@/types/storage";
 
 export interface PreloadedRelations {
   accounts?: Account[];
@@ -128,8 +129,27 @@ export interface IDataStore {
   // Storage
   saveSlipFile(storagePath: string, buffer: Buffer): Promise<void>;
   getSlipFile(storagePath: string): Promise<Buffer | null>;
+  deleteSlipFile(storagePath: string): Promise<void>;
+  slipFileExists(storagePath: string): Promise<boolean>;
   createSignedSlipUrl(userId: string, slipId: string, expiresInSeconds?: number): Promise<string>;
   verifySlipPreviewSignature(slipId: string, exp: number, sig: string): boolean;
+
+  // Storage Retention & Pinned Evidence
+  getStorageRetentionSettings(userId: string): Promise<StorageRetentionSettings>;
+  updateStorageRetentionSettings(
+    userId: string,
+    data: Partial<StorageRetentionSettings>
+  ): Promise<StorageRetentionSettings>;
+  createStorageBinaryEvent(
+    userId: string,
+    data: Omit<StorageBinaryEvent, "id" | "created_at">
+  ): Promise<StorageBinaryEvent>;
+  getStorageBinaryEvents(
+    userId: string,
+    filter?: { slipId?: string; sourceDocumentId?: string; limit?: number }
+  ): Promise<StorageBinaryEvent[]>;
+  setSlipPinned(userId: string, slipId: string, isPinned: boolean): Promise<Slip>;
+  setSourceDocumentPinned(userId: string, docId: string, isPinned: boolean): Promise<SourceDocument>;
 
   // Atomic Slip Confirmation
   confirmSlipTransaction(

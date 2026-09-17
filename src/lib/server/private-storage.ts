@@ -1,0 +1,401 @@
+import "server-only";
+
+import { DataStore } from "@/lib/server/data-store";
+import { StoragePruneResult } from "@/types/storage";
+
+/**
+ * Derives a trusted, deterministic storage path for a slip.
+ * Path format: {userId}/{YYYY}/{MM}/{slipId}.{ext}
+ * Never accepts an arbitrary client-specified storage path.
+ */
+export function deriveTrustedSlipPath(
+  userId: string,
+  slipId: string,
+  mimeType: string = "image/jpeg",
+  createdAt: string = new Date().toISOString()
+): string {
+  if (!userId || !slipId) {
+    throw new Error("Invalid arguments: userId and slipId are required");
+  }
+  // Sanitize UUIDs to prevent directory traversal
+  const cleanUserId = userId.replace(/[^a-zA-Z0-9_-]/g, "");
+  const cleanSlipId = slipId.replace(/[^a-zA-Z0-9_-]/g, "");
+
+  const date = new Date(createdAt);
+  const year = isNaN(date.getFullYear()) ? new Date().getFullYear() : date.getFullYear();
+  const month = isNaN(date.getMonth())
+    ? String(new Date().getMonth() + 1).padStart(2, "0")
+    : String(date.getMonth() + 1).padStart(2, "0");
+
+  let ext = "jpg";
+  if (mimeType.includes("png")) ext = "png";
+  else if (mimeType.includes("webp")) ext = "webp";
+  else if (mimeType.includes("pdf")) ext = "pdf";
+
+  return `${cleanUserId}/${year}/${month}/${cleanSlipId}.${ext}`;
+}
+
+/**
+ * Saves a slip binary into private storage with server-derived path.
+ */
+export async function saveSlipBinary(
+  userId: string,
+  slipId: string,
+  buffer: Buffer,
+  mimeType: string = "image/jpeg"
+): Promise<{ storagePath: string; bytes: number }> {
+  if (!userId || !slipId) {
+    throw new Error("Unauthorized: userId and slipId are required");
+  }
+
+  const storagePath = deriveTrustedSlipPath(userId, slipId, mimeType);
+  await DataStore.saveSlipFile(storagePath, buffer);
+
+  return {
+    storagePath,
+    bytes: buffer.length,
+  };
+}
+
+/**
+ * Creates a short-lived signed URL for viewing a private slip.
+ * Enforces ownership, active binary status, and TTL boundaries (default 120s, max 300s).
+ */
+export async function createSlipSignedViewUrl(
+  userId: string,
+  slipId: string,
+  expiresInSeconds: number = 120
+): Promise<{ url: string; expiresIn: number; expiresAt: string }> {
+  if (!userId || !slipId) {
+    throw new Error("Access denied: valid user session and slipId required");
+  }
+
+  const slip = await DataStore.getSlipById(userId, slipId);
+  if (!slip) {
+    throw new Error("ไม่พบไฟล์หลักฐาน (Slip not found or access denied)");
+  }
+
+  if (slip.user_id !== userId) {
+    throw new Error("Access denied: cross-user access prohibited");
+  }
+
+  if (slip.binary_deleted_at || !slip.storage_path) {
+    throw new Error("ไฟล์ต้นฉบับถูกลบตามนโยบายการเก็บรักษาแล้ว (Original binary was pruned per retention policy)");
+  }
+
+  // Hard clamp: default 120s, hard ceiling 300s
+  const clampedTtl = Math.max(1, Math.min(expiresInSeconds, 300));
+  const url = await DataStore.createSignedSlipUrl(userId, slipId, clampedTtl);
+  const expiresAt = new Date(Date.now() + clampedTtl * 1000).toISOString();
+
+  return {
+    url,
+    expiresIn: clampedTtl,
+    expiresAt,
+  };
+}
+
+/**
+ * Retrieves the raw binary buffer of a slip, with ownership check.
+ */
+export async function getSlipBinary(
+  userId: string,
+  slipId: string
+): Promise<{ buffer: Buffer; mimeType: string } | null> {
+  if (!userId || !slipId) return null;
+
+  const slip = await DataStore.getSlipById(userId, slipId);
+  if (!slip || slip.user_id !== userId) return null;
+
+  if (slip.binary_deleted_at || slip.stored_file_size === 0 || !slip.storage_path) {
+    return null;
+  }
+
+  const buffer = await DataStore.getSlipFile(slip.storage_path);
+  if (!buffer) return null;
+
+  return {
+    buffer,
+    mimeType: slip.mime_type || "image/jpeg",
+  };
+}
+
+/**
+ * Checks whether a binary exists in storage.
+ */
+export async function binaryExists(storagePath: string): Promise<boolean> {
+  if (!storagePath) return false;
+  return DataStore.slipFileExists(storagePath);
+}
+
+/**
+ * SAFE CROSS-RESOURCE PRUNE FLOW FOR SLIPS (Section 14)
+ *
+ * 1. Authenticate user + ownership check
+ * 2. Verify retention/manual eligibility (pinned slips or unresolved states rejected)
+ * 3. Record prune_requested audit event
+ * 4. Delete Storage binary using server-only admin client
+ * 5. Only after successful deletion: update binary_deleted_at / stored_file_size
+ * 6. Record prune_completed audit event
+ * If storage deletion fails: record prune_failed, do NOT update metadata, surface safe error.
+ * Re-prune of already-pruned binary is idempotent.
+ */
+export async function pruneSlipBinary(
+  userId: string,
+  slipId: string,
+  reason: string = "manual_user_prune"
+): Promise<StoragePruneResult> {
+  if (!userId || !slipId) {
+    throw new Error("Access denied: user and slipId are required");
+  }
+
+  const slip = await DataStore.getSlipById(userId, slipId);
+  if (!slip) {
+    throw new Error("ไม่พบข้อมูลสลิป (Slip not found or access denied)");
+  }
+
+  if (slip.user_id !== userId) {
+    throw new Error("Access denied: cross-user prune rejected");
+  }
+
+  // Idempotency: if already pruned, return success with 0 bytes freed
+  if (slip.binary_deleted_at && slip.stored_file_size === 0) {
+    return {
+      success: true,
+      targetId: slip.id,
+      targetType: "slip",
+      bytesFreed: 0,
+    };
+  }
+
+  // Protection: Pinned evidence must never be pruned
+  if (slip.is_pinned) {
+    throw new Error("ไม่สามารถลบหลักฐานที่ปักหมุดไว้ได้ กรุณายกเลิกการปักหมุดก่อนดำเนินการ (Cannot prune pinned evidence)");
+  }
+
+  // Protection: Unresolved slips need their binary for verification
+  if (
+    slip.status === "uploaded" ||
+    slip.status === "processing" ||
+    slip.status === "needs_review"
+  ) {
+    throw new Error("ไม่สามารถลบสลิปที่ยังรอการตรวจสอบหรือประมวลผลได้ (Cannot prune unresolved slip)");
+  }
+
+  const bytesToFree = slip.stored_file_size ?? slip.file_size ?? 0;
+
+  // Step 4: Record prune_requested
+  await DataStore.createStorageBinaryEvent(userId, {
+    user_id: userId,
+    slip_id: slip.id,
+    action: "prune_requested",
+    storage_path_snapshot: slip.storage_path,
+    file_hash_snapshot: slip.file_hash_sha256,
+    bytes_affected: bytesToFree,
+    reason,
+  });
+
+  // Step 5: Delete Storage binary
+  try {
+    if (slip.storage_path) {
+      await DataStore.deleteSlipFile(slip.storage_path);
+    }
+  } catch (err: unknown) {
+    const errMsg = err instanceof Error ? err.message : "Storage deletion failed";
+    // Check if error indicates file already missing in storage (idempotent reconciliation)
+    const isAlreadyMissing =
+      errMsg.includes("not found") ||
+      errMsg.includes("404") ||
+      errMsg.includes("Object not found");
+
+    if (!isAlreadyMissing) {
+      // Record prune_failed and do NOT update slip metadata
+      await DataStore.createStorageBinaryEvent(userId, {
+        user_id: userId,
+        slip_id: slip.id,
+        action: "prune_failed",
+        storage_path_snapshot: slip.storage_path,
+        file_hash_snapshot: slip.file_hash_sha256,
+        bytes_affected: bytesToFree,
+        reason,
+        safe_error_message: errMsg,
+      });
+
+      throw new Error(`การลบไฟล์จากที่จัดเก็บข้อมูลล้มเหลว: ${errMsg}`);
+    }
+  }
+
+  // Step 6: Update slip metadata only after successful storage removal
+  const nowIso = new Date().toISOString();
+  await DataStore.updateSlip(userId, slip.id, {
+    stored_file_size: 0,
+    binary_deleted_at: nowIso,
+  });
+
+  // Step 7: Record prune_completed
+  await DataStore.createStorageBinaryEvent(userId, {
+    user_id: userId,
+    slip_id: slip.id,
+    action: "prune_completed",
+    storage_path_snapshot: slip.storage_path,
+    file_hash_snapshot: slip.file_hash_sha256,
+    bytes_affected: bytesToFree,
+    reason,
+  });
+
+  return {
+    success: true,
+    targetId: slip.id,
+    targetType: "slip",
+    bytesFreed: bytesToFree,
+  };
+}
+
+/**
+ * SAFE CROSS-RESOURCE PRUNE FLOW FOR SOURCE DOCUMENTS (Section 14)
+ */
+export async function pruneSourceDocumentBinary(
+  userId: string,
+  docId: string,
+  reason: string = "manual_user_prune"
+): Promise<StoragePruneResult> {
+  if (!userId || !docId) {
+    throw new Error("Access denied: user and docId are required");
+  }
+
+  const doc = await DataStore.getSourceDocumentById(userId, docId);
+  if (!doc) {
+    throw new Error("ไม่พบข้อมูลเอกสาร (Document not found or access denied)");
+  }
+
+  if (doc.user_id !== userId) {
+    throw new Error("Access denied: cross-user prune rejected");
+  }
+
+  // Idempotency: if already pruned
+  if (doc.binary_deleted_at && doc.stored_file_size === 0) {
+    return {
+      success: true,
+      targetId: doc.id,
+      targetType: "source_document",
+      bytesFreed: 0,
+    };
+  }
+
+  if (doc.is_pinned) {
+    throw new Error("ไม่สามารถลบเอกสารที่ปักหมุดไว้ได้ กรุณายกเลิกการปักหมุดก่อนดำเนินการ (Cannot prune pinned document)");
+  }
+
+  if (doc.status === "received" || doc.status === "processing") {
+    throw new Error("ไม่สามารถลบเอกสารที่อยู่ระหว่างการประมวลผลได้ (Cannot prune unresolved document)");
+  }
+
+  const bytesToFree = doc.stored_file_size ?? doc.file_size ?? 0;
+
+  // Record prune_requested
+  await DataStore.createStorageBinaryEvent(userId, {
+    user_id: userId,
+    source_document_id: doc.id,
+    action: "prune_requested",
+    storage_path_snapshot: doc.storage_path,
+    file_hash_snapshot: doc.file_hash,
+    bytes_affected: bytesToFree,
+    reason,
+  });
+
+  // Delete storage binary if present
+  try {
+    if (doc.storage_path) {
+      await DataStore.deleteSlipFile(doc.storage_path);
+    }
+  } catch (err: unknown) {
+    const errMsg = err instanceof Error ? err.message : "Storage deletion failed";
+    const isAlreadyMissing =
+      errMsg.includes("not found") ||
+      errMsg.includes("404") ||
+      errMsg.includes("Object not found");
+
+    if (!isAlreadyMissing) {
+      await DataStore.createStorageBinaryEvent(userId, {
+        user_id: userId,
+        source_document_id: doc.id,
+        action: "prune_failed",
+        storage_path_snapshot: doc.storage_path,
+        file_hash_snapshot: doc.file_hash,
+        bytes_affected: bytesToFree,
+        reason,
+        safe_error_message: errMsg,
+      });
+
+      throw new Error(`การลบไฟล์จากที่จัดเก็บข้อมูลล้มเหลว: ${errMsg}`);
+    }
+  }
+
+  // Update source document metadata
+  const nowIso = new Date().toISOString();
+  await DataStore.updateSourceDocument(userId, doc.id, {
+    storage_path: null,
+    stored_file_size: 0,
+    binary_deleted_at: nowIso,
+  });
+
+  // Record prune_completed
+  await DataStore.createStorageBinaryEvent(userId, {
+    user_id: userId,
+    source_document_id: doc.id,
+    action: "prune_completed",
+    storage_path_snapshot: doc.storage_path,
+    file_hash_snapshot: doc.file_hash,
+    bytes_affected: bytesToFree,
+    reason,
+  });
+
+  return {
+    success: true,
+    targetId: doc.id,
+    targetType: "source_document",
+    bytesFreed: bytesToFree,
+  };
+}
+
+/**
+ * Pins evidence to protect it from all retention cleanup.
+ */
+export async function pinEvidence(
+  userId: string,
+  itemType: "slip" | "source_document",
+  itemId: string
+): Promise<void> {
+  if (itemType === "slip") {
+    await DataStore.setSlipPinned(userId, itemId, true);
+  } else {
+    await DataStore.setSourceDocumentPinned(userId, itemId, true);
+  }
+}
+
+/**
+ * Unpins evidence, making it eligible for retention cleanup when age threshold met.
+ */
+export async function unpinEvidence(
+  userId: string,
+  itemType: "slip" | "source_document",
+  itemId: string
+): Promise<void> {
+  if (itemType === "slip") {
+    await DataStore.setSlipPinned(userId, itemId, false);
+  } else {
+    await DataStore.setSourceDocumentPinned(userId, itemId, false);
+  }
+}
+
+export const privateStorage = {
+  deriveTrustedSlipPath,
+  saveSlipBinary,
+  createSlipSignedViewUrl,
+  binaryExists,
+  getSlipBinary,
+  pruneSlipBinary,
+  pruneSourceDocumentBinary,
+  pinEvidence,
+  unpinEvidence,
+};

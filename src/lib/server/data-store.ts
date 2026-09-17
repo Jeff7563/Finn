@@ -29,6 +29,7 @@ import {
   TransactionEvidence,
   ReconciliationRun,
 } from "@/types/multi-source";
+import { StorageRetentionSettings, StorageBinaryEvent } from "@/types/storage";
 import {
   IDataStore,
   PreloadedRelations,
@@ -359,16 +360,62 @@ export const DataStore: IDataStore = {
     return getActiveStore().getSlipFile(storagePath);
   },
 
+  async deleteSlipFile(storagePath: string): Promise<void> {
+    return getActiveStore().deleteSlipFile(storagePath);
+  },
+
+  async slipFileExists(storagePath: string): Promise<boolean> {
+    return getActiveStore().slipFileExists(storagePath);
+  },
+
   async createSignedSlipUrl(
     userId: string,
     slipId: string,
-    expiresInSeconds = 900
+    expiresInSeconds = 120
   ): Promise<string> {
     return getActiveStore().createSignedSlipUrl(userId, slipId, expiresInSeconds);
   },
 
   verifySlipPreviewSignature(slipId: string, exp: number, sig: string): boolean {
     return getActiveStore().verifySlipPreviewSignature(slipId, exp, sig);
+  },
+
+  // STORAGE RETENTION & PINNED EVIDENCE
+  async getStorageRetentionSettings(userId: string): Promise<StorageRetentionSettings> {
+    return getActiveStore().getStorageRetentionSettings(userId);
+  },
+
+  async updateStorageRetentionSettings(
+    userId: string,
+    data: Partial<StorageRetentionSettings>
+  ): Promise<StorageRetentionSettings> {
+    return getActiveStore().updateStorageRetentionSettings(userId, data);
+  },
+
+  async createStorageBinaryEvent(
+    userId: string,
+    data: Omit<StorageBinaryEvent, "id" | "created_at">
+  ): Promise<StorageBinaryEvent> {
+    return getActiveStore().createStorageBinaryEvent(userId, data);
+  },
+
+  async getStorageBinaryEvents(
+    userId: string,
+    filter?: { slipId?: string; sourceDocumentId?: string; limit?: number }
+  ): Promise<StorageBinaryEvent[]> {
+    return getActiveStore().getStorageBinaryEvents(userId, filter);
+  },
+
+  async setSlipPinned(userId: string, slipId: string, isPinned: boolean): Promise<Slip> {
+    return getActiveStore().setSlipPinned(userId, slipId, isPinned);
+  },
+
+  async setSourceDocumentPinned(
+    userId: string,
+    docId: string,
+    isPinned: boolean
+  ): Promise<SourceDocument> {
+    return getActiveStore().setSourceDocumentPinned(userId, docId, isPinned);
   },
 
   // ACCOUNT MATCH ALIASES

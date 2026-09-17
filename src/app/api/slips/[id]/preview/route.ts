@@ -32,7 +32,7 @@ export async function GET(
     // 2. Fetch the slip
     const slip = await DataStore.getSlipByIdUnscoped(slipId);
     if (!slip) {
-      return NextResponse.json({ error: "Slip not found" }, { status: 404 });
+      return NextResponse.json({ error: "ไม่พบไฟล์หลักฐาน" }, { status: 404 });
     }
 
     // 3. Authorization check
@@ -52,11 +52,19 @@ export async function GET(
       }
     }
 
-    // 4. Fetch file buffer from private storage
+    // 4. Pruned binary check (HTTP 410 Gone)
+    if (slip.binary_deleted_at || !slip.storage_path) {
+      return NextResponse.json(
+        { error: "ไฟล์ต้นฉบับถูกลบตามนโยบายการเก็บรักษาแล้ว" },
+        { status: 410 }
+      );
+    }
+
+    // 5. Fetch file buffer from private storage
     const fileBuffer = await DataStore.getSlipFile(slip.storage_path);
     if (!fileBuffer) {
       return NextResponse.json(
-        { error: "Slip file not found in storage" },
+        { error: "ไม่พบไฟล์หลักฐาน" },
         { status: 404 }
       );
     }
