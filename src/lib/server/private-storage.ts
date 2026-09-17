@@ -2,7 +2,9 @@ import "server-only";
 
 import crypto from "crypto";
 import { DataStore } from "@/lib/server/data-store";
+import type { IDataStore } from "./data-store-interface";
 import { StoragePruneResult } from "@/types/storage";
+import { evaluateStorageMutationGuard } from "./storage-guards";
 
 /**
  * Server-only helper enforcing that SESSION_SECRET is configured and meets
@@ -33,7 +35,10 @@ export function signSlipPreview(slipId: string, exp: number): string {
 
 /**
  * Timing-safe verification of slip preview HMAC signature.
- * Fails closed if SESSION_SECRET is missing, secret is weak, or timestamp expired.
+ * Enforces hard TTL bounds:
+ * Rejects exp <= now (expired)
+ * Rejects exp > now + 300 seconds (hard maximum allowed preview lifetime)
+ * Fails closed if SESSION_SECRET is missing, secret is weak, or timestamp is out of bounds.
  */
 export function verifySlipPreviewSignature(
   slipId: string,
@@ -41,7 +46,19 @@ export function verifySlipPreviewSignature(
   sig: string
 ): boolean {
   if (!slipId || !exp || !sig) return false;
-  if (typeof exp !== "number" || isNaN(exp) || Date.now() > exp) return false;
+  if (typeof exp !== "number" || isNaN(exp)) return false;
+  if (typeof sig !== "string" || !/^[0-9a-f]{64}$/i.test(sig)) return false;
+
+  const now = Date.now();
+  const expMs = exp < 1e11 ? exp * 1000 : exp;
+
+  // Enforce Hard Max TTL and Expiry bounds:
+  // Must reject:
+  // 1. exp <= now (expired)
+  // 2. exp > now + 300 seconds (too far in future; maximum allowed TTL is 300s)
+  if (expMs <= now || expMs > now + 300 * 1000) {
+    return false;
+  }
 
   let secret: string;
   try {
@@ -127,7 +144,8 @@ export async function saveSlipBinary(
 export async function createSlipSignedViewUrl(
   userId: string,
   slipId: string,
-  expiresInSeconds: number = 120
+  expiresInSeconds: number = 120,
+  store: Pick<IDataStore, "getSlipById"> = DataStore
 ): Promise<{ url: string; expiresIn: number; expiresAt: string }> {
   if (!userId || !slipId) {
     throw new Error("Access denied: valid user session and slipId required");
@@ -136,7 +154,7 @@ export async function createSlipSignedViewUrl(
   // Ensure secret is present before generating URL (fail-closed)
   requirePreviewSigningSecret();
 
-  const slip = await DataStore.getSlipById(userId, slipId);
+  const slip = await store.getSlipById(userId, slipId);
   if (!slip) {
     throw new Error("ไม่พบไฟล์หลักฐาน (Slip not found or access denied)");
   }
@@ -544,74 +562,53 @@ export async function unpinEvidence(
 }
 
 /**
- * Simulates and validates DB-level storage metadata mutation guard triggers.
- * Verifies whether direct client operations on public.slips or public.source_documents
- * are permitted under RLS and trigger enforcement.
+ * Compensating rollback helper to safely clean up an uploaded slip binary if subsequent database
+ * record creation fails. Validates that the storage path strictly matches the server-derived
+ * path for (userId, slipId) to prevent arbitrary path deletions.
  */
-export function evaluateStorageMutationGuard(
-  table: "slips" | "source_documents",
-  op: "INSERT" | "UPDATE",
-  payload: Record<string, unknown>,
-  role: "authenticated" | "anon" | "service_role"
-): { allowed: boolean; error?: string } {
-  const isTrusted = role === "service_role";
-  if (isTrusted) {
-    return { allowed: true };
-  }
-
-  const sensitiveFields =
-    table === "slips"
-      ? [
-          "storage_path",
-          "file_hash_sha256",
-          "file_size",
-          "stored_file_size",
-          "binary_deleted_at",
-          "is_pinned",
-        ]
-      : [
-          "storage_path",
-          "file_hash",
-          "file_size",
-          "stored_file_size",
-          "binary_deleted_at",
-          "is_pinned",
-        ];
-
-  if (op === "INSERT") {
-    for (const field of sensitiveFields) {
-      if (field === "is_pinned") {
-        if (payload.is_pinned !== undefined && payload.is_pinned !== false) {
-          return {
-            allowed: false,
-            error: `Direct client initialization of ${table} storage metadata or pin state (${field}) is prohibited. Mutations must execute via trusted server flow.`,
-          };
-        }
-      } else if (payload[field] !== undefined && payload[field] !== null) {
-        return {
-          allowed: false,
-          error: `Direct client initialization of ${table} storage metadata or pin state (${field}) is prohibited. Mutations must execute via trusted server flow.`,
-        };
-      }
+export async function rollbackUploadedSlipBinary(
+  userId: string,
+  slipId: string,
+  storagePath: string
+): Promise<{ cleaned: boolean; diagnostic?: string }> {
+  try {
+    if (!userId || !slipId || !storagePath) {
+      return { cleaned: false, diagnostic: "Missing required parameters for rollback" };
     }
-  } else if (op === "UPDATE") {
-    for (const field of sensitiveFields) {
-      if (payload[field] !== undefined) {
-        return {
-          allowed: false,
-          error: `Direct client modification of ${table} storage metadata or pin state (${field}) is prohibited. Mutations must execute via trusted server flow.`,
-        };
-      }
-    }
-  }
+    // Strict path validation: ensure storagePath begins with sanitized userId and ends with slipId.ext
+    const cleanUserId = userId.replace(/[^a-zA-Z0-9_-]/g, "");
+    const cleanSlipId = slipId.replace(/[^a-zA-Z0-9_-]/g, "");
+    const expectedPrefix = `${cleanUserId}/`;
+    const expectedSuffixRegex = new RegExp(`/${cleanSlipId}\\.[a-z0-9]+$`);
 
-  return { allowed: true };
+    if (!storagePath.startsWith(expectedPrefix) || !expectedSuffixRegex.test(storagePath)) {
+      return {
+        cleaned: false,
+        diagnostic: "Storage path does not match trusted user and slip identifiers; rollback aborted",
+      };
+    }
+
+    if (await DataStore.slipFileExists(storagePath)) {
+      await DataStore.deleteSlipFile(storagePath);
+      return { cleaned: true };
+    }
+    return { cleaned: true, diagnostic: "Binary not present in storage" };
+  } catch (err: unknown) {
+    const errorMsg = err instanceof Error ? err.message : "Storage deletion failed";
+    return {
+      cleaned: false,
+      diagnostic: `Compensating rollback failed: ${errorMsg}`,
+    };
+  }
 }
+
+export { evaluateStorageMutationGuard } from "./storage-guards";
 
 export const privateStorage = {
   requirePreviewSigningSecret,
   deriveTrustedSlipPath,
   saveSlipBinary,
+  rollbackUploadedSlipBinary,
   createSlipSignedViewUrl,
   signSlipPreview,
   verifySlipPreviewSignature,

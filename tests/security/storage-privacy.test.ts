@@ -12,6 +12,7 @@ import {
   evaluateStorageMutationGuard,
   pinEvidence,
   unpinEvidence,
+  rollbackUploadedSlipBinary,
   privateStorage,
 } from "@/lib/server/private-storage";
 import { GET as previewRouteHandler } from "@/app/api/slips/[id]/preview/route";
@@ -21,6 +22,9 @@ import { bulkPruneAction } from "@/app/actions/storage";
 import { evaluateUnifiedStorageCleanupDryRun } from "@/lib/storage/retention";
 import { Slip } from "@/types/slip";
 import { SourceDocument } from "@/types/multi-source";
+import { defaultSlipProcessor } from "@/lib/slip/processor";
+import { getSlipSignedPreviewUrlAction } from "@/app/actions/slip-review";
+import { createSyntheticSlipJpeg } from "../slip/fixtures";
 
 let mockUser: { id: string; email: string; display_name?: string } | null = null;
 
@@ -104,10 +108,10 @@ describe("Storage Privacy Hardening & Security (15 Scenarios)", () => {
     const exp = parseInt(parsedUrl.searchParams.get("exp")!, 10);
 
     // Signature verification succeeds
-    expect(DataStore.verifySlipPreviewSignature(slip.id, exp, sig)).toBe(true);
+    expect(verifySlipPreviewSignature(slip.id, exp, sig)).toBe(true);
 
     // Forged signature fails
-    expect(DataStore.verifySlipPreviewSignature(slip.id, exp, "forged-signature-xyz")).toBe(false);
+    expect(verifySlipPreviewSignature(slip.id, exp, "forged-signature-xyz")).toBe(false);
   });
 
   // 5. Signed preview URL TTL clamped (max 300s, default 120s)
@@ -262,10 +266,10 @@ describe("Storage Privacy Hardening & Security (15 Scenarios)", () => {
     const sig = signSlip(slip.id, exp);
 
     // Tampering with exp timestamp by +10 seconds
-    expect(DataStore.verifySlipPreviewSignature(slip.id, exp + 10000, sig)).toBe(false);
+    expect(verifySlipPreviewSignature(slip.id, exp + 10000, sig)).toBe(false);
 
     // Tampering with slipId
-    expect(DataStore.verifySlipPreviewSignature("tampered-slip-id", exp, sig)).toBe(false);
+    expect(verifySlipPreviewSignature("tampered-slip-id", exp, sig)).toBe(false);
   });
 
   // 15. Preview route privacy headers
@@ -634,5 +638,406 @@ describe("Storage Privacy Final Operator Security Invariants (12 Verification Sc
     expect(dryRun.candidates.some((c) => c.id === "doc-received")).toBe(false);
     expect(dryRun.candidates.some((c) => c.id === "doc-processing")).toBe(false);
     expect(dryRun.exemptUnresolvedCount).toBe(2);
+  });
+});
+
+describe("Storage Privacy Final Audit Closure (17 Invariants)", () => {
+  const USER_ALICE = "user-alice-closure-audited";
+  const USER_BOB = "user-bob-closure-audited";
+
+  beforeEach(() => {
+    mockUser = null;
+    DataStore.reset();
+  });
+
+  // 1. Browser cannot delete slip directly
+  it("CLOSURE-01: browser cannot delete slip directly", async () => {
+    const slip = await DataStore.createSlip(USER_ALICE, {
+      storage_path: `${USER_ALICE}/2026/09/closure1.jpg`,
+      file_hash_sha256: "hash-closure-1",
+      status: "needs_review",
+    });
+
+    const guard = evaluateStorageMutationGuard("slips", "DELETE", {}, "authenticated");
+    expect(guard.allowed).toBe(false);
+    expect(guard.error).toContain("Direct client deletion of slips records is prohibited");
+
+    await expect(
+      DataStore.deleteSlip(USER_ALICE, slip.id, { asClientRole: "authenticated" })
+    ).rejects.toThrow(/Direct client deletion of slips? records is prohibited/i);
+
+    const fetched = await DataStore.getSlipById(USER_ALICE, slip.id);
+    expect(fetched).not.toBeNull();
+  });
+
+  // 2. Linked slip cannot be deleted directly and remains intact
+  it("CLOSURE-02: linked slip cannot be deleted directly and remains intact", async () => {
+    const acc = await DataStore.createAccount(USER_ALICE, {
+      name: "Main Account",
+      type: "bank",
+    });
+    const tx = await DataStore.createTransaction(USER_ALICE, {
+      from_account_id: acc.id,
+      amount: 450,
+      currency: "THB",
+      type: "expense",
+      transaction_date: "2026-09-17T10:00:00.000Z",
+    });
+    const slip = await DataStore.createSlip(USER_ALICE, {
+      storage_path: `${USER_ALICE}/2026/09/closure2.jpg`,
+      file_hash_sha256: "hash-closure-2",
+      status: "created",
+      linked_transaction_id: tx.id,
+    });
+
+    await expect(
+      DataStore.deleteSlip(USER_ALICE, slip.id, { asClientRole: "authenticated" })
+    ).rejects.toThrow(/Direct client deletion of slips? records is prohibited/i);
+
+    const slipAfter = await DataStore.getSlipById(USER_ALICE, slip.id);
+    expect(slipAfter).not.toBeNull();
+    expect(slipAfter?.linked_transaction_id).toBe(tx.id);
+
+    const txAfter = await DataStore.getTransactionById(USER_ALICE, tx.id);
+    expect(txAfter).not.toBeNull();
+  });
+
+  // 3. Unlinked slip cannot be deleted directly and remains intact
+  it("CLOSURE-03: unlinked slip cannot be deleted directly and remains intact", async () => {
+    const slip = await DataStore.createSlip(USER_ALICE, {
+      storage_path: `${USER_ALICE}/2026/09/closure3.jpg`,
+      file_hash_sha256: "hash-closure-3",
+      status: "needs_review",
+      linked_transaction_id: null,
+    });
+
+    await expect(
+      DataStore.deleteSlip(USER_ALICE, slip.id, { asClientRole: "authenticated" })
+    ).rejects.toThrow(/Direct client deletion of slips? records is prohibited/i);
+
+    const slipAfter = await DataStore.getSlipById(USER_ALICE, slip.id);
+    expect(slipAfter).not.toBeNull();
+  });
+
+  // 4. Server binary prune works while slip row, OCR, and linked transaction survive
+  it("CLOSURE-04: server binary prune works while slip row, OCR, and linked transaction survive", async () => {
+    const acc = await DataStore.createAccount(USER_ALICE, {
+      name: "Savings",
+      type: "bank",
+    });
+    const tx = await DataStore.createTransaction(USER_ALICE, {
+      from_account_id: acc.id,
+      amount: 1500,
+      currency: "THB",
+      type: "expense",
+      transaction_date: "2026-09-17T10:00:00.000Z",
+    });
+    const storagePath = `${USER_ALICE}/2026/09/closure4.jpg`;
+    await DataStore.saveSlipFile(storagePath, Buffer.from("image-binary-data"));
+
+    const slip = await DataStore.createSlip(USER_ALICE, {
+      storage_path: storagePath,
+      file_hash_sha256: "sha256-closure-4",
+      file_size: 1024,
+      stored_file_size: 1024,
+      extracted_json: {
+        amount: 1500,
+        receiver: { bank: "KBANK", name: "Shop A" },
+        fieldConfidence: { amount: 0.99 },
+      },
+      status: "created",
+      linked_transaction_id: tx.id,
+    });
+
+    const pruneResult = await pruneSlipBinary(USER_ALICE, slip.id);
+    expect(pruneResult.success).toBe(true);
+
+    const slipAfter = await DataStore.getSlipById(USER_ALICE, slip.id);
+    expect(slipAfter).not.toBeNull();
+    expect(slipAfter?.stored_file_size).toBe(0);
+    expect(slipAfter?.binary_deleted_at).toBeTruthy();
+    expect(slipAfter?.file_hash_sha256).toBe("sha256-closure-4");
+    expect(slipAfter?.extracted_json?.amount).toBe(1500);
+    expect(slipAfter?.extracted_json?.receiver?.bank).toBe("KBANK");
+    expect(slipAfter?.linked_transaction_id).toBe(tx.id);
+
+    expect(await DataStore.slipFileExists(storagePath)).toBe(false);
+
+    const txAfter = await DataStore.getTransactionById(USER_ALICE, tx.id);
+    expect(txAfter).not.toBeNull();
+  });
+
+  // 5. Upload succeeds + DB insert succeeds -> normal ingestion
+  it("CLOSURE-05: upload succeeds + DB insert succeeds -> normal ingestion", async () => {
+    const buffer = createSyntheticSlipJpeg({ amount: 500 });
+    const result = await defaultSlipProcessor.processSlip({
+      userId: USER_ALICE,
+      buffer,
+      source: "web_upload",
+    });
+
+    expect(result.slipId).toBeTruthy();
+    expect(["needs_review", "auto_confirmed", "manual_confirmed"]).toContain(result.status);
+
+    const slip = await DataStore.getSlipById(USER_ALICE, result.slipId);
+    expect(slip).not.toBeNull();
+    expect(slip?.storage_path).toBeTruthy();
+    expect(await DataStore.slipFileExists(slip!.storage_path!)).toBe(true);
+  });
+
+  // 6. Upload succeeds + DB insert fails -> binary removed (compensating rollback, no orphan left, original DB error thrown)
+  it("CLOSURE-06: upload succeeds + DB insert fails -> binary removed via compensating rollback (original DB error thrown)", async () => {
+    const buffer = createSyntheticSlipJpeg({ amount: 600 });
+    let savedStoragePath: string | null = null;
+    const origSave = DataStore.saveSlipFile.bind(DataStore);
+    const saveSpy = vi.spyOn(DataStore, "saveSlipFile").mockImplementation(async (path, buf) => {
+      savedStoragePath = path;
+      return origSave(path, buf);
+    });
+
+    const createSpy = vi.spyOn(DataStore, "createSlip").mockRejectedValueOnce(
+      new Error("DB constraint violation: slip table disk full")
+    );
+
+    await expect(
+      defaultSlipProcessor.processSlip({
+        userId: USER_ALICE,
+        buffer,
+        source: "web_upload",
+      })
+    ).rejects.toThrow(/DB constraint violation: slip table disk full/i);
+
+    expect(savedStoragePath).toBeTruthy();
+    expect(await DataStore.slipFileExists(savedStoragePath!)).toBe(false);
+
+    createSpy.mockRestore();
+    saveSpy.mockRestore();
+  });
+
+  // 7. Failed rollback reports safe diagnostic without exposing paths/secrets
+  it("CLOSURE-07: failed rollback reports safe diagnostic without exposing paths or secrets", async () => {
+    const buffer = createSyntheticSlipJpeg({ amount: 700 });
+    const createSpy = vi.spyOn(DataStore, "createSlip").mockRejectedValueOnce(
+      new Error("DB write timeout")
+    );
+    const rollbackSpy = vi.spyOn(privateStorage, "rollbackUploadedSlipBinary").mockResolvedValueOnce({
+      cleaned: false,
+      diagnostic: "Storage upstream 503 unavailable",
+    });
+
+    await expect(
+      defaultSlipProcessor.processSlip({
+        userId: USER_ALICE,
+        buffer,
+        source: "web_upload",
+      })
+    ).rejects.toThrow(/DB write timeout.*Storage upstream 503 unavailable/i);
+
+    createSpy.mockRestore();
+    rollbackSpy.mockRestore();
+  });
+
+  // 8. Rollback helper validates userId and slipId against storagePath
+  it("CLOSURE-08: rollback helper validates userId and slipId against storagePath", async () => {
+    // 1) Path ownership mismatch
+    const badOwner = await rollbackUploadedSlipBinary(
+      USER_ALICE,
+      "slip-closure-8",
+      `${USER_BOB}/2026/09/slip-closure-8.jpg`
+    );
+    expect(badOwner.cleaned).toBe(false);
+    expect(badOwner.diagnostic).toContain("does not match trusted user and slip identifiers");
+
+    // 2) Slip ID mismatch
+    const badSlipId = await rollbackUploadedSlipBinary(
+      USER_ALICE,
+      "slip-closure-8",
+      `${USER_ALICE}/2026/09/wrong-uuid.jpg`
+    );
+    expect(badSlipId.cleaned).toBe(false);
+    expect(badSlipId.diagnostic).toContain("does not match trusted user and slip identifiers");
+
+    // 3) Valid rollback
+    const validPath = `${USER_ALICE}/2026/09/slip-closure-8.jpg`;
+    await DataStore.saveSlipFile(validPath, Buffer.from("rollback-target"));
+    expect(await DataStore.slipFileExists(validPath)).toBe(true);
+
+    const success = await rollbackUploadedSlipBinary(
+      USER_ALICE,
+      "slip-closure-8",
+      validPath
+    );
+    expect(success.cleaned).toBe(true);
+    expect(await DataStore.slipFileExists(validPath)).toBe(false);
+  });
+
+  // 9. getSlipSignedPreviewUrlAction uses privateStorage.createSlipSignedViewUrl
+  it("CLOSURE-09: getSlipSignedPreviewUrlAction uses privateStorage.createSlipSignedViewUrl", async () => {
+    mockUser = { id: USER_ALICE, email: "alice@example.com" };
+    const filePath = `${USER_ALICE}/2026/09/closure9.jpg`;
+    await DataStore.saveSlipFile(filePath, Buffer.from("preview-target"));
+
+    const slip = await DataStore.createSlip(USER_ALICE, {
+      storage_path: filePath,
+      file_hash_sha256: "sha256-closure-9",
+      status: "needs_review",
+    });
+
+    const res = await getSlipSignedPreviewUrlAction(slip.id);
+    expect(res.success).toBe(true);
+    expect(res.url).toBeTruthy();
+
+    const parsed = new URL(res.url!, "http://localhost");
+    expect(parsed.pathname).toBe(`/api/slips/${slip.id}/preview`);
+
+    const exp = parseInt(parsed.searchParams.get("exp") || "0", 10);
+    const sig = parsed.searchParams.get("sig") || "";
+    expect(exp).toBeGreaterThan(Date.now());
+    expect(verifySlipPreviewSignature(slip.id, exp, sig)).toBe(true);
+  });
+
+  // 10. 120s signed preview is accepted
+  it("CLOSURE-10: 120s signed preview is accepted", () => {
+    const expSec = Math.floor(Date.now() / 1000) + 120;
+    const sigSec = signSlipPreview("slip-c10", expSec);
+    expect(verifySlipPreviewSignature("slip-c10", expSec, sigSec)).toBe(true);
+
+    const expMs = Date.now() + 120 * 1000;
+    const sigMs = signSlipPreview("slip-c10", expMs);
+    expect(verifySlipPreviewSignature("slip-c10", expMs, sigMs)).toBe(true);
+  });
+
+  // 11. 300s signed preview is accepted
+  it("CLOSURE-11: 300s signed preview is accepted", () => {
+    const expSec = Math.floor(Date.now() / 1000) + 300;
+    const sigSec = signSlipPreview("slip-c11", expSec);
+    expect(verifySlipPreviewSignature("slip-c11", expSec, sigSec)).toBe(true);
+
+    const expMs = Date.now() + 300 * 1000;
+    const sigMs = signSlipPreview("slip-c11", expMs);
+    expect(verifySlipPreviewSignature("slip-c11", expMs, sigMs)).toBe(true);
+  });
+
+  // 12. >300s signed preview is rejected even with valid HMAC
+  it("CLOSURE-12: >300s signed preview is rejected even with valid HMAC", () => {
+    const expSec = Math.floor(Date.now() / 1000) + 301;
+    const sigSec = signSlipPreview("slip-c12", expSec);
+    expect(verifySlipPreviewSignature("slip-c12", expSec, sigSec)).toBe(false);
+
+    const expMs = Date.now() + 301 * 1000;
+    const sigMs = signSlipPreview("slip-c12", expMs);
+    expect(verifySlipPreviewSignature("slip-c12", expMs, sigMs)).toBe(false);
+
+    const expFar = Math.floor(Date.now() / 1000) + 3600;
+    const sigFar = signSlipPreview("slip-c12", expFar);
+    expect(verifySlipPreviewSignature("slip-c12", expFar, sigFar)).toBe(false);
+  });
+
+  // 13. Expired signed preview is rejected
+  it("CLOSURE-13: expired signed preview is rejected", () => {
+    const expSec = Math.floor(Date.now() / 1000) - 10;
+    const sigSec = signSlipPreview("slip-c13", expSec);
+    expect(verifySlipPreviewSignature("slip-c13", expSec, sigSec)).toBe(false);
+
+    const expMs = Date.now() - 5000;
+    const sigMs = signSlipPreview("slip-c13", expMs);
+    expect(verifySlipPreviewSignature("slip-c13", expMs, sigMs)).toBe(false);
+  });
+
+  // 14. Tampered signed preview is rejected
+  it("CLOSURE-14: tampered signed preview is rejected", () => {
+    const exp = Math.floor(Date.now() / 1000) + 120;
+    const sig = signSlipPreview("slip-c14", exp);
+
+    expect(verifySlipPreviewSignature("slip-c14", exp, "tampered-sig")).toBe(false);
+    expect(verifySlipPreviewSignature("slip-c14", exp, sig + "x")).toBe(false);
+    expect(verifySlipPreviewSignature("slip-different", exp, sig)).toBe(false);
+    expect(verifySlipPreviewSignature("slip-c14", exp + 1, sig)).toBe(false);
+  });
+
+  // 15. Storage binary audit event rejects cross-user slip ownership mismatch
+  it("CLOSURE-15: storage binary audit event rejects cross-user slip ownership mismatch", async () => {
+    const aliceSlip = await DataStore.createSlip(USER_ALICE, {
+      storage_path: `${USER_ALICE}/2026/09/alice_slip.jpg`,
+      file_hash_sha256: "hash-alice-c15",
+      status: "created",
+    });
+
+    await expect(
+      DataStore.createStorageBinaryEvent(USER_BOB, {
+        user_id: USER_BOB,
+        slip_id: aliceSlip.id,
+        action: "prune_completed",
+      })
+    ).rejects.toThrow(/does not match slip owner/i);
+  });
+
+  // 16. Storage binary audit event rejects cross-user source document mismatch
+  it("CLOSURE-16: storage binary audit event rejects cross-user source document mismatch", async () => {
+    const aliceDoc = await DataStore.createSourceDocument(USER_ALICE, {
+      storage_path: `${USER_ALICE}/2026/09/alice_doc.pdf`,
+      file_hash: "hash-alice-c16",
+      document_type: "pdf_statement",
+      original_filename: "alice_doc.pdf",
+    });
+
+    await expect(
+      DataStore.createStorageBinaryEvent(USER_BOB, {
+        user_id: USER_BOB,
+        source_document_id: aliceDoc.id,
+        action: "prune_completed",
+      })
+    ).rejects.toThrow(/does not match source document owner/i);
+  });
+
+  // 17. Exactly-one-target constraint enforced on storage binary event
+  it("CLOSURE-17: exactly-one-target constraint enforced on storage binary event", async () => {
+    const aliceSlip = await DataStore.createSlip(USER_ALICE, {
+      storage_path: `${USER_ALICE}/2026/09/alice_slip_17.jpg`,
+      file_hash_sha256: "hash-alice-c17",
+      status: "created",
+    });
+    const aliceDoc = await DataStore.createSourceDocument(USER_ALICE, {
+      storage_path: `${USER_ALICE}/2026/09/alice_doc_17.pdf`,
+      file_hash: "hash-alice-doc-c17",
+      document_type: "pdf_statement",
+      original_filename: "alice_doc_17.pdf",
+    });
+
+    // Neither target
+    await expect(
+      DataStore.createStorageBinaryEvent(USER_ALICE, {
+        user_id: USER_ALICE,
+        action: "prune_completed",
+      } as any)
+    ).rejects.toThrow(/must specify exactly one target/i);
+
+    // Both targets
+    await expect(
+      DataStore.createStorageBinaryEvent(USER_ALICE, {
+        user_id: USER_ALICE,
+        slip_id: aliceSlip.id,
+        source_document_id: aliceDoc.id,
+        action: "prune_completed",
+      })
+    ).rejects.toThrow(/must specify exactly one target/i);
+
+    // Exactly one target (slip)
+    const ev1 = await DataStore.createStorageBinaryEvent(USER_ALICE, {
+      user_id: USER_ALICE,
+      slip_id: aliceSlip.id,
+      action: "prune_completed",
+    });
+    expect(ev1.slip_id).toBe(aliceSlip.id);
+    expect(ev1.source_document_id).toBeNull();
+
+    // Exactly one target (source document)
+    const ev2 = await DataStore.createStorageBinaryEvent(USER_ALICE, {
+      user_id: USER_ALICE,
+      source_document_id: aliceDoc.id,
+      action: "prune_completed",
+    });
+    expect(ev2.source_document_id).toBe(aliceDoc.id);
+    expect(ev2.slip_id).toBeNull();
   });
 });

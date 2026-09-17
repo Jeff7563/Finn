@@ -50,10 +50,7 @@ import {
   ConfirmSlipTransactionResult,
   StorageMutationOptions,
 } from "./data-store-interface";
-import {
-  signSlipPreview,
-  verifySlipPreviewSignature,
-} from "./private-storage";
+import { evaluateStorageMutationGuard } from "./storage-guards";
 import {
   generateIngestToken,
   hashToken,
@@ -1170,6 +1167,22 @@ export const MemoryDataStore: IDataStore = {
     return updated;
   },
 
+  async deleteSlip(
+    userId: string,
+    id: string,
+    options?: StorageMutationOptions
+  ): Promise<void> {
+    assertUserId(userId);
+    const guard = evaluateStorageMutationGuard("slips", "DELETE", {}, options);
+    if (!guard.allowed) {
+      throw new Error(guard.error);
+    }
+    // Hard delete of slip records is strictly prohibited to protect audit retention
+    throw new Error(
+      "Direct client deletion of slip records is prohibited. Metadata and audit evidence must be preserved for retention."
+    );
+  },
+
   // SLIP JOBS
   async createSlipJob(
     userId: string,
@@ -1280,33 +1293,6 @@ export const MemoryDataStore: IDataStore = {
     return memorySlipFiles.has(storagePath);
   },
 
-  async createSignedSlipUrl(
-    userId: string,
-    slipId: string,
-    expiresInSeconds = 120
-  ): Promise<string> {
-    assertUserId(userId);
-    const slip = await this.getSlipById(userId, slipId);
-    if (!slip) {
-      throw new Error("Slip not found or access denied");
-    }
-
-    if (slip.binary_deleted_at || !slip.storage_path) {
-      throw new Error("ไฟล์ต้นฉบับถูกลบตามนโยบายการเก็บรักษาแล้ว (Original binary was pruned per retention policy)");
-    }
-
-    // Clamp TTL: default 120s, maximum 300s
-    const clampedTtl = Math.max(1, Math.min(expiresInSeconds, 300));
-    const exp = Date.now() + clampedTtl * 1000;
-    const sig = signSlipPreview(slipId, exp);
-
-    return `/api/slips/${slipId}/preview?exp=${exp}&sig=${sig}`;
-  },
-
-  verifySlipPreviewSignature(slipId: string, exp: number, sig: string): boolean {
-    return verifySlipPreviewSignature(slipId, exp, sig);
-  },
-
   // Storage Retention Settings
   async getStorageRetentionSettings(userId: string): Promise<StorageRetentionSettings> {
     assertUserId(userId);
@@ -1376,6 +1362,38 @@ export const MemoryDataStore: IDataStore = {
     data: Omit<StorageBinaryEvent, "id" | "created_at">
   ): Promise<StorageBinaryEvent> {
     assertUserId(userId);
+
+    const hasSlip = Boolean(data.slip_id);
+    const hasDoc = Boolean(data.source_document_id);
+    if ((hasSlip && hasDoc) || (!hasSlip && !hasDoc)) {
+      throw new Error(
+        "Storage binary event must specify exactly one target: either slip_id or source_document_id"
+      );
+    }
+
+    // Enforce audit ownership integrity (fail-closed)
+    if (data.slip_id) {
+      const slip = dbState.slips.find((s) => s.id === data.slip_id);
+      if (!slip) {
+        throw new Error(`Target slip ${data.slip_id} does not exist`);
+      }
+      if (slip.user_id !== userId) {
+        throw new Error(
+          `Storage binary audit event user_id ${userId} does not match slip owner ${slip.user_id}`
+        );
+      }
+    } else if (data.source_document_id) {
+      const doc = dbState.source_documents.find((d) => d.id === data.source_document_id);
+      if (!doc) {
+        throw new Error(`Target source document ${data.source_document_id} does not exist`);
+      }
+      if (doc.user_id !== userId) {
+        throw new Error(
+          `Storage binary audit event user_id ${userId} does not match source document owner ${doc.user_id}`
+        );
+      }
+    }
+
     const event: StorageBinaryEvent = {
       id: crypto.randomUUID(),
       user_id: userId,

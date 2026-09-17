@@ -106,6 +106,7 @@ export interface IDataStore {
   getPendingReviewSlips(userId: string): Promise<Slip[]>;
   createSlip(userId: string, data: Partial<Slip>, options?: StorageMutationOptions): Promise<Slip>;
   updateSlip(userId: string, id: string, data: Partial<Slip>, options?: StorageMutationOptions): Promise<Slip>;
+  deleteSlip(userId: string, id: string, options?: StorageMutationOptions): Promise<void>;
 
   // Slip Jobs
   createSlipJob(userId: string, data: Partial<SlipIngestionJob>): Promise<SlipIngestionJob>;
@@ -136,8 +137,6 @@ export interface IDataStore {
   getSlipFile(storagePath: string): Promise<Buffer | null>;
   deleteSlipFile(storagePath: string): Promise<void>;
   slipFileExists(storagePath: string): Promise<boolean>;
-  createSignedSlipUrl(userId: string, slipId: string, expiresInSeconds?: number): Promise<string>;
-  verifySlipPreviewSignature(slipId: string, exp: number, sig: string): boolean;
 
   // Storage Retention & Pinned Evidence
   getStorageRetentionSettings(userId: string): Promise<StorageRetentionSettings>;

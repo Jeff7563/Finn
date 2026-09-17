@@ -315,6 +315,14 @@ export const DataStore: IDataStore = {
     return getActiveStore().updateSlip(userId, id, data, options);
   },
 
+  async deleteSlip(
+    userId: string,
+    id: string,
+    options?: StorageMutationOptions
+  ): Promise<void> {
+    return getActiveStore().deleteSlip(userId, id, options);
+  },
+
   // SLIP JOBS
   async createSlipJob(
     userId: string,
@@ -368,18 +376,6 @@ export const DataStore: IDataStore = {
 
   async slipFileExists(storagePath: string): Promise<boolean> {
     return getActiveStore().slipFileExists(storagePath);
-  },
-
-  async createSignedSlipUrl(
-    userId: string,
-    slipId: string,
-    expiresInSeconds = 120
-  ): Promise<string> {
-    return getActiveStore().createSignedSlipUrl(userId, slipId, expiresInSeconds);
-  },
-
-  verifySlipPreviewSignature(slipId: string, exp: number, sig: string): boolean {
-    return getActiveStore().verifySlipPreviewSignature(slipId, exp, sig);
   },
 
   // STORAGE RETENTION & PINNED EVIDENCE

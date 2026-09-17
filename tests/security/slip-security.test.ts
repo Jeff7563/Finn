@@ -3,6 +3,7 @@ import { DataStore } from "@/lib/server/data-store";
 import { hashToken, verifyTokenHash, isTokenUsable } from "@/lib/slip/token";
 import { checkRateLimit, resetRateLimit } from "@/lib/server/rate-limiter";
 import { defaultSlipProcessor } from "@/lib/slip/processor";
+import { createSlipSignedViewUrl, verifySlipPreviewSignature } from "@/lib/server/private-storage";
 import { createSyntheticSlipJpeg } from "../slip/fixtures";
 
 describe("Phase 2 — Slip Security & Adversarial Hardening", () => {
@@ -131,24 +132,24 @@ describe("Phase 2 — Slip Security & Adversarial Hardening", () => {
       status: "created",
     });
 
-    // Generate valid signed URL (15 min validity)
-    const signedUrl = await DataStore.createSignedSlipUrl(USER_A, slipA.id, 900);
+    // Generate valid signed URL (clamped to 300s max)
+    const { url: signedUrl } = await createSlipSignedViewUrl(USER_A, slipA.id, 120);
     const parsedUrl = new URL(`http://localhost${signedUrl}`);
     const exp = parseInt(parsedUrl.searchParams.get("exp") || "0", 10);
     const sig = parsedUrl.searchParams.get("sig") || "";
 
     expect(sig).toBeTruthy();
-    expect(DataStore.verifySlipPreviewSignature(slipA.id, exp, sig)).toBe(true);
+    expect(verifySlipPreviewSignature(slipA.id, exp, sig)).toBe(true);
 
     // Tampered signature must fail
-    expect(DataStore.verifySlipPreviewSignature(slipA.id, exp, "tampered-signature")).toBe(false);
+    expect(verifySlipPreviewSignature(slipA.id, exp, "tampered-signature")).toBe(false);
 
     // Tampered slip ID must fail
-    expect(DataStore.verifySlipPreviewSignature("different-slip-id", exp, sig)).toBe(false);
+    expect(verifySlipPreviewSignature("different-slip-id", exp, sig)).toBe(false);
 
     // Expired timestamp must fail
     const expiredExp = Date.now() - 1000;
-    expect(DataStore.verifySlipPreviewSignature(slipA.id, expiredExp, sig)).toBe(false);
+    expect(verifySlipPreviewSignature(slipA.id, expiredExp, sig)).toBe(false);
   });
 
   // 7. Rate Limiter Gating

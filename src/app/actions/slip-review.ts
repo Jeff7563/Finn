@@ -429,7 +429,7 @@ export async function getSlipSignedPreviewUrlAction(
   }
 
   try {
-    const url = await DataStore.createSignedSlipUrl(user.id, slipId, 120);
+    const { url } = await privateStorage.createSlipSignedViewUrl(user.id, slipId, 120);
     return { success: true, url };
   } catch (err: unknown) {
     return {

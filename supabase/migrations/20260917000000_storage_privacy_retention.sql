@@ -28,6 +28,58 @@ WHERE stored_file_size IS NULL AND binary_deleted_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_slips_retention
     ON public.slips(user_id, status, is_pinned, binary_deleted_at);
 
+-- 1b. HARDEN public.slips, public.slip_ingestion_jobs, public.slip_corrections RLS
+-- Drop legacy FOR ALL policy that allowed direct browser DELETE / INSERT
+DROP POLICY IF EXISTS "Users can manage own slips" ON public.slips;
+
+-- Authenticated owners may view own slips
+CREATE POLICY "Users can view own slips"
+    ON public.slips FOR SELECT
+    TO authenticated
+    USING (auth.uid() = user_id);
+
+-- Authenticated owners may update own non-sensitive slip fields
+CREATE POLICY "Users can update own slips"
+    ON public.slips FOR UPDATE
+    TO authenticated
+    USING (auth.uid() = user_id)
+    WITH CHECK (auth.uid() = user_id);
+
+-- Explicitly revoke direct DELETE and INSERT privileges on public.slips from client roles.
+-- Trusted server ingestion flows execute with service_role.
+REVOKE DELETE, INSERT ON public.slips FROM authenticated, anon, PUBLIC;
+
+-- Defense-in-depth trigger: reject any direct hard-delete of slip records
+CREATE OR REPLACE FUNCTION public.guard_slip_delete_prevention()
+RETURNS TRIGGER AS $$
+BEGIN
+    RAISE EXCEPTION 'Direct deletion of slip records is prohibited. Slip metadata and evidence must be preserved for audit retention.'
+        USING ERRCODE = '42501';
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public;
+
+DROP TRIGGER IF EXISTS trg_prevent_slip_hard_delete ON public.slips;
+CREATE TRIGGER trg_prevent_slip_hard_delete
+    BEFORE DELETE ON public.slips
+    FOR EACH ROW
+    EXECUTE FUNCTION public.guard_slip_delete_prevention();
+
+-- Harden slip audit and history tables against destructive deletion
+DROP POLICY IF EXISTS "Users can manage own slip corrections" ON public.slip_corrections;
+
+CREATE POLICY "Users can view own slip corrections"
+    ON public.slip_corrections FOR SELECT
+    TO authenticated
+    USING (auth.uid() = user_id);
+
+CREATE POLICY "Users can insert own slip corrections"
+    ON public.slip_corrections FOR INSERT
+    TO authenticated
+    WITH CHECK (auth.uid() = user_id);
+
+REVOKE DELETE ON public.slip_ingestion_jobs FROM authenticated, anon, PUBLIC;
+REVOKE DELETE ON public.slip_corrections FROM authenticated, anon, PUBLIC;
+
 -- ============================================================================
 -- 2. STORAGE RETENTION SETTINGS (public.storage_retention_settings)
 -- ============================================================================
@@ -110,6 +162,55 @@ CREATE POLICY "Users can view own storage binary events"
 -- All binary events must strictly be recorded by trusted server-side service role.
 REVOKE INSERT, UPDATE, DELETE ON public.storage_binary_events FROM authenticated, anon;
 GRANT SELECT ON public.storage_binary_events TO authenticated;
+
+-- Ownership integrity guard trigger for storage_binary_events
+CREATE OR REPLACE FUNCTION public.guard_storage_binary_event_ownership()
+RETURNS TRIGGER AS $$
+DECLARE
+    v_owner UUID;
+BEGIN
+    IF NEW.slip_id IS NOT NULL THEN
+        SELECT user_id INTO v_owner
+        FROM public.slips
+        WHERE id = NEW.slip_id;
+
+        IF v_owner IS NULL THEN
+            RAISE EXCEPTION 'Target slip % does not exist', NEW.slip_id
+                USING ERRCODE = 'P0002';
+        END IF;
+
+        IF v_owner <> NEW.user_id THEN
+            RAISE EXCEPTION 'Storage binary audit event user_id % does not match slip owner %', NEW.user_id, v_owner
+                USING ERRCODE = '42501';
+        END IF;
+    ELSIF NEW.source_document_id IS NOT NULL THEN
+        SELECT user_id INTO v_owner
+        FROM public.source_documents
+        WHERE id = NEW.source_document_id;
+
+        IF v_owner IS NULL THEN
+            RAISE EXCEPTION 'Target source document % does not exist', NEW.source_document_id
+                USING ERRCODE = 'P0002';
+        END IF;
+
+        IF v_owner <> NEW.user_id THEN
+            RAISE EXCEPTION 'Storage binary audit event user_id % does not match source document owner %', NEW.user_id, v_owner
+                USING ERRCODE = '42501';
+        END IF;
+    ELSE
+        RAISE EXCEPTION 'Storage binary event must specify either slip_id or source_document_id'
+            USING ERRCODE = '23514';
+    END IF;
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public;
+
+DROP TRIGGER IF EXISTS trg_guard_storage_binary_event_ownership ON public.storage_binary_events;
+CREATE TRIGGER trg_guard_storage_binary_event_ownership
+    BEFORE INSERT ON public.storage_binary_events
+    FOR EACH ROW
+    EXECUTE FUNCTION public.guard_storage_binary_event_ownership();
 
 -- ============================================================================
 -- 4. STORAGE METADATA MUTATION GUARDS (TRIGGERS)
@@ -245,64 +346,58 @@ END $$;
 -- The following queries allow operators to verify all database-level
 -- storage privacy security invariants with explicit boolean PASS/FAIL confirmations.
 
--- Query 1: Verify slip guard trigger fires on INSERT and UPDATE
+-- Query 1: Verify authenticated slip DELETE is denied (revoked and no DELETE policy)
 SELECT 
-    CASE WHEN COUNT(DISTINCT event_manipulation) = 2 THEN 'PASS' ELSE 'FAIL' END AS status,
-    'slip guard trigger trg_guard_slip_storage_metadata_mutation fires on INSERT and UPDATE' AS check_name
-FROM information_schema.triggers
-WHERE event_object_schema = 'public'
-  AND event_object_table = 'slips'
-  AND trigger_name = 'trg_guard_slip_storage_metadata_mutation'
-  AND event_manipulation IN ('INSERT', 'UPDATE')
-  AND action_timing = 'BEFORE';
+    CASE WHEN (
+        NOT EXISTS (
+            SELECT 1 FROM information_schema.role_table_grants 
+            WHERE table_schema = 'public' AND table_name = 'slips' 
+              AND grantee = 'authenticated' AND privilege_type = 'DELETE'
+        ) AND NOT EXISTS (
+            SELECT 1 FROM pg_policies 
+            WHERE schemaname = 'public' AND tablename = 'slips' 
+              AND cmd = 'DELETE' AND ('authenticated' = ANY(roles) OR 'public' = ANY(roles))
+        )
+    ) THEN 'PASS' ELSE 'FAIL' END AS status,
+    'authenticated direct DELETE on public.slips is completely denied' AS check_name;
 
--- Query 2: Verify source_document guard trigger fires on INSERT and UPDATE
+-- Query 2: Verify anon slip DELETE is denied (revoked and no DELETE policy)
 SELECT 
-    CASE WHEN COUNT(DISTINCT event_manipulation) = 2 THEN 'PASS' ELSE 'FAIL' END AS status,
-    'source_document guard trigger trg_guard_source_document_storage_metadata_mutation fires on INSERT and UPDATE' AS check_name
-FROM information_schema.triggers
-WHERE event_object_schema = 'public'
-  AND event_object_table = 'source_documents'
-  AND trigger_name = 'trg_guard_source_document_storage_metadata_mutation'
-  AND event_manipulation IN ('INSERT', 'UPDATE')
-  AND action_timing = 'BEFORE';
+    CASE WHEN (
+        NOT EXISTS (
+            SELECT 1 FROM information_schema.role_table_grants 
+            WHERE table_schema = 'public' AND table_name = 'slips' 
+              AND grantee = 'anon' AND privilege_type = 'DELETE'
+        ) AND NOT EXISTS (
+            SELECT 1 FROM pg_policies 
+            WHERE schemaname = 'public' AND tablename = 'slips' 
+              AND cmd = 'DELETE' AND ('anon' = ANY(roles) OR 'public' = ANY(roles))
+        )
+    ) THEN 'PASS' ELSE 'FAIL' END AS status,
+    'anon direct DELETE on public.slips is completely denied' AS check_name;
 
--- Query 3: Verify is_pinned is protected in trigger definitions
-SELECT 
-    CASE WHEN COUNT(*) = 2 THEN 'PASS' ELSE 'FAIL' END AS status,
-    'is_pinned column protected against direct mutation in slip and source_document triggers' AS check_name
-FROM pg_proc p
-JOIN pg_namespace n ON p.pronamespace = n.oid
-WHERE n.nspname = 'public'
-  AND p.proname IN ('guard_slip_storage_metadata_mutation', 'guard_source_document_storage_metadata_mutation')
-  AND p.prosrc ILIKE '%is_pinned%';
-
--- Query 4: Verify slips bucket exists and public = false
-SELECT 
-    CASE WHEN COUNT(*) > 0 AND bool_and(public = false) THEN 'PASS' ELSE 'FAIL' END AS status,
-    'slips bucket exists and is private (public = false)' AS check_name
-FROM storage.buckets
-WHERE id = 'slips';
-
--- Query 5: Verify authenticated storage.objects direct CRUD policies absent
+-- Query 3: Verify slip audit/history tables cannot be destructively deleted by browser roles
 SELECT 
     CASE WHEN COUNT(*) = 0 THEN 'PASS' ELSE 'FAIL' END AS status,
-    'authenticated direct CRUD policies absent on storage.objects for slips' AS check_name
-FROM pg_policies
-WHERE schemaname = 'storage' AND tablename = 'objects'
-  AND (policyname ILIKE '%slip%' OR qual ILIKE '%slips%' OR with_check ILIKE '%slips%')
-  AND ('authenticated' = ANY(roles) OR 'public' = ANY(roles));
+    'slip audit/history tables (slip_ingestion_jobs, slip_corrections, storage_binary_events) cannot be deleted by browser roles' AS check_name
+FROM information_schema.role_table_grants
+WHERE table_schema = 'public'
+  AND table_name IN ('slip_ingestion_jobs', 'slip_corrections', 'storage_binary_events')
+  AND grantee IN ('authenticated', 'anon', 'PUBLIC')
+  AND privilege_type = 'DELETE';
 
--- Query 6: Verify anon storage.objects direct CRUD policies absent
+-- Query 4: Verify storage_binary_events ownership guard trigger exists
 SELECT 
-    CASE WHEN COUNT(*) = 0 THEN 'PASS' ELSE 'FAIL' END AS status,
-    'anon direct CRUD policies absent on storage.objects for slips' AS check_name
-FROM pg_policies
-WHERE schemaname = 'storage' AND tablename = 'objects'
-  AND (policyname ILIKE '%slip%' OR qual ILIKE '%slips%' OR with_check ILIKE '%slips%')
-  AND ('anon' = ANY(roles) OR 'public' = ANY(roles));
+    CASE WHEN COUNT(*) = 1 THEN 'PASS' ELSE 'FAIL' END AS status,
+    'storage_binary_events ownership integrity guard trigger trg_guard_storage_binary_event_ownership exists on INSERT' AS check_name
+FROM information_schema.triggers
+WHERE event_object_schema = 'public'
+  AND event_object_table = 'storage_binary_events'
+  AND trigger_name = 'trg_guard_storage_binary_event_ownership'
+  AND event_manipulation = 'INSERT'
+  AND action_timing = 'BEFORE';
 
--- Query 7: Verify storage_binary_events direct mutation denied (INSERT, UPDATE, DELETE revoked)
+-- Query 5: Verify storage_binary_events direct mutation denied (INSERT, UPDATE, DELETE revoked)
 SELECT 
     CASE WHEN COUNT(*) = 0 THEN 'PASS' ELSE 'FAIL' END AS status,
     'storage_binary_events direct INSERT, UPDATE, DELETE revoked from authenticated, anon, PUBLIC' AS check_name
@@ -312,51 +407,109 @@ WHERE table_schema = 'public'
   AND grantee IN ('authenticated', 'anon', 'PUBLIC')
   AND privilege_type IN ('INSERT', 'UPDATE', 'DELETE');
 
--- Query 8: Verify audit FKs have ON DELETE RESTRICT
+-- Query 6: Verify slips bucket exists and public = false
 SELECT 
-    CASE WHEN COUNT(*) = 2 THEN 'PASS' ELSE 'FAIL' END AS status,
-    'storage_binary_events audit foreign keys enforce ON DELETE RESTRICT on slip_id and source_document_id' AS check_name
-FROM pg_constraint con
-JOIN pg_class c ON con.conrelid = c.oid
-JOIN pg_namespace n ON c.relnamespace = n.oid
-WHERE n.nspname = 'public'
-  AND c.relname = 'storage_binary_events'
-  AND con.contype = 'f'
-  AND con.confdeltype = 'r';
+    CASE WHEN COUNT(*) > 0 AND bool_and(public = false) THEN 'PASS' ELSE 'FAIL' END AS status,
+    'slips bucket exists and is private (public = false)' AS check_name
+FROM storage.buckets
+WHERE id = 'slips';
+
+-- Query 7: Verify authenticated and anon storage.objects direct CRUD policies absent
+SELECT 
+    CASE WHEN COUNT(*) = 0 THEN 'PASS' ELSE 'FAIL' END AS status,
+    'authenticated and anon direct CRUD policies absent on storage.objects for slips' AS check_name
+FROM pg_policies
+WHERE schemaname = 'storage' AND tablename = 'objects'
+  AND (policyname ILIKE '%slip%' OR qual ILIKE '%slips%' OR with_check ILIKE '%slips%')
+  AND ('authenticated' = ANY(roles) OR 'anon' = ANY(roles) OR 'public' = ANY(roles));
+
+-- Query 8: Verify metadata guards INSERT + UPDATE still present
+SELECT 
+    CASE WHEN (
+        (SELECT COUNT(DISTINCT event_manipulation) FROM information_schema.triggers WHERE event_object_schema = 'public' AND event_object_table = 'slips' AND trigger_name = 'trg_guard_slip_storage_metadata_mutation' AND event_manipulation IN ('INSERT', 'UPDATE') AND action_timing = 'BEFORE') = 2
+        AND
+        (SELECT COUNT(DISTINCT event_manipulation) FROM information_schema.triggers WHERE event_object_schema = 'public' AND event_object_table = 'source_documents' AND trigger_name = 'trg_guard_source_document_storage_metadata_mutation' AND event_manipulation IN ('INSERT', 'UPDATE') AND action_timing = 'BEFORE') = 2
+    ) THEN 'PASS' ELSE 'FAIL' END AS status,
+    'metadata guards on slips and source_documents fire on both INSERT and UPDATE' AS check_name;
 
 -- Consolidated Operator Verification Query:
 WITH audit_checks AS (
-    SELECT '1. Slip Guard Trigger (INSERT & UPDATE)' AS item,
-           (SELECT COUNT(DISTINCT event_manipulation) FROM information_schema.triggers WHERE event_object_schema = 'public' AND event_object_table = 'slips' AND trigger_name = 'trg_guard_slip_storage_metadata_mutation' AND event_manipulation IN ('INSERT', 'UPDATE') AND action_timing = 'BEFORE') = 2 AS passed,
-           'BEFORE INSERT OR UPDATE trigger prevents direct client initialization/modification of slip storage metadata and is_pinned' AS details
+    SELECT '1. Authenticated Slip DELETE Denied' AS item,
+           (NOT EXISTS (
+               SELECT 1 FROM information_schema.role_table_grants 
+               WHERE table_schema = 'public' AND table_name = 'slips' 
+                 AND grantee = 'authenticated' AND privilege_type = 'DELETE'
+           ) AND NOT EXISTS (
+               SELECT 1 FROM pg_policies 
+               WHERE schemaname = 'public' AND tablename = 'slips' 
+                 AND cmd = 'DELETE' AND ('authenticated' = ANY(roles) OR 'public' = ANY(roles))
+           )) AS passed,
+           'DELETE on public.slips is revoked and no DELETE RLS policy exists for authenticated role' AS details
     UNION ALL
-    SELECT '2. Source Document Guard Trigger (INSERT & UPDATE)',
-           (SELECT COUNT(DISTINCT event_manipulation) FROM information_schema.triggers WHERE event_object_schema = 'public' AND event_object_table = 'source_documents' AND trigger_name = 'trg_guard_source_document_storage_metadata_mutation' AND event_manipulation IN ('INSERT', 'UPDATE') AND action_timing = 'BEFORE') = 2,
-           'BEFORE INSERT OR UPDATE trigger prevents direct client initialization/modification of source document storage metadata and is_pinned'
+    SELECT '2. Anon Slip DELETE Denied',
+           (NOT EXISTS (
+               SELECT 1 FROM information_schema.role_table_grants 
+               WHERE table_schema = 'public' AND table_name = 'slips' 
+                 AND grantee = 'anon' AND privilege_type = 'DELETE'
+           ) AND NOT EXISTS (
+               SELECT 1 FROM pg_policies 
+               WHERE schemaname = 'public' AND tablename = 'slips' 
+                 AND cmd = 'DELETE' AND ('anon' = ANY(roles) OR 'public' = ANY(roles))
+           )),
+           'DELETE on public.slips is revoked and no DELETE RLS policy exists for anon role'
     UNION ALL
-    SELECT '3. is_pinned Protected in Triggers',
-           (SELECT COUNT(*) FROM pg_proc p JOIN pg_namespace n ON p.pronamespace = n.oid WHERE n.nspname = 'public' AND p.proname IN ('guard_slip_storage_metadata_mutation', 'guard_source_document_storage_metadata_mutation') AND p.prosrc ILIKE '%is_pinned%') = 2,
-           'Trigger function bodies explicitly inspect and reject unauthorized is_pinned mutations'
+    SELECT '3. Slip Audit & History Tables Protected From Deletion',
+           NOT EXISTS (
+               SELECT 1 FROM information_schema.role_table_grants 
+               WHERE table_schema = 'public' 
+                 AND table_name IN ('slip_ingestion_jobs', 'slip_corrections', 'storage_binary_events') 
+                 AND grantee IN ('authenticated', 'anon', 'PUBLIC') 
+                 AND privilege_type = 'DELETE'
+           ),
+           'Direct DELETE revoked on slip_ingestion_jobs, slip_corrections, and storage_binary_events'
     UNION ALL
-    SELECT '4. Slips Bucket Private',
+    SELECT '4. Storage Binary Events Ownership Guard Trigger',
+           EXISTS (
+               SELECT 1 FROM information_schema.triggers 
+               WHERE event_object_schema = 'public' 
+                 AND event_object_table = 'storage_binary_events' 
+                 AND trigger_name = 'trg_guard_storage_binary_event_ownership' 
+                 AND event_manipulation = 'INSERT' 
+                 AND action_timing = 'BEFORE'
+           ),
+           'BEFORE INSERT trigger enforces user_id on audit event matches owner of slip or source document'
+    UNION ALL
+    SELECT '5. Direct Audit Trail Mutation Revoked',
+           NOT EXISTS (
+               SELECT 1 FROM information_schema.role_table_grants 
+               WHERE table_schema = 'public' AND table_name = 'storage_binary_events' 
+                 AND grantee IN ('authenticated', 'anon', 'PUBLIC') 
+                 AND privilege_type IN ('INSERT', 'UPDATE', 'DELETE')
+           ),
+           'Direct INSERT, UPDATE, DELETE on storage_binary_events are completely revoked from client roles'
+    UNION ALL
+    SELECT '6. Slips Bucket Private',
            EXISTS (SELECT 1 FROM storage.buckets WHERE id = 'slips' AND public = false),
            'Supabase storage slips bucket is private (public = false)'
     UNION ALL
-    SELECT '5. Authenticated storage.objects Direct Policies Absent',
-           NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = 'storage' AND tablename = 'objects' AND (policyname ILIKE '%slip%' OR qual ILIKE '%slips%' OR with_check ILIKE '%slips%') AND ('authenticated' = ANY(roles) OR 'public' = ANY(roles))),
-           'No direct authenticated CRUD policies exist on storage.objects for slips'
+    SELECT '7. Direct Storage Objects Browser Policies Absent',
+           NOT EXISTS (
+               SELECT 1 FROM pg_policies 
+               WHERE schemaname = 'storage' AND tablename = 'objects' 
+                 AND (policyname ILIKE '%slip%' OR qual ILIKE '%slips%' OR with_check ILIKE '%slips%') 
+                 AND ('authenticated' = ANY(roles) OR 'anon' = ANY(roles) OR 'public' = ANY(roles))
+           ),
+           'No direct authenticated or anonymous CRUD policies exist on storage.objects for slips'
     UNION ALL
-    SELECT '6. Anon storage.objects Direct Policies Absent',
-           NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = 'storage' AND tablename = 'objects' AND (policyname ILIKE '%slip%' OR qual ILIKE '%slips%' OR with_check ILIKE '%slips%') AND ('anon' = ANY(roles) OR 'public' = ANY(roles))),
-           'No direct anonymous CRUD policies exist on storage.objects for slips'
+    SELECT '8. Storage Metadata Guards on INSERT and UPDATE',
+           ((SELECT COUNT(DISTINCT event_manipulation) FROM information_schema.triggers WHERE event_object_schema = 'public' AND event_object_table = 'slips' AND trigger_name = 'trg_guard_slip_storage_metadata_mutation' AND event_manipulation IN ('INSERT', 'UPDATE') AND action_timing = 'BEFORE') = 2
+            AND
+            (SELECT COUNT(DISTINCT event_manipulation) FROM information_schema.triggers WHERE event_object_schema = 'public' AND event_object_table = 'source_documents' AND trigger_name = 'trg_guard_source_document_storage_metadata_mutation' AND event_manipulation IN ('INSERT', 'UPDATE') AND action_timing = 'BEFORE') = 2),
+           'Metadata mutation guards fire on both INSERT and UPDATE for slips and source_documents'
     UNION ALL
-    SELECT '7. Direct Audit Trail Mutation Revoked',
-           NOT EXISTS (SELECT 1 FROM information_schema.role_table_grants WHERE table_schema = 'public' AND table_name = 'storage_binary_events' AND grantee IN ('authenticated', 'anon', 'PUBLIC') AND privilege_type IN ('INSERT', 'UPDATE', 'DELETE')),
-           'Direct INSERT, UPDATE, DELETE on storage_binary_events are completely revoked from client roles'
-    UNION ALL
-    SELECT '8. Audit FKs ON DELETE RESTRICT',
+    SELECT '9. Audit Foreign Keys ON DELETE RESTRICT',
            (SELECT COUNT(*) FROM pg_constraint con JOIN pg_class c ON con.conrelid = c.oid JOIN pg_namespace n ON c.relnamespace = n.oid WHERE n.nspname = 'public' AND c.relname = 'storage_binary_events' AND con.contype = 'f' AND con.confdeltype = 'r') = 2,
-           'Foreign keys on slip_id and source_document_id enforce ON DELETE RESTRICT to protect audit trail integrity'
+           'Foreign keys on slip_id and source_document_id enforce ON DELETE RESTRICT to prevent audit cascade deletion'
 )
 SELECT item, CASE WHEN passed THEN 'PASS' ELSE 'FAIL' END AS status, details FROM audit_checks;
 */

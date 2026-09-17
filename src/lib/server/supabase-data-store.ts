@@ -58,10 +58,7 @@ import {
   ConfirmSlipTransactionResult,
   StorageMutationOptions,
 } from "./data-store-interface";
-import {
-  signSlipPreview,
-  verifySlipPreviewSignature,
-} from "./private-storage";
+import { evaluateStorageMutationGuard } from "./storage-guards";
 import {
   withJwtSkewRetry,
   executeQueryWithSkewRetry,
@@ -1686,6 +1683,22 @@ export class SupabaseDataStoreImpl implements IDataStore {
     return mapSlip(updated);
   }
 
+  async deleteSlip(
+    userId: string,
+    id: string,
+    options?: StorageMutationOptions
+  ): Promise<void> {
+    assertUserId(userId);
+    const guard = evaluateStorageMutationGuard("slips", "DELETE", {}, options);
+    if (!guard.allowed) {
+      throw new Error(guard.error);
+    }
+    // Hard delete of slip records is strictly prohibited across all roles to protect retention
+    throw new Error(
+      "Direct client deletion of slip records is prohibited. Metadata and audit evidence must be preserved for retention."
+    );
+  }
+
   // SLIP JOBS
   async createSlipJob(
     userId: string,
@@ -2071,32 +2084,6 @@ export class SupabaseDataStoreImpl implements IDataStore {
     return !error && Boolean(data);
   }
 
-  async createSignedSlipUrl(
-    userId: string,
-    slipId: string,
-    expiresInSeconds = 120
-  ): Promise<string> {
-    assertUserId(userId);
-    const slip = await this.getSlipById(userId, slipId);
-    if (!slip) {
-      throw new Error("Slip not found or access denied");
-    }
-
-    if (slip.binary_deleted_at || !slip.storage_path) {
-      throw new Error("ไฟล์ต้นฉบับถูกลบตามนโยบายการเก็บรักษาแล้ว (Original binary was pruned per retention policy)");
-    }
-
-    const clampedTtl = Math.max(1, Math.min(expiresInSeconds, 300));
-    const exp = Date.now() + clampedTtl * 1000;
-    const sig = signSlipPreview(slipId, exp);
-
-    return `/api/slips/${slipId}/preview?exp=${exp}&sig=${sig}`;
-  }
-
-  verifySlipPreviewSignature(slipId: string, exp: number, sig: string): boolean {
-    return verifySlipPreviewSignature(slipId, exp, sig);
-  }
-
   // Storage Retention Settings
   async getStorageRetentionSettings(userId: string): Promise<StorageRetentionSettings> {
     assertUserId(userId);
@@ -2170,6 +2157,15 @@ export class SupabaseDataStoreImpl implements IDataStore {
     data: Omit<StorageBinaryEvent, "id" | "created_at">
   ): Promise<StorageBinaryEvent> {
     assertUserId(userId);
+
+    const hasSlip = Boolean(data.slip_id);
+    const hasDoc = Boolean(data.source_document_id);
+    if ((hasSlip && hasDoc) || (!hasSlip && !hasDoc)) {
+      throw new Error(
+        "Storage binary event must specify exactly one target: either slip_id or source_document_id"
+      );
+    }
+
     const client = await this.getClient(userId, { requireAdmin: true });
     const payload = {
       user_id: userId,
