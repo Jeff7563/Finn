@@ -7,6 +7,9 @@ export default defineConfig({
     globals: true,
     include: ["tests/**/*.test.ts"],
     exclude: ["e2e/**", "node_modules/**"],
+    env: {
+      SESSION_SECRET: "finn-vitest-secure-session-secret-at-least-32-characters!",
+    },
   },
   resolve: {
     alias: {

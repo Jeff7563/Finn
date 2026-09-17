@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getAuthenticatedUser } from "@/lib/server/auth";
-import { DataStore } from "@/lib/server/data-store";
+import { authorizeAndReadSlipPreview } from "@/lib/server/private-storage";
 
 export const dynamic = "force-dynamic";
 
@@ -10,71 +10,30 @@ export async function GET(
 ) {
   try {
     const { id: slipId } = await context.params;
-    if (!slipId) {
-      return NextResponse.json({ error: "Missing slip ID" }, { status: 400 });
-    }
-
     const { searchParams } = new URL(req.url);
     const sig = searchParams.get("sig");
     const expStr = searchParams.get("exp");
 
-    let isAuthorized = false;
-    const authenticatedUser = await getAuthenticatedUser();
+    const authUser = await getAuthenticatedUser();
+    const result = await authorizeAndReadSlipPreview({
+      slipId,
+      expStr,
+      sig,
+      authenticatedUserId: authUser?.id ?? null,
+    });
 
-    // 1. Verify Signed URL Signature if provided
-    if (sig && expStr) {
-      const exp = parseInt(expStr, 10);
-      if (DataStore.verifySlipPreviewSignature(slipId, exp, sig)) {
-        isAuthorized = true;
-      }
-    }
-
-    // 2. Fetch the slip
-    const slip = await DataStore.getSlipByIdUnscoped(slipId);
-    if (!slip) {
-      return NextResponse.json({ error: "ไม่พบไฟล์หลักฐาน" }, { status: 404 });
-    }
-
-    // 3. Authorization check
-    // Either signed preview is valid, OR authenticated user owns the slip
-    if (!isAuthorized) {
-      if (!authenticatedUser) {
-        return NextResponse.json(
-          { error: "Unauthorized access: valid signed URL or session required" },
-          { status: 401 }
-        );
-      }
-      if (slip.user_id !== authenticatedUser.id) {
-        return NextResponse.json(
-          { error: "Forbidden: cross-user access denied" },
-          { status: 403 }
-        );
-      }
-    }
-
-    // 4. Pruned binary check (HTTP 410 Gone)
-    if (slip.binary_deleted_at || !slip.storage_path) {
+    if (result.status !== 200 || !result.buffer) {
       return NextResponse.json(
-        { error: "ไฟล์ต้นฉบับถูกลบตามนโยบายการเก็บรักษาแล้ว" },
-        { status: 410 }
+        { error: result.error || "Preview unavailable" },
+        { status: result.status }
       );
     }
 
-    // 5. Fetch file buffer from private storage
-    const fileBuffer = await DataStore.getSlipFile(slip.storage_path);
-    if (!fileBuffer) {
-      return NextResponse.json(
-        { error: "ไม่พบไฟล์หลักฐาน" },
-        { status: 404 }
-      );
-    }
-
-    // 5. Return file with strict privacy headers
-    return new NextResponse(new Uint8Array(fileBuffer), {
+    return new NextResponse(new Uint8Array(result.buffer), {
       status: 200,
       headers: {
-        "Content-Type": slip.mime_type || "image/jpeg",
-        "Content-Disposition": `inline; filename="slip-${slip.id}.jpg"`,
+        "Content-Type": result.mimeType || "image/jpeg",
+        "Content-Disposition": `inline; filename="slip-${result.slipId}.jpg"`,
         "Cache-Control": "private, no-store, max-age=0, must-revalidate",
         "X-Content-Type-Options": "nosniff",
       },

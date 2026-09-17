@@ -46,6 +46,11 @@ export interface TransactionsPageData {
   merchants: Merchant[];
 }
 
+export interface StorageMutationOptions {
+  trustedServer?: boolean;
+  asClientRole?: "authenticated" | "anon";
+}
+
 export interface IDataStore {
   // Accounts
   getAccounts(userId: string): Promise<Account[]>;
@@ -99,8 +104,8 @@ export interface IDataStore {
   getSlipByIdUnscoped(id: string): Promise<Slip | null>;
   getSlipByFileHash(userId: string, hash: string): Promise<Slip | null>;
   getPendingReviewSlips(userId: string): Promise<Slip[]>;
-  createSlip(userId: string, data: Partial<Slip>): Promise<Slip>;
-  updateSlip(userId: string, id: string, data: Partial<Slip>): Promise<Slip>;
+  createSlip(userId: string, data: Partial<Slip>, options?: StorageMutationOptions): Promise<Slip>;
+  updateSlip(userId: string, id: string, data: Partial<Slip>, options?: StorageMutationOptions): Promise<Slip>;
 
   // Slip Jobs
   createSlipJob(userId: string, data: Partial<SlipIngestionJob>): Promise<SlipIngestionJob>;
@@ -168,8 +173,8 @@ export interface IDataStore {
   getSourceDocuments(userId: string): Promise<SourceDocument[]>;
   getSourceDocumentById(userId: string, id: string): Promise<SourceDocument | null>;
   getSourceDocumentByHash(userId: string, hash: string): Promise<SourceDocument | null>;
-  createSourceDocument(userId: string, data: Partial<SourceDocument>): Promise<SourceDocument>;
-  updateSourceDocument(userId: string, id: string, data: Partial<SourceDocument>): Promise<SourceDocument>;
+  createSourceDocument(userId: string, data: Partial<SourceDocument>, options?: StorageMutationOptions): Promise<SourceDocument>;
+  updateSourceDocument(userId: string, id: string, data: Partial<SourceDocument>, options?: StorageMutationOptions): Promise<SourceDocument>;
 
   // Import Batches
   getImportBatches(userId: string): Promise<ImportBatch[]>;

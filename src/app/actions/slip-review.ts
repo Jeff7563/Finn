@@ -2,6 +2,7 @@
 
 import { getAuthenticatedUser } from "@/lib/server/auth";
 import { DataStore } from "@/lib/server/data-store";
+import { privateStorage } from "@/lib/server/private-storage";
 import { TransactionFormData } from "@/lib/validation/schemas";
 import { defaultSlipProcessor } from "@/lib/slip/processor";
 import { SlipProcessingResult } from "@/types/slip";
@@ -455,19 +456,15 @@ export async function reprocessSlipAction(
       return { success: false, error: "ไม่พบข้อมูลสลิป" };
     }
 
-    if (slip.binary_deleted_at || !slip.storage_path) {
-      return { success: false, error: "ไฟล์ต้นฉบับถูกลบแล้ว ไม่สามารถประมวลผลสลิปใหม่ได้" };
-    }
-
-    const buffer = await DataStore.getSlipFile(slip.storage_path);
-    if (!buffer) {
+    const binary = await privateStorage.getSlipBinary(user.id, slipId);
+    if (!binary || !binary.buffer) {
       return { success: false, error: "ไฟล์ต้นฉบับถูกลบแล้ว ไม่สามารถประมวลผลสลิปใหม่ได้" };
     }
 
     const result = await defaultSlipProcessor.reprocessSlip({
       userId: user.id,
       slipId: slip.id,
-      buffer,
+      buffer: binary.buffer,
     });
 
     revalidatePath("/review");

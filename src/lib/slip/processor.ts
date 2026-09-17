@@ -1,4 +1,6 @@
+import crypto from "crypto";
 import { DataStore } from "@/lib/server/data-store";
+import { privateStorage } from "@/lib/server/private-storage";
 import {
   SlipProcessingResult,
   SlipSource,
@@ -9,7 +11,6 @@ import {
 import {
   validateSlipFile,
   computeFileSha256,
-  generateSlipStoragePath,
 } from "./validation";
 import { DefaultQrDecoder, QrDecoder } from "./qr/decoder";
 import { parseSlipQrPayload } from "./qr/parser";
@@ -94,12 +95,18 @@ export class SlipProcessor {
       };
     }
 
-    // 3. Save Privately to Storage
-    const storagePath = generateSlipStoragePath(userId, validation.extension || "jpg");
-    await DataStore.saveSlipFile(storagePath, buffer);
+    // 3. Save Privately to Storage via server-only privateStorage boundary
+    const slipId = crypto.randomUUID();
+    const { storagePath } = await privateStorage.saveSlipBinary(
+      userId,
+      slipId,
+      buffer,
+      validation.mime
+    );
 
     // 4. Create Slip Record
     const slip = await DataStore.createSlip(userId, {
+      id: slipId,
       storage_path: storagePath,
       file_hash_sha256: fileHash,
       mime_type: validation.mime,

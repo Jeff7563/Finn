@@ -33,6 +33,7 @@ export default defineConfig({
       ENABLE_DEMO_MODE: "true",
       PLAYWRIGHT_TEST: "1",
       DATASTORE_MODE: "memory",
+      SESSION_SECRET: "playwright-e2e-secure-test-session-secret-32-chars",
     },
   },
 });

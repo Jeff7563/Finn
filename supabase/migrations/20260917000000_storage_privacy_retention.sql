@@ -115,19 +115,37 @@ GRANT SELECT ON public.storage_binary_events TO authenticated;
 -- 4. STORAGE METADATA MUTATION GUARDS (TRIGGERS)
 -- ============================================================================
 
--- A. Guard public.slips storage-sensitive fields
+-- A. Guard public.slips storage-sensitive fields and is_pinned on INSERT and UPDATE
 CREATE OR REPLACE FUNCTION public.guard_slip_storage_metadata_mutation()
 RETURNS TRIGGER AS $$
+DECLARE
+    is_trusted BOOLEAN;
 BEGIN
-    IF TG_OP = 'UPDATE' THEN
+    is_trusted := (COALESCE(current_setting('app.allow_storage_metadata_mutation', true), 'false') = 'true')
+                  OR (COALESCE(auth.role(), '') = 'service_role');
+
+    IF TG_OP = 'INSERT' THEN
+        -- On INSERT, untrusted clients cannot set sensitive storage metadata or is_pinned
+        IF NOT is_trusted THEN
+            IF NEW.storage_path IS NOT NULL
+               OR NEW.file_hash_sha256 IS NOT NULL
+               OR NEW.file_size IS NOT NULL
+               OR NEW.stored_file_size IS NOT NULL
+               OR NEW.binary_deleted_at IS NOT NULL
+               OR (NEW.is_pinned IS NOT NULL AND NEW.is_pinned IS DISTINCT FROM false) THEN
+                RAISE EXCEPTION 'Direct client initialization of slip storage metadata or pin state (storage_path, file_hash_sha256, file_size, stored_file_size, binary_deleted_at, is_pinned) is prohibited. Mutations must execute via trusted server flow.';
+            END IF;
+        END IF;
+    ELSIF TG_OP = 'UPDATE' THEN
+        -- On UPDATE, untrusted clients cannot modify sensitive storage metadata or is_pinned
         IF (OLD.storage_path IS DISTINCT FROM NEW.storage_path)
            OR (OLD.file_hash_sha256 IS DISTINCT FROM NEW.file_hash_sha256)
            OR (OLD.file_size IS DISTINCT FROM NEW.file_size)
            OR (OLD.stored_file_size IS DISTINCT FROM NEW.stored_file_size)
-           OR (OLD.binary_deleted_at IS DISTINCT FROM NEW.binary_deleted_at) THEN
-            IF COALESCE(current_setting('app.allow_storage_metadata_mutation', true), 'false') <> 'true'
-               AND COALESCE(auth.role(), '') <> 'service_role' THEN
-                RAISE EXCEPTION 'Direct client modification of slip storage metadata (storage_path, file_hash_sha256, file_size, stored_file_size, binary_deleted_at) is prohibited. Mutations must execute via trusted server flow.';
+           OR (OLD.binary_deleted_at IS DISTINCT FROM NEW.binary_deleted_at)
+           OR (OLD.is_pinned IS DISTINCT FROM NEW.is_pinned) THEN
+            IF NOT is_trusted THEN
+                RAISE EXCEPTION 'Direct client modification of slip storage metadata or pin state (storage_path, file_hash_sha256, file_size, stored_file_size, binary_deleted_at, is_pinned) is prohibited. Mutations must execute via trusted server flow.';
             END IF;
         END IF;
     END IF;
@@ -137,23 +155,41 @@ $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public;
 
 DROP TRIGGER IF EXISTS trg_guard_slip_storage_metadata_mutation ON public.slips;
 CREATE TRIGGER trg_guard_slip_storage_metadata_mutation
-    BEFORE UPDATE ON public.slips
+    BEFORE INSERT OR UPDATE ON public.slips
     FOR EACH ROW
     EXECUTE FUNCTION public.guard_slip_storage_metadata_mutation();
 
--- B. Guard public.source_documents storage-sensitive fields
+-- B. Guard public.source_documents storage-sensitive fields and is_pinned on INSERT and UPDATE
 CREATE OR REPLACE FUNCTION public.guard_source_document_storage_metadata_mutation()
 RETURNS TRIGGER AS $$
+DECLARE
+    is_trusted BOOLEAN;
 BEGIN
-    IF TG_OP = 'UPDATE' THEN
+    is_trusted := (COALESCE(current_setting('app.allow_storage_metadata_mutation', true), 'false') = 'true')
+                  OR (COALESCE(auth.role(), '') = 'service_role');
+
+    IF TG_OP = 'INSERT' THEN
+        -- On INSERT, untrusted clients cannot set sensitive storage metadata or is_pinned
+        IF NOT is_trusted THEN
+            IF NEW.storage_path IS NOT NULL
+               OR NEW.file_hash IS NOT NULL
+               OR NEW.file_size IS NOT NULL
+               OR NEW.stored_file_size IS NOT NULL
+               OR NEW.binary_deleted_at IS NOT NULL
+               OR (NEW.is_pinned IS NOT NULL AND NEW.is_pinned IS DISTINCT FROM false) THEN
+                RAISE EXCEPTION 'Direct client initialization of source document storage metadata or pin state (storage_path, file_hash, file_size, stored_file_size, binary_deleted_at, is_pinned) is prohibited. Mutations must execute via trusted server flow.';
+            END IF;
+        END IF;
+    ELSIF TG_OP = 'UPDATE' THEN
+        -- On UPDATE, untrusted clients cannot modify sensitive storage metadata or is_pinned
         IF (OLD.storage_path IS DISTINCT FROM NEW.storage_path)
            OR (OLD.file_hash IS DISTINCT FROM NEW.file_hash)
            OR (OLD.file_size IS DISTINCT FROM NEW.file_size)
            OR (OLD.stored_file_size IS DISTINCT FROM NEW.stored_file_size)
-           OR (OLD.binary_deleted_at IS DISTINCT FROM NEW.binary_deleted_at) THEN
-            IF COALESCE(current_setting('app.allow_storage_metadata_mutation', true), 'false') <> 'true'
-               AND COALESCE(auth.role(), '') <> 'service_role' THEN
-                RAISE EXCEPTION 'Direct client modification of source document storage metadata (storage_path, file_hash, file_size, stored_file_size, binary_deleted_at) is prohibited. Mutations must execute via trusted server flow.';
+           OR (OLD.binary_deleted_at IS DISTINCT FROM NEW.binary_deleted_at)
+           OR (OLD.is_pinned IS DISTINCT FROM NEW.is_pinned) THEN
+            IF NOT is_trusted THEN
+                RAISE EXCEPTION 'Direct client modification of source document storage metadata or pin state (storage_path, file_hash, file_size, stored_file_size, binary_deleted_at, is_pinned) is prohibited. Mutations must execute via trusted server flow.';
             END IF;
         END IF;
     END IF;
@@ -163,7 +199,7 @@ $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public;
 
 DROP TRIGGER IF EXISTS trg_guard_source_document_storage_metadata_mutation ON public.source_documents;
 CREATE TRIGGER trg_guard_source_document_storage_metadata_mutation
-    BEFORE UPDATE ON public.source_documents
+    BEFORE INSERT OR UPDATE ON public.source_documents
     FOR EACH ROW
     EXECUTE FUNCTION public.guard_source_document_storage_metadata_mutation();
 
@@ -206,58 +242,121 @@ END $$;
 -- 6. OPERATOR VERIFICATION SQL (Section 23)
 -- ============================================================================
 /*
--- Run following verification queries against Supabase SQL Editor:
+-- The following queries allow operators to verify all database-level
+-- storage privacy security invariants with explicit boolean PASS/FAIL confirmations.
 
--- Q1: Verify slips new columns exist
-SELECT column_name, data_type, is_nullable
-FROM information_schema.columns
-WHERE table_schema = 'public' AND table_name = 'slips'
-  AND column_name IN ('stored_file_size', 'binary_deleted_at', 'is_pinned');
--- Expected: 3 rows returned
+-- Query 1: Verify slip guard trigger fires on INSERT and UPDATE
+SELECT 
+    CASE WHEN COUNT(DISTINCT event_manipulation) = 2 THEN 'PASS' ELSE 'FAIL' END AS status,
+    'slip guard trigger trg_guard_slip_storage_metadata_mutation fires on INSERT and UPDATE' AS check_name
+FROM information_schema.triggers
+WHERE event_object_schema = 'public'
+  AND event_object_table = 'slips'
+  AND trigger_name = 'trg_guard_slip_storage_metadata_mutation'
+  AND event_manipulation IN ('INSERT', 'UPDATE')
+  AND action_timing = 'BEFORE';
 
--- Q2: Verify storage_retention_settings table exists
-SELECT table_name FROM information_schema.tables
-WHERE table_schema = 'public' AND table_name = 'storage_retention_settings';
--- Expected: 1 row returned
+-- Query 2: Verify source_document guard trigger fires on INSERT and UPDATE
+SELECT 
+    CASE WHEN COUNT(DISTINCT event_manipulation) = 2 THEN 'PASS' ELSE 'FAIL' END AS status,
+    'source_document guard trigger trg_guard_source_document_storage_metadata_mutation fires on INSERT and UPDATE' AS check_name
+FROM information_schema.triggers
+WHERE event_object_schema = 'public'
+  AND event_object_table = 'source_documents'
+  AND trigger_name = 'trg_guard_source_document_storage_metadata_mutation'
+  AND event_manipulation IN ('INSERT', 'UPDATE')
+  AND action_timing = 'BEFORE';
 
--- Q3: Verify storage_binary_events table exists
-SELECT table_name FROM information_schema.tables
-WHERE table_schema = 'public' AND table_name = 'storage_binary_events';
--- Expected: 1 row returned
+-- Query 3: Verify is_pinned is protected in trigger definitions
+SELECT 
+    CASE WHEN COUNT(*) = 2 THEN 'PASS' ELSE 'FAIL' END AS status,
+    'is_pinned column protected against direct mutation in slip and source_document triggers' AS check_name
+FROM pg_proc p
+JOIN pg_namespace n ON p.pronamespace = n.oid
+WHERE n.nspname = 'public'
+  AND p.proname IN ('guard_slip_storage_metadata_mutation', 'guard_source_document_storage_metadata_mutation')
+  AND p.prosrc ILIKE '%is_pinned%';
 
--- Q4: Verify RLS is enabled on all tables
-SELECT tablename, rowsecurity
-FROM pg_tables
-WHERE schemaname = 'public'
-  AND tablename IN ('slips', 'storage_retention_settings', 'storage_binary_events');
--- Expected: all rowsecurity = true
+-- Query 4: Verify slips bucket exists and public = false
+SELECT 
+    CASE WHEN COUNT(*) > 0 AND bool_and(public = false) THEN 'PASS' ELSE 'FAIL' END AS status,
+    'slips bucket exists and is private (public = false)' AS check_name
+FROM storage.buckets
+WHERE id = 'slips';
 
--- Q5: Verify audit FKs have ON DELETE RESTRICT
-SELECT
-    tc.table_name, kcu.column_name, rc.delete_rule
-FROM information_schema.table_constraints AS tc
-JOIN information_schema.key_column_usage AS kcu
-  ON tc.constraint_name = kcu.constraint_name
-JOIN information_schema.referential_constraints AS rc
-  ON tc.constraint_name = rc.constraint_name
-WHERE tc.table_schema = 'public' AND tc.table_name = 'storage_binary_events';
--- Expected: delete_rule = 'RESTRICT' for slip_id and source_document_id
-
--- Q6: Verify slips bucket exists and public = false
-SELECT id, name, public FROM storage.buckets WHERE id = 'slips';
--- Expected: 1 row with public = false
-
--- Q7: Verify NO direct authenticated or anon policies exist on storage.objects for slips
-SELECT policyname, roles, cmd
+-- Query 5: Verify authenticated storage.objects direct CRUD policies absent
+SELECT 
+    CASE WHEN COUNT(*) = 0 THEN 'PASS' ELSE 'FAIL' END AS status,
+    'authenticated direct CRUD policies absent on storage.objects for slips' AS check_name
 FROM pg_policies
 WHERE schemaname = 'storage' AND tablename = 'objects'
-  AND (policyname ILIKE '%slip%' OR qual ILIKE '%slips%');
--- Expected: 0 rows returned
+  AND (policyname ILIKE '%slip%' OR qual ILIKE '%slips%' OR with_check ILIKE '%slips%')
+  AND ('authenticated' = ANY(roles) OR 'public' = ANY(roles));
 
--- Q8: Verify storage metadata mutation guard triggers exist
-SELECT trigger_name, event_manipulation, action_statement
-FROM information_schema.triggers
-WHERE trigger_schema = 'public'
-  AND trigger_name IN ('trg_guard_slip_storage_metadata_mutation', 'trg_guard_source_document_storage_metadata_mutation');
--- Expected: 2 rows returned
+-- Query 6: Verify anon storage.objects direct CRUD policies absent
+SELECT 
+    CASE WHEN COUNT(*) = 0 THEN 'PASS' ELSE 'FAIL' END AS status,
+    'anon direct CRUD policies absent on storage.objects for slips' AS check_name
+FROM pg_policies
+WHERE schemaname = 'storage' AND tablename = 'objects'
+  AND (policyname ILIKE '%slip%' OR qual ILIKE '%slips%' OR with_check ILIKE '%slips%')
+  AND ('anon' = ANY(roles) OR 'public' = ANY(roles));
+
+-- Query 7: Verify storage_binary_events direct mutation denied (INSERT, UPDATE, DELETE revoked)
+SELECT 
+    CASE WHEN COUNT(*) = 0 THEN 'PASS' ELSE 'FAIL' END AS status,
+    'storage_binary_events direct INSERT, UPDATE, DELETE revoked from authenticated, anon, PUBLIC' AS check_name
+FROM information_schema.role_table_grants
+WHERE table_schema = 'public'
+  AND table_name = 'storage_binary_events'
+  AND grantee IN ('authenticated', 'anon', 'PUBLIC')
+  AND privilege_type IN ('INSERT', 'UPDATE', 'DELETE');
+
+-- Query 8: Verify audit FKs have ON DELETE RESTRICT
+SELECT 
+    CASE WHEN COUNT(*) = 2 THEN 'PASS' ELSE 'FAIL' END AS status,
+    'storage_binary_events audit foreign keys enforce ON DELETE RESTRICT on slip_id and source_document_id' AS check_name
+FROM pg_constraint con
+JOIN pg_class c ON con.conrelid = c.oid
+JOIN pg_namespace n ON c.relnamespace = n.oid
+WHERE n.nspname = 'public'
+  AND c.relname = 'storage_binary_events'
+  AND con.contype = 'f'
+  AND con.confdeltype = 'r';
+
+-- Consolidated Operator Verification Query:
+WITH audit_checks AS (
+    SELECT '1. Slip Guard Trigger (INSERT & UPDATE)' AS item,
+           (SELECT COUNT(DISTINCT event_manipulation) FROM information_schema.triggers WHERE event_object_schema = 'public' AND event_object_table = 'slips' AND trigger_name = 'trg_guard_slip_storage_metadata_mutation' AND event_manipulation IN ('INSERT', 'UPDATE') AND action_timing = 'BEFORE') = 2 AS passed,
+           'BEFORE INSERT OR UPDATE trigger prevents direct client initialization/modification of slip storage metadata and is_pinned' AS details
+    UNION ALL
+    SELECT '2. Source Document Guard Trigger (INSERT & UPDATE)',
+           (SELECT COUNT(DISTINCT event_manipulation) FROM information_schema.triggers WHERE event_object_schema = 'public' AND event_object_table = 'source_documents' AND trigger_name = 'trg_guard_source_document_storage_metadata_mutation' AND event_manipulation IN ('INSERT', 'UPDATE') AND action_timing = 'BEFORE') = 2,
+           'BEFORE INSERT OR UPDATE trigger prevents direct client initialization/modification of source document storage metadata and is_pinned'
+    UNION ALL
+    SELECT '3. is_pinned Protected in Triggers',
+           (SELECT COUNT(*) FROM pg_proc p JOIN pg_namespace n ON p.pronamespace = n.oid WHERE n.nspname = 'public' AND p.proname IN ('guard_slip_storage_metadata_mutation', 'guard_source_document_storage_metadata_mutation') AND p.prosrc ILIKE '%is_pinned%') = 2,
+           'Trigger function bodies explicitly inspect and reject unauthorized is_pinned mutations'
+    UNION ALL
+    SELECT '4. Slips Bucket Private',
+           EXISTS (SELECT 1 FROM storage.buckets WHERE id = 'slips' AND public = false),
+           'Supabase storage slips bucket is private (public = false)'
+    UNION ALL
+    SELECT '5. Authenticated storage.objects Direct Policies Absent',
+           NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = 'storage' AND tablename = 'objects' AND (policyname ILIKE '%slip%' OR qual ILIKE '%slips%' OR with_check ILIKE '%slips%') AND ('authenticated' = ANY(roles) OR 'public' = ANY(roles))),
+           'No direct authenticated CRUD policies exist on storage.objects for slips'
+    UNION ALL
+    SELECT '6. Anon storage.objects Direct Policies Absent',
+           NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = 'storage' AND tablename = 'objects' AND (policyname ILIKE '%slip%' OR qual ILIKE '%slips%' OR with_check ILIKE '%slips%') AND ('anon' = ANY(roles) OR 'public' = ANY(roles))),
+           'No direct anonymous CRUD policies exist on storage.objects for slips'
+    UNION ALL
+    SELECT '7. Direct Audit Trail Mutation Revoked',
+           NOT EXISTS (SELECT 1 FROM information_schema.role_table_grants WHERE table_schema = 'public' AND table_name = 'storage_binary_events' AND grantee IN ('authenticated', 'anon', 'PUBLIC') AND privilege_type IN ('INSERT', 'UPDATE', 'DELETE')),
+           'Direct INSERT, UPDATE, DELETE on storage_binary_events are completely revoked from client roles'
+    UNION ALL
+    SELECT '8. Audit FKs ON DELETE RESTRICT',
+           (SELECT COUNT(*) FROM pg_constraint con JOIN pg_class c ON con.conrelid = c.oid JOIN pg_namespace n ON c.relnamespace = n.oid WHERE n.nspname = 'public' AND c.relname = 'storage_binary_events' AND con.contype = 'f' AND con.confdeltype = 'r') = 2,
+           'Foreign keys on slip_id and source_document_id enforce ON DELETE RESTRICT to protect audit trail integrity'
+)
+SELECT item, CASE WHEN passed THEN 'PASS' ELSE 'FAIL' END AS status, details FROM audit_checks;
 */

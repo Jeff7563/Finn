@@ -1,7 +1,70 @@
 import "server-only";
 
+import crypto from "crypto";
 import { DataStore } from "@/lib/server/data-store";
 import { StoragePruneResult } from "@/types/storage";
+
+/**
+ * Server-only helper enforcing that SESSION_SECRET is configured and meets
+ * minimum entropy requirements (>= 32 characters).
+ * Fails closed without any hardcoded secret fallback.
+ * Secret is never logged.
+ */
+export function requirePreviewSigningSecret(): string {
+  const secret = process.env.SESSION_SECRET;
+  if (!secret || typeof secret !== "string" || secret.trim().length < 32) {
+    throw new Error(
+      "SESSION_SECRET is missing or insufficient (must be at least 32 characters)"
+    );
+  }
+  return secret.trim();
+}
+
+/**
+ * Generates an HMAC-SHA256 signature for slip preview URL using SESSION_SECRET.
+ */
+export function signSlipPreview(slipId: string, exp: number): string {
+  const secret = requirePreviewSigningSecret();
+  return crypto
+    .createHmac("sha256", secret)
+    .update(`${slipId}:${exp}`)
+    .digest("hex");
+}
+
+/**
+ * Timing-safe verification of slip preview HMAC signature.
+ * Fails closed if SESSION_SECRET is missing, secret is weak, or timestamp expired.
+ */
+export function verifySlipPreviewSignature(
+  slipId: string,
+  exp: number,
+  sig: string
+): boolean {
+  if (!slipId || !exp || !sig) return false;
+  if (typeof exp !== "number" || isNaN(exp) || Date.now() > exp) return false;
+
+  let secret: string;
+  try {
+    secret = requirePreviewSigningSecret();
+  } catch {
+    // Fail closed if signing secret is missing or insufficient
+    return false;
+  }
+
+  try {
+    const expectedSig = crypto
+      .createHmac("sha256", secret)
+      .update(`${slipId}:${exp}`)
+      .digest("hex");
+
+    const expectedBuf = Buffer.from(expectedSig, "hex");
+    const actualBuf = Buffer.from(sig, "hex");
+    if (expectedBuf.length !== actualBuf.length) return false;
+    return crypto.timingSafeEqual(expectedBuf, actualBuf);
+  } catch {
+    return false;
+  }
+}
 
 /**
  * Derives a trusted, deterministic storage path for a slip.
@@ -70,6 +133,9 @@ export async function createSlipSignedViewUrl(
     throw new Error("Access denied: valid user session and slipId required");
   }
 
+  // Ensure secret is present before generating URL (fail-closed)
+  requirePreviewSigningSecret();
+
   const slip = await DataStore.getSlipById(userId, slipId);
   if (!slip) {
     throw new Error("ไม่พบไฟล์หลักฐาน (Slip not found or access denied)");
@@ -83,15 +149,94 @@ export async function createSlipSignedViewUrl(
     throw new Error("ไฟล์ต้นฉบับถูกลบตามนโยบายการเก็บรักษาแล้ว (Original binary was pruned per retention policy)");
   }
 
-  // Hard clamp: default 120s, hard ceiling 300s
+  // Hard clamp: default 120s, hard ceiling 300s, minimum 1s
   const clampedTtl = Math.max(1, Math.min(expiresInSeconds, 300));
-  const url = await DataStore.createSignedSlipUrl(userId, slipId, clampedTtl);
-  const expiresAt = new Date(Date.now() + clampedTtl * 1000).toISOString();
+  const exp = Date.now() + clampedTtl * 1000;
+  const sig = signSlipPreview(slipId, exp);
+  const url = `/api/slips/${slipId}/preview?exp=${exp}&sig=${sig}`;
+  const expiresAt = new Date(exp).toISOString();
 
   return {
     url,
     expiresIn: clampedTtl,
     expiresAt,
+  };
+}
+
+export interface SlipPreviewAuthorizationResult {
+  status: 200 | 400 | 401 | 403 | 404 | 410;
+  buffer?: Buffer;
+  mimeType?: string;
+  slipId?: string;
+  error?: string;
+}
+
+/**
+ * Complete server-only boundary for slip preview authorization and binary streaming.
+ */
+export async function authorizeAndReadSlipPreview(params: {
+  slipId: string;
+  expStr: string | null;
+  sig: string | null;
+  authenticatedUserId?: string | null;
+}): Promise<SlipPreviewAuthorizationResult> {
+  const { slipId, expStr, sig, authenticatedUserId } = params;
+
+  if (!slipId) {
+    return { status: 400, error: "Missing slip ID" };
+  }
+
+  let isAuthorized = false;
+
+  // 1. Verify Signed URL Signature if provided
+  if (sig && expStr) {
+    const exp = parseInt(expStr, 10);
+    if (!isNaN(exp) && verifySlipPreviewSignature(slipId, exp, sig)) {
+      isAuthorized = true;
+    }
+  }
+
+  // 2. Fetch slip unscoped
+  const slip = await DataStore.getSlipByIdUnscoped(slipId);
+  if (!slip) {
+    return { status: 404, error: "ไม่พบไฟล์หลักฐาน" };
+  }
+
+  // 3. Authorization check
+  if (!isAuthorized) {
+    if (!authenticatedUserId) {
+      return {
+        status: 401,
+        error: "Unauthorized access: valid signed URL or session required",
+      };
+    }
+    if (slip.user_id !== authenticatedUserId) {
+      return {
+        status: 403,
+        error: "Forbidden: cross-user access denied",
+      };
+    }
+  }
+
+  // 4. Pruned binary check (HTTP 410 Gone)
+  if (slip.binary_deleted_at || !slip.storage_path) {
+    return {
+      status: 410,
+      error: "ไฟล์ต้นฉบับถูกลบตามนโยบายการเก็บรักษาแล้ว",
+    };
+  }
+
+  // 5. Fetch file buffer from private storage
+  const buffer = await DataStore.getSlipFile(slip.storage_path);
+  if (!buffer) {
+    return { status: 404, error: "ไม่พบไฟล์หลักฐาน" };
+  }
+
+  return {
+    status: 200,
+    buffer,
+    mimeType: slip.mime_type || "image/jpeg",
+    slipId: slip.id,
   };
 }
 
@@ -118,6 +263,16 @@ export async function getSlipBinary(
     buffer,
     mimeType: slip.mime_type || "image/jpeg",
   };
+}
+
+/**
+ * Server-only binary reader interface.
+ */
+export async function readSlipBinary(
+  userId: string,
+  slipId: string
+): Promise<{ buffer: Buffer; mimeType: string } | null> {
+  return getSlipBinary(userId, slipId);
 }
 
 /**
@@ -388,14 +543,85 @@ export async function unpinEvidence(
   }
 }
 
+/**
+ * Simulates and validates DB-level storage metadata mutation guard triggers.
+ * Verifies whether direct client operations on public.slips or public.source_documents
+ * are permitted under RLS and trigger enforcement.
+ */
+export function evaluateStorageMutationGuard(
+  table: "slips" | "source_documents",
+  op: "INSERT" | "UPDATE",
+  payload: Record<string, unknown>,
+  role: "authenticated" | "anon" | "service_role"
+): { allowed: boolean; error?: string } {
+  const isTrusted = role === "service_role";
+  if (isTrusted) {
+    return { allowed: true };
+  }
+
+  const sensitiveFields =
+    table === "slips"
+      ? [
+          "storage_path",
+          "file_hash_sha256",
+          "file_size",
+          "stored_file_size",
+          "binary_deleted_at",
+          "is_pinned",
+        ]
+      : [
+          "storage_path",
+          "file_hash",
+          "file_size",
+          "stored_file_size",
+          "binary_deleted_at",
+          "is_pinned",
+        ];
+
+  if (op === "INSERT") {
+    for (const field of sensitiveFields) {
+      if (field === "is_pinned") {
+        if (payload.is_pinned !== undefined && payload.is_pinned !== false) {
+          return {
+            allowed: false,
+            error: `Direct client initialization of ${table} storage metadata or pin state (${field}) is prohibited. Mutations must execute via trusted server flow.`,
+          };
+        }
+      } else if (payload[field] !== undefined && payload[field] !== null) {
+        return {
+          allowed: false,
+          error: `Direct client initialization of ${table} storage metadata or pin state (${field}) is prohibited. Mutations must execute via trusted server flow.`,
+        };
+      }
+    }
+  } else if (op === "UPDATE") {
+    for (const field of sensitiveFields) {
+      if (payload[field] !== undefined) {
+        return {
+          allowed: false,
+          error: `Direct client modification of ${table} storage metadata or pin state (${field}) is prohibited. Mutations must execute via trusted server flow.`,
+        };
+      }
+    }
+  }
+
+  return { allowed: true };
+}
+
 export const privateStorage = {
+  requirePreviewSigningSecret,
   deriveTrustedSlipPath,
   saveSlipBinary,
   createSlipSignedViewUrl,
+  signSlipPreview,
+  verifySlipPreviewSignature,
+  authorizeAndReadSlipPreview,
   binaryExists,
   getSlipBinary,
+  readSlipBinary,
   pruneSlipBinary,
   pruneSourceDocumentBinary,
   pinEvidence,
   unpinEvidence,
+  evaluateStorageMutationGuard,
 };

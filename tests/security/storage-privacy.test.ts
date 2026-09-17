@@ -1,19 +1,43 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import { DataStore } from "@/lib/server/data-store";
 import {
   deriveTrustedSlipPath,
   createSlipSignedViewUrl,
   pruneSlipBinary,
   getSlipBinary,
+  saveSlipBinary,
+  signSlipPreview,
+  verifySlipPreviewSignature,
+  requirePreviewSigningSecret,
+  evaluateStorageMutationGuard,
+  pinEvidence,
+  unpinEvidence,
+  privateStorage,
 } from "@/lib/server/private-storage";
 import { GET as previewRouteHandler } from "@/app/api/slips/[id]/preview/route";
 import { NextRequest } from "next/server";
 import { hasAdminCredentials } from "@/lib/supabase/admin";
-import crypto from "crypto";
+import { bulkPruneAction } from "@/app/actions/storage";
+import { evaluateUnifiedStorageCleanupDryRun } from "@/lib/storage/retention";
+import { Slip } from "@/types/slip";
+import { SourceDocument } from "@/types/multi-source";
+
+let mockUser: { id: string; email: string; display_name?: string } | null = null;
+
+vi.mock("@/lib/server/auth", () => ({
+  getAuthenticatedUser: vi.fn(async () => mockUser),
+  requireUser: vi.fn(async () => {
+    if (!mockUser) throw new Error("Unauthorized");
+    return mockUser;
+  }),
+}));
+
+vi.mock("next/cache", () => ({
+  revalidatePath: vi.fn(),
+}));
 
 function signSlip(slipId: string, exp: number): string {
-  const secret = process.env.SESSION_SECRET || "finn-preview-signature-secret-2026";
-  return crypto.createHmac("sha256", secret).update(`${slipId}:${exp}`).digest("hex");
+  return signSlipPreview(slipId, exp);
 }
 
 describe("Storage Privacy Hardening & Security (15 Scenarios)", () => {
@@ -21,6 +45,7 @@ describe("Storage Privacy Hardening & Security (15 Scenarios)", () => {
   const USER_BOB = "user-bob-storage-sec-2";
 
   beforeEach(() => {
+    mockUser = null;
     DataStore.reset();
   });
 
@@ -264,5 +289,350 @@ describe("Storage Privacy Hardening & Security (15 Scenarios)", () => {
     expect(res.status).toBe(200);
     expect(res.headers.get("Cache-Control")).toBe("private, no-store, max-age=0, must-revalidate");
     expect(res.headers.get("X-Content-Type-Options")).toBe("nosniff");
+  });
+});
+
+describe("Storage Privacy Final Operator Security Invariants (12 Verification Scenarios)", () => {
+  const USER_ALICE = "user-alice-sec-inv-1";
+  const USER_BOB = "user-bob-sec-inv-2";
+
+  beforeEach(() => {
+    mockUser = null;
+    DataStore.reset();
+  });
+
+  // 1. Missing SESSION_SECRET -> sign fails closed
+  it("INV-01: missing SESSION_SECRET -> signSlipPreview fails closed", () => {
+    const original = process.env.SESSION_SECRET;
+    try {
+      delete process.env.SESSION_SECRET;
+      expect(() => requirePreviewSigningSecret()).toThrow(
+        /SESSION_SECRET is missing or insufficient/i
+      );
+      expect(() => signSlipPreview("slip-test-1", Date.now() + 60000)).toThrow(
+        /SESSION_SECRET is missing or insufficient/i
+      );
+    } finally {
+      process.env.SESSION_SECRET = original;
+    }
+  });
+
+  // 2. SESSION_SECRET < 32 chars -> sign fails closed
+  it("INV-02: SESSION_SECRET < 32 chars -> signSlipPreview fails closed", () => {
+    const original = process.env.SESSION_SECRET;
+    try {
+      process.env.SESSION_SECRET = "short-secret-under-32-chars";
+      expect(() => requirePreviewSigningSecret()).toThrow(
+        /SESSION_SECRET is missing or insufficient/i
+      );
+      expect(() => signSlipPreview("slip-test-2", Date.now() + 60000)).toThrow(
+        /SESSION_SECRET is missing or insufficient/i
+      );
+    } finally {
+      process.env.SESSION_SECRET = original;
+    }
+  });
+
+  // 3. Missing or weak SESSION_SECRET -> verify returns false
+  it("INV-03: missing or weak SESSION_SECRET -> verifySlipPreviewSignature returns false (fail-closed)", () => {
+    const original = process.env.SESSION_SECRET;
+    try {
+      delete process.env.SESSION_SECRET;
+      expect(verifySlipPreviewSignature("slip-test-3", Date.now() + 60000, "any-sig")).toBe(false);
+
+      process.env.SESSION_SECRET = "too-short";
+      expect(verifySlipPreviewSignature("slip-test-3", Date.now() + 60000, "any-sig")).toBe(false);
+    } finally {
+      process.env.SESSION_SECRET = original;
+    }
+  });
+
+  // 4. Browser cannot insert slip with storage_path
+  it("INV-04: browser cannot insert slip with storage_path", async () => {
+    const guard = evaluateStorageMutationGuard(
+      "slips",
+      "INSERT",
+      { storage_path: "alice/2026/09/evil.jpg" },
+      "authenticated"
+    );
+    expect(guard.allowed).toBe(false);
+    expect(guard.error).toContain("Direct client initialization of slips storage metadata");
+
+    await expect(
+      DataStore.createSlip(
+        USER_ALICE,
+        { storage_path: "alice/2026/09/evil.jpg", status: "created" },
+        { asClientRole: "authenticated" }
+      )
+    ).rejects.toThrow(/Direct client initialization of slip storage metadata/i);
+  });
+
+  // 5. Browser cannot insert slip with file_hash_sha256
+  it("INV-05: browser cannot insert slip with file_hash_sha256", async () => {
+    const guard = evaluateStorageMutationGuard(
+      "slips",
+      "INSERT",
+      { file_hash_sha256: "fake-sha-hash" },
+      "authenticated"
+    );
+    expect(guard.allowed).toBe(false);
+    expect(guard.error).toContain("Direct client initialization of slips storage metadata");
+
+    await expect(
+      DataStore.createSlip(
+        USER_ALICE,
+        { file_hash_sha256: "fake-sha-hash", status: "created" },
+        { asClientRole: "authenticated" }
+      )
+    ).rejects.toThrow(/Direct client initialization of slip storage metadata/i);
+  });
+
+  // 6. Browser cannot insert source document with storage_path
+  it("INV-06: browser cannot insert source document with storage_path", async () => {
+    const guard = evaluateStorageMutationGuard(
+      "source_documents",
+      "INSERT",
+      { storage_path: "alice/2026/09/evil.pdf" },
+      "authenticated"
+    );
+    expect(guard.allowed).toBe(false);
+    expect(guard.error).toContain("Direct client initialization of source_documents storage metadata");
+
+    await expect(
+      DataStore.createSourceDocument(
+        USER_ALICE,
+        {
+          storage_path: "alice/2026/09/evil.pdf",
+          document_type: "pdf_statement",
+          original_filename: "evil.pdf",
+        },
+        { asClientRole: "authenticated" }
+      )
+    ).rejects.toThrow(/Direct client initialization of source document storage metadata/i);
+  });
+
+  // 7. Browser cannot update is_pinned directly
+  it("INV-07: browser cannot update is_pinned directly", async () => {
+    const slip = await DataStore.createSlip(USER_ALICE, {
+      storage_path: "alice/2026/09/slip7.jpg",
+      file_hash_sha256: "hash-inv-7-slip",
+      status: "created",
+    });
+
+    const doc = await DataStore.createSourceDocument(USER_ALICE, {
+      storage_path: "alice/2026/09/doc7.pdf",
+      file_hash: "hash-inv-7-doc",
+      document_type: "pdf_statement",
+      original_filename: "doc7.pdf",
+    });
+
+    // Direct browser update of is_pinned on slip rejected
+    await expect(
+      DataStore.updateSlip(USER_ALICE, slip.id, { is_pinned: true }, { asClientRole: "authenticated" })
+    ).rejects.toThrow(/Direct client modification of slip storage metadata/i);
+
+    // Direct browser update of is_pinned on source document rejected
+    await expect(
+      DataStore.updateSourceDocument(USER_ALICE, doc.id, { is_pinned: true }, { asClientRole: "authenticated" })
+    ).rejects.toThrow(/Direct client modification of source document storage metadata/i);
+
+    // Direct browser update of protected storage columns rejected
+    await expect(
+      DataStore.updateSlip(USER_ALICE, slip.id, { storage_path: "tampered" }, { asClientRole: "authenticated" })
+    ).rejects.toThrow(/Direct client modification of slip storage metadata/i);
+  });
+
+  // 8. Trusted server ingest still works
+  it("INV-08: trusted server ingest still works with storage metadata", async () => {
+    const trustedSlip = await DataStore.createSlip(USER_ALICE, {
+      storage_path: "alice/2026/09/trusted.jpg",
+      file_hash_sha256: "sha256-trusted-slip",
+      file_size: 2048,
+      stored_file_size: 2048,
+      status: "created",
+    });
+    expect(trustedSlip.id).toBeDefined();
+    expect(trustedSlip.storage_path).toBe("alice/2026/09/trusted.jpg");
+    expect(trustedSlip.stored_file_size).toBe(2048);
+
+    const trustedDoc = await DataStore.createSourceDocument(USER_ALICE, {
+      storage_path: "alice/2026/09/trusted.pdf",
+      file_hash: "sha256-trusted-doc",
+      file_size: 4096,
+      stored_file_size: 4096,
+      document_type: "pdf_statement",
+      original_filename: "trusted.pdf",
+    });
+    expect(trustedDoc.id).toBeDefined();
+    expect(trustedDoc.storage_path).toBe("alice/2026/09/trusted.pdf");
+    expect(trustedDoc.stored_file_size).toBe(4096);
+  });
+
+  // 9. Trusted pin/unpin works and appends audit event
+  it("INV-09: trusted pin/unpin works and appends audit event to storage_binary_events", async () => {
+    const slip = await DataStore.createSlip(USER_ALICE, {
+      storage_path: "alice/2026/09/pin_audit.jpg",
+      file_hash_sha256: "hash-pin-audit",
+      status: "created",
+    });
+
+    // Pin slip
+    await pinEvidence(USER_ALICE, "slip", slip.id);
+    let updatedSlip = await DataStore.getSlipById(USER_ALICE, slip.id);
+    expect(updatedSlip?.is_pinned).toBe(true);
+
+    let events = await DataStore.getStorageBinaryEvents(USER_ALICE);
+    const pinEvent = events.find((e) => e.slip_id === slip.id && e.action === "pin");
+    expect(pinEvent).toBeDefined();
+
+    // Unpin slip
+    await unpinEvidence(USER_ALICE, "slip", slip.id);
+    updatedSlip = await DataStore.getSlipById(USER_ALICE, slip.id);
+    expect(updatedSlip?.is_pinned).toBe(false);
+
+    events = await DataStore.getStorageBinaryEvents(USER_ALICE);
+    const unpinEvent = events.find((e) => e.slip_id === slip.id && e.action === "unpin");
+    expect(unpinEvent).toBeDefined();
+  });
+
+  // 10. Bulk prune revalidates server-side
+  it("INV-10: bulk prune authoritatively revalidates eligibility server-side", async () => {
+    mockUser = { id: USER_ALICE, email: "alice@example.com" };
+
+    const oldDate = new Date(Date.now() - 120 * 24 * 60 * 60 * 1000).toISOString();
+    const filePath = `${USER_ALICE}/2026/05/old_candidate.jpg`;
+    await DataStore.saveSlipFile(filePath, Buffer.from("candidate image"));
+
+    const eligibleSlip = await DataStore.createSlip(USER_ALICE, {
+      storage_path: filePath,
+      file_hash_sha256: "hash-candidate-10",
+      file_size: 50000,
+      stored_file_size: 50000,
+      status: "created",
+      created_at: oldDate,
+    });
+
+    const res = await bulkPruneAction([
+      { targetId: eligibleSlip.id, targetType: "slip" },
+    ]);
+
+    expect(res.success).toBe(true);
+    expect(res.totalPruned).toBe(1);
+    expect(res.totalBytesFreed).toBe(50000);
+
+    const prunedSlip = await DataStore.getSlipById(USER_ALICE, eligibleSlip.id);
+    expect(prunedSlip?.stored_file_size).toBe(0);
+    expect(prunedSlip?.binary_deleted_at).toBeTruthy();
+  });
+
+  // 11. Forged bulk prune target cannot prune recent file
+  it("INV-11: forged bulk prune target cannot prune recent file", async () => {
+    mockUser = { id: USER_ALICE, email: "alice@example.com" };
+
+    const recentDate = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString();
+    const recentPath = `${USER_ALICE}/2026/09/recent_protected.jpg`;
+    await DataStore.saveSlipFile(recentPath, Buffer.from("recent binary"));
+
+    const recentSlip = await DataStore.createSlip(USER_ALICE, {
+      storage_path: recentPath,
+      file_hash_sha256: "hash-recent-protected",
+      file_size: 80000,
+      stored_file_size: 80000,
+      status: "created",
+      created_at: recentDate,
+    });
+
+    // Client requests pruning recent slip
+    const res = await bulkPruneAction([
+      { targetId: recentSlip.id, targetType: "slip" },
+    ]);
+
+    expect(res.totalPruned).toBe(0);
+    expect(res.failedCount).toBe(1);
+
+    // Verify binary is untouched
+    const afterSlip = await DataStore.getSlipById(USER_ALICE, recentSlip.id);
+    expect(afterSlip?.stored_file_size).toBe(80000);
+    expect(afterSlip?.binary_deleted_at).toBeNull();
+    expect(await DataStore.slipFileExists(recentPath)).toBe(true);
+  });
+
+  // 12. source_document_retention_days is independently honored & unresolved docs exempt
+  it("INV-12: source_document_retention_days is independently honored and unresolved docs are exempt", () => {
+    const now = new Date("2026-09-17T12:00:00.000Z");
+
+    const slip60: Slip = {
+      id: "slip-60",
+      user_id: USER_ALICE,
+      storage_path: "p1.jpg",
+      file_hash_sha256: "h1",
+      mime_type: "image/jpeg",
+      file_size: 1000,
+      stored_file_size: 1000,
+      source: "web_upload",
+      parser_version: "v1",
+      status: "created",
+      is_pinned: false,
+      created_at: new Date(now.getTime() - 60 * 24 * 60 * 60 * 1000).toISOString(),
+    };
+
+    const doc60: SourceDocument = {
+      id: "doc-60",
+      user_id: USER_ALICE,
+      document_type: "pdf_statement",
+      storage_path: "p2.pdf",
+      file_size: 2000,
+      stored_file_size: 2000,
+      file_hash: "h2",
+      status: "processed",
+      is_pinned: false,
+      provider_metadata: {},
+      received_at: new Date(now.getTime() - 60 * 24 * 60 * 60 * 1000).toISOString(),
+      created_at: new Date(now.getTime() - 60 * 24 * 60 * 60 * 1000).toISOString(),
+      updated_at: new Date(now.getTime() - 60 * 24 * 60 * 60 * 1000).toISOString(),
+    };
+
+    const doc200: SourceDocument = {
+      ...doc60,
+      id: "doc-200",
+      received_at: new Date(now.getTime() - 200 * 24 * 60 * 60 * 1000).toISOString(),
+      created_at: new Date(now.getTime() - 200 * 24 * 60 * 60 * 1000).toISOString(),
+    };
+
+    const docReceived: SourceDocument = {
+      ...doc200,
+      id: "doc-received",
+      status: "received",
+    };
+
+    const docProcessing: SourceDocument = {
+      ...doc200,
+      id: "doc-processing",
+      status: "processing",
+    };
+
+    const dryRun = evaluateUnifiedStorageCleanupDryRun(
+      [doc60, doc200, docReceived, docProcessing],
+      [slip60],
+      {
+        now,
+        slipRetentionDays: 30,
+        sourceDocumentRetentionDays: 180,
+      }
+    );
+
+    // slip60: 60d > 30d -> eligible
+    expect(dryRun.candidates.some((c) => c.id === "slip-60")).toBe(true);
+
+    // doc60: 60d < 180d -> exempt recent
+    expect(dryRun.candidates.some((c) => c.id === "doc-60")).toBe(false);
+
+    // doc200: 200d > 180d & processed -> eligible
+    expect(dryRun.candidates.some((c) => c.id === "doc-200")).toBe(true);
+
+    // docReceived & docProcessing: unresolved -> exempt
+    expect(dryRun.candidates.some((c) => c.id === "doc-received")).toBe(false);
+    expect(dryRun.candidates.some((c) => c.id === "doc-processing")).toBe(false);
+    expect(dryRun.exemptUnresolvedCount).toBe(2);
   });
 });

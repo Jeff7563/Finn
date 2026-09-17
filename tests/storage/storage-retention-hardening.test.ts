@@ -439,7 +439,7 @@ describe("Slip Retention Hardening & Privacy (20 Scenarios)", () => {
       slip_retention_days: 0,
     });
     expect(invalidSlipDays.success).toBe(false);
-    expect(invalidSlipDays.error).toContain("ระหว่าง 1 ถึง 3650 วัน");
+    expect(invalidSlipDays.error).toContain("ระหว่าง 7 ถึง 3650 วัน");
 
     // Invalid negative failed days
     const invalidFailedDays = await updateRetentionSettingsAction({
@@ -456,12 +456,14 @@ describe("Slip Retention Hardening & Privacy (20 Scenarios)", () => {
     await DataStore.saveSlipFile(path1, Buffer.from("data1"));
     await DataStore.saveSlipFile(path2, Buffer.from("data2"));
 
+    const pastDate = new Date(Date.now() - 100 * 24 * 60 * 60 * 1000).toISOString();
     const s1 = await DataStore.createSlip(USER_ID, {
       storage_path: path1,
       file_hash_sha256: "hash-bulk-1",
       status: "created",
       file_size: 100000,
       stored_file_size: 100000,
+      created_at: pastDate,
     });
     const s2 = await DataStore.createSlip(USER_ID, {
       storage_path: path2,
@@ -469,6 +471,7 @@ describe("Slip Retention Hardening & Privacy (20 Scenarios)", () => {
       status: "created",
       file_size: 150000,
       stored_file_size: 150000,
+      created_at: pastDate,
     });
 
     const res = await bulkPruneAction([

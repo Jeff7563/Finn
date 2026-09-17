@@ -48,7 +48,12 @@ import {
   TransactionsPageData,
   ConfirmSlipTransactionInput,
   ConfirmSlipTransactionResult,
+  StorageMutationOptions,
 } from "./data-store-interface";
+import {
+  signSlipPreview,
+  verifySlipPreviewSignature,
+} from "./private-storage";
 import {
   generateIngestToken,
   hashToken,
@@ -1052,8 +1057,28 @@ export const MemoryDataStore: IDataStore = {
       .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
   },
 
-  async createSlip(userId: string, data: Partial<Slip>): Promise<Slip> {
+  async createSlip(
+    userId: string,
+    data: Partial<Slip>,
+    options?: StorageMutationOptions
+  ): Promise<Slip> {
     assertUserId(userId);
+
+    if (options?.asClientRole === "authenticated" || options?.asClientRole === "anon") {
+      if (
+        data.storage_path !== undefined ||
+        data.file_hash_sha256 !== undefined ||
+        data.file_size !== undefined ||
+        data.stored_file_size !== undefined ||
+        data.binary_deleted_at !== undefined ||
+        (data.is_pinned !== undefined && data.is_pinned !== false)
+      ) {
+        throw new Error(
+          "Direct client initialization of slip storage metadata or pin state is prohibited. Mutations must execute via trusted server flow."
+        );
+      }
+    }
+
     const now = new Date().toISOString();
 
     const newSlip: Slip = {
@@ -1090,9 +1115,30 @@ export const MemoryDataStore: IDataStore = {
   async updateSlip(
     userId: string,
     id: string,
-    data: Partial<Slip>
+    data: Partial<Slip>,
+    options?: StorageMutationOptions
   ): Promise<Slip> {
     assertUserId(userId);
+
+    if (options?.asClientRole === "authenticated" || options?.asClientRole === "anon") {
+      if (
+        data.storage_path !== undefined ||
+        data.file_hash_sha256 !== undefined ||
+        data.file_size !== undefined ||
+        data.stored_file_size !== undefined ||
+        data.binary_deleted_at !== undefined ||
+        data.is_pinned !== undefined
+      ) {
+        throw new Error(
+          "Direct client modification of slip storage metadata or pin state is prohibited. Mutations must execute via trusted server flow."
+        );
+      }
+    } else if (data.is_pinned !== undefined && !options?.trustedServer) {
+      throw new Error(
+        "Direct client modification of is_pinned is prohibited. Use pin/unpin server action."
+      );
+    }
+
     const idx = dbState.slips.findIndex(
       (s) => s.id === id && s.user_id === userId
     );
@@ -1252,35 +1298,13 @@ export const MemoryDataStore: IDataStore = {
     // Clamp TTL: default 120s, maximum 300s
     const clampedTtl = Math.max(1, Math.min(expiresInSeconds, 300));
     const exp = Date.now() + clampedTtl * 1000;
-    const secret =
-      process.env.SESSION_SECRET || "finn-preview-signature-secret-2026";
-    const sig = crypto
-      .createHmac("sha256", secret)
-      .update(`${slipId}:${exp}`)
-      .digest("hex");
+    const sig = signSlipPreview(slipId, exp);
 
     return `/api/slips/${slipId}/preview?exp=${exp}&sig=${sig}`;
   },
 
   verifySlipPreviewSignature(slipId: string, exp: number, sig: string): boolean {
-    if (!slipId || !exp || !sig) return false;
-    if (Date.now() > exp) return false;
-
-    const secret =
-      process.env.SESSION_SECRET || "finn-preview-signature-secret-2026";
-    const expectedSig = crypto
-      .createHmac("sha256", secret)
-      .update(`${slipId}:${exp}`)
-      .digest("hex");
-
-    try {
-      const expectedBuf = Buffer.from(expectedSig, "hex");
-      const actualBuf = Buffer.from(sig, "hex");
-      if (expectedBuf.length !== actualBuf.length) return false;
-      return crypto.timingSafeEqual(expectedBuf, actualBuf);
-    } catch {
-      return false;
-    }
+    return verifySlipPreviewSignature(slipId, exp, sig);
   },
 
   // Storage Retention Settings
@@ -1401,7 +1425,7 @@ export const MemoryDataStore: IDataStore = {
       throw new Error("Slip not found or access denied");
     }
 
-    const updated = await this.updateSlip(userId, slipId, { is_pinned: isPinned });
+    const updated = await this.updateSlip(userId, slipId, { is_pinned: isPinned }, { trustedServer: true });
 
     await this.createStorageBinaryEvent(userId, {
       user_id: userId,
@@ -1426,7 +1450,7 @@ export const MemoryDataStore: IDataStore = {
       throw new Error("Source document not found or access denied");
     }
 
-    const updated = await this.updateSourceDocument(userId, docId, { is_pinned: isPinned });
+    const updated = await this.updateSourceDocument(userId, docId, { is_pinned: isPinned }, { trustedServer: true });
 
     await this.createStorageBinaryEvent(userId, {
       user_id: userId,
@@ -1908,9 +1932,25 @@ export const MemoryDataStore: IDataStore = {
 
   async createSourceDocument(
     userId: string,
-    data: Partial<SourceDocument>
+    data: Partial<SourceDocument>,
+    options?: StorageMutationOptions
   ): Promise<SourceDocument> {
     const dbState = getDbState();
+
+    if (options?.asClientRole === "authenticated" || options?.asClientRole === "anon") {
+      if (
+        data.storage_path !== undefined ||
+        data.file_hash !== undefined ||
+        data.file_size !== undefined ||
+        data.stored_file_size !== undefined ||
+        data.binary_deleted_at !== undefined ||
+        (data.is_pinned !== undefined && data.is_pinned !== false)
+      ) {
+        throw new Error(
+          "Direct client initialization of source document storage metadata or pin state is prohibited. Mutations must execute via trusted server flow."
+        );
+      }
+    }
 
     if (data.connection_id) {
       const conn = dbState.source_connections.find((c) => c.id === data.connection_id);
@@ -1952,9 +1992,30 @@ export const MemoryDataStore: IDataStore = {
   async updateSourceDocument(
     userId: string,
     id: string,
-    data: Partial<SourceDocument>
+    data: Partial<SourceDocument>,
+    options?: StorageMutationOptions
   ): Promise<SourceDocument> {
     const dbState = getDbState();
+
+    if (options?.asClientRole === "authenticated" || options?.asClientRole === "anon") {
+      if (
+        data.storage_path !== undefined ||
+        data.file_hash !== undefined ||
+        data.file_size !== undefined ||
+        data.stored_file_size !== undefined ||
+        data.binary_deleted_at !== undefined ||
+        data.is_pinned !== undefined
+      ) {
+        throw new Error(
+          "Direct client modification of source document storage metadata or pin state is prohibited. Mutations must execute via trusted server flow."
+        );
+      }
+    } else if (data.is_pinned !== undefined && !options?.trustedServer) {
+      throw new Error(
+        "Direct client modification of is_pinned is prohibited. Use pin/unpin server action."
+      );
+    }
+
     const idx = dbState.source_documents.findIndex((d) => d.user_id === userId && d.id === id);
     if (idx === -1) throw new Error("Source document not found");
 

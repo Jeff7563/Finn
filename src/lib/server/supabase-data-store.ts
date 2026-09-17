@@ -1,4 +1,3 @@
-import crypto from "crypto";
 import { SupabaseClient } from "@supabase/supabase-js";
 import {
   Account,
@@ -57,7 +56,12 @@ import {
   TransactionsPageData,
   ConfirmSlipTransactionInput,
   ConfirmSlipTransactionResult,
+  StorageMutationOptions,
 } from "./data-store-interface";
+import {
+  signSlipPreview,
+  verifySlipPreviewSignature,
+} from "./private-storage";
 import {
   withJwtSkewRetry,
   executeQueryWithSkewRetry,
@@ -1548,9 +1552,30 @@ export class SupabaseDataStoreImpl implements IDataStore {
     }, (res) => res.length);
   }
 
-  async createSlip(userId: string, data: Partial<Slip>): Promise<Slip> {
+  async createSlip(
+    userId: string,
+    data: Partial<Slip>,
+    options?: StorageMutationOptions
+  ): Promise<Slip> {
     assertUserId(userId);
-    const client = await this.getClient(userId);
+
+    if (options?.asClientRole === "authenticated" || options?.asClientRole === "anon") {
+      if (
+        data.storage_path !== undefined ||
+        data.file_hash_sha256 !== undefined ||
+        data.file_size !== undefined ||
+        data.stored_file_size !== undefined ||
+        data.binary_deleted_at !== undefined ||
+        (data.is_pinned !== undefined && data.is_pinned !== false)
+      ) {
+        throw new Error(
+          "Direct client initialization of slip storage metadata or pin state is prohibited. Mutations must execute via trusted server flow."
+        );
+      }
+    }
+
+    // Ingestion writes storage-sensitive columns; trusted server flow uses admin client
+    const client = await this.getClient(userId, { requireAdmin: true });
     const payload = {
       ...(data.id ? { id: data.id } : {}),
       user_id: userId,
@@ -1590,9 +1615,29 @@ export class SupabaseDataStoreImpl implements IDataStore {
   async updateSlip(
     userId: string,
     id: string,
-    data: Partial<Slip>
+    data: Partial<Slip>,
+    options?: StorageMutationOptions
   ): Promise<Slip> {
     assertUserId(userId);
+
+    if (options?.asClientRole === "authenticated" || options?.asClientRole === "anon") {
+      if (
+        data.storage_path !== undefined ||
+        data.file_hash_sha256 !== undefined ||
+        data.file_size !== undefined ||
+        data.stored_file_size !== undefined ||
+        data.binary_deleted_at !== undefined ||
+        data.is_pinned !== undefined
+      ) {
+        throw new Error(
+          "Direct client modification of slip storage metadata or pin state is prohibited. Mutations must execute via trusted server flow."
+        );
+      }
+    } else if (data.is_pinned !== undefined && !options?.trustedServer) {
+      throw new Error(
+        "Direct client modification of is_pinned is prohibited. Use pin/unpin server action."
+      );
+    }
 
     // Validate linked transaction ownership
     if (data.linked_transaction_id) {
@@ -1620,8 +1665,11 @@ export class SupabaseDataStoreImpl implements IDataStore {
     // Use admin client if updating sensitive storage metadata to satisfy trigger guard
     const isSensitiveUpdate =
       data.storage_path !== undefined ||
+      data.file_hash_sha256 !== undefined ||
+      data.file_size !== undefined ||
       data.stored_file_size !== undefined ||
-      data.binary_deleted_at !== undefined;
+      data.binary_deleted_at !== undefined ||
+      data.is_pinned !== undefined;
     const client = await this.getClient(userId, { requireAdmin: isSensitiveUpdate });
 
     const { data: updated, error } = await client
@@ -2040,35 +2088,13 @@ export class SupabaseDataStoreImpl implements IDataStore {
 
     const clampedTtl = Math.max(1, Math.min(expiresInSeconds, 300));
     const exp = Date.now() + clampedTtl * 1000;
-    const secret =
-      process.env.SESSION_SECRET || "finn-preview-signature-secret-2026";
-    const sig = crypto
-      .createHmac("sha256", secret)
-      .update(`${slipId}:${exp}`)
-      .digest("hex");
+    const sig = signSlipPreview(slipId, exp);
 
     return `/api/slips/${slipId}/preview?exp=${exp}&sig=${sig}`;
   }
 
   verifySlipPreviewSignature(slipId: string, exp: number, sig: string): boolean {
-    if (!slipId || !exp || !sig) return false;
-    if (Date.now() > exp) return false;
-
-    const secret =
-      process.env.SESSION_SECRET || "finn-preview-signature-secret-2026";
-    const expectedSig = crypto
-      .createHmac("sha256", secret)
-      .update(`${slipId}:${exp}`)
-      .digest("hex");
-
-    try {
-      const expectedBuf = Buffer.from(expectedSig, "hex");
-      const actualBuf = Buffer.from(sig, "hex");
-      if (expectedBuf.length !== actualBuf.length) return false;
-      return crypto.timingSafeEqual(expectedBuf, actualBuf);
-    } catch {
-      return false;
-    }
+    return verifySlipPreviewSignature(slipId, exp, sig);
   }
 
   // Storage Retention Settings
@@ -2231,7 +2257,7 @@ export class SupabaseDataStoreImpl implements IDataStore {
       throw new Error("Slip not found or access denied");
     }
 
-    const updated = await this.updateSlip(userId, slipId, { is_pinned: isPinned });
+    const updated = await this.updateSlip(userId, slipId, { is_pinned: isPinned }, { trustedServer: true });
 
     await this.createStorageBinaryEvent(userId, {
       user_id: userId,
@@ -2256,7 +2282,7 @@ export class SupabaseDataStoreImpl implements IDataStore {
       throw new Error("Source document not found or access denied");
     }
 
-    const updated = await this.updateSourceDocument(userId, docId, { is_pinned: isPinned });
+    const updated = await this.updateSourceDocument(userId, docId, { is_pinned: isPinned }, { trustedServer: true });
 
     await this.createStorageBinaryEvent(userId, {
       user_id: userId,
@@ -2451,9 +2477,25 @@ export class SupabaseDataStoreImpl implements IDataStore {
 
   async createSourceDocument(
     userId: string,
-    data: Partial<SourceDocument>
+    data: Partial<SourceDocument>,
+    options?: StorageMutationOptions
   ): Promise<SourceDocument> {
-    const supabase = await this.getClient();
+    if (options?.asClientRole === "authenticated" || options?.asClientRole === "anon") {
+      if (
+        data.storage_path !== undefined ||
+        data.file_hash !== undefined ||
+        data.file_size !== undefined ||
+        data.stored_file_size !== undefined ||
+        data.binary_deleted_at !== undefined ||
+        (data.is_pinned !== undefined && data.is_pinned !== false)
+      ) {
+        throw new Error(
+          "Direct client initialization of source document storage metadata or pin state is prohibited. Mutations must execute via trusted server flow."
+        );
+      }
+    }
+
+    const supabase = await this.getClient(userId, { requireAdmin: true });
     const { data: created, error } = await supabase
       .from("source_documents")
       .insert({
@@ -2479,9 +2521,36 @@ export class SupabaseDataStoreImpl implements IDataStore {
   async updateSourceDocument(
     userId: string,
     id: string,
-    data: Partial<SourceDocument>
+    data: Partial<SourceDocument>,
+    options?: StorageMutationOptions
   ): Promise<SourceDocument> {
-    const supabase = await this.getClient();
+    if (options?.asClientRole === "authenticated" || options?.asClientRole === "anon") {
+      if (
+        data.storage_path !== undefined ||
+        data.file_hash !== undefined ||
+        data.file_size !== undefined ||
+        data.stored_file_size !== undefined ||
+        data.binary_deleted_at !== undefined ||
+        data.is_pinned !== undefined
+      ) {
+        throw new Error(
+          "Direct client modification of source document storage metadata or pin state is prohibited. Mutations must execute via trusted server flow."
+        );
+      }
+    } else if (data.is_pinned !== undefined && !options?.trustedServer) {
+      throw new Error(
+        "Direct client modification of is_pinned is prohibited. Use pin/unpin server action."
+      );
+    }
+
+    const isSensitive =
+      data.storage_path !== undefined ||
+      data.file_hash !== undefined ||
+      data.file_size !== undefined ||
+      data.stored_file_size !== undefined ||
+      data.binary_deleted_at !== undefined ||
+      data.is_pinned !== undefined;
+    const supabase = await this.getClient(userId, { requireAdmin: isSensitive });
     const { data: updated, error } = await supabase
       .from("source_documents")
       .update(data)

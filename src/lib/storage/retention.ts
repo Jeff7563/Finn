@@ -16,7 +16,9 @@ import { Slip } from "@/types/slip";
  */
 
 export interface StorageCleanupOptions {
-  retentionDays?: number; // default 90 days
+  retentionDays?: number; // legacy fallback / general retention
+  slipRetentionDays?: number; // explicit slip retention days (default 90)
+  sourceDocumentRetentionDays?: number; // explicit source document retention days (default 90)
   failedRetentionDays?: number; // default 7 days for failed/duplicate files
   now?: Date | string;
 }
@@ -110,7 +112,10 @@ export function isDocumentRetentionEligible(
   options: StorageCleanupOptions = {}
 ): { eligible: boolean; reason: string; ageDays: number } {
   const now = options.now ? new Date(options.now) : new Date();
-  const retentionDays = options.retentionDays ?? DEFAULT_RETENTION_DAYS;
+  const retentionDays =
+    options.sourceDocumentRetentionDays ??
+    options.retentionDays ??
+    DEFAULT_RETENTION_DAYS;
 
   // Rule 1: Pinned behavior - NEVER clean up pinned documents
   if (doc.is_pinned) {
@@ -126,6 +131,15 @@ export function isDocumentRetentionEligible(
     return {
       eligible: false,
       reason: "Binary already deleted (already pruned)",
+      ageDays: 0,
+    };
+  }
+
+  // Rule 3: Unresolved review status - protect received / processing inbox documents
+  if (doc.status === "received" || doc.status === "processing") {
+    return {
+      eligible: false,
+      reason: `Source document is in unresolved status (${doc.status}), protected from cleanup`,
       ageDays: 0,
     };
   }
@@ -178,7 +192,10 @@ export function isSlipRetentionEligible(
   options: StorageCleanupOptions = {}
 ): { eligible: boolean; reason: string; ageDays: number } {
   const now = options.now ? new Date(options.now) : new Date();
-  const retentionDays = options.retentionDays ?? DEFAULT_RETENTION_DAYS;
+  const retentionDays =
+    options.slipRetentionDays ??
+    options.retentionDays ??
+    DEFAULT_RETENTION_DAYS;
 
   // Rule 1: Pinned behavior - NEVER clean up pinned slips
   if (slip.is_pinned) {
@@ -266,6 +283,10 @@ export function evaluateStorageCleanupDryRun(
       continue;
     }
 
+    if (doc.status === "received" || doc.status === "processing") {
+      continue;
+    }
+
     const { eligible, ageDays } = isDocumentRetentionEligible(doc, options);
     if (eligible) {
       const activeSize = doc.stored_file_size || doc.file_size || 0;
@@ -320,6 +341,11 @@ export function evaluateUnifiedStorageCleanupDryRun(
 
     if (doc.is_pinned) {
       exemptPinnedCount++;
+      continue;
+    }
+
+    if (doc.status === "received" || doc.status === "processing") {
+      exemptUnresolvedCount++;
       continue;
     }
 

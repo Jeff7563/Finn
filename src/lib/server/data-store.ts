@@ -32,6 +32,7 @@ import {
 import { StorageRetentionSettings, StorageBinaryEvent } from "@/types/storage";
 import {
   IDataStore,
+  StorageMutationOptions,
   PreloadedRelations,
   TransactionsPageData,
   ConfirmSlipTransactionInput,
@@ -301,16 +302,17 @@ export const DataStore: IDataStore = {
     return getActiveStore().getPendingReviewSlips(userId);
   },
 
-  async createSlip(userId: string, data: Partial<Slip>): Promise<Slip> {
-    return getActiveStore().createSlip(userId, data);
+  async createSlip(userId: string, data: Partial<Slip>, options?: StorageMutationOptions): Promise<Slip> {
+    return getActiveStore().createSlip(userId, data, options);
   },
 
   async updateSlip(
     userId: string,
     id: string,
-    data: Partial<Slip>
+    data: Partial<Slip>,
+    options?: StorageMutationOptions
   ): Promise<Slip> {
-    return getActiveStore().updateSlip(userId, id, data);
+    return getActiveStore().updateSlip(userId, id, data, options);
   },
 
   // SLIP JOBS
@@ -494,17 +496,19 @@ export const DataStore: IDataStore = {
 
   async createSourceDocument(
     userId: string,
-    data: Partial<SourceDocument>
+    data: Partial<SourceDocument>,
+    options?: StorageMutationOptions
   ): Promise<SourceDocument> {
-    return getActiveStore().createSourceDocument(userId, data);
+    return getActiveStore().createSourceDocument(userId, data, options);
   },
 
   async updateSourceDocument(
     userId: string,
     id: string,
-    data: Partial<SourceDocument>
+    data: Partial<SourceDocument>,
+    options?: StorageMutationOptions
   ): Promise<SourceDocument> {
-    return getActiveStore().updateSourceDocument(userId, id, data);
+    return getActiveStore().updateSourceDocument(userId, id, data, options);
   },
 
   // Import Batches

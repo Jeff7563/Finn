@@ -65,15 +65,15 @@ export async function updateRetentionSettingsAction(
   }
 
   try {
-    // Basic bounds validation
-    if (updates.slip_retention_days !== undefined && (updates.slip_retention_days < 1 || updates.slip_retention_days > 3650)) {
-      return { success: false, error: "ระยะเวลาเก็บรักษาสลิปต้องอยู่ระหว่าง 1 ถึง 3650 วัน" };
+    // Basic bounds validation matching database CHECK constraints exactly
+    if (updates.slip_retention_days !== undefined && (updates.slip_retention_days < 7 || updates.slip_retention_days > 3650)) {
+      return { success: false, error: "ระยะเวลาเก็บรักษาสลิปต้องอยู่ระหว่าง 7 ถึง 3650 วัน" };
     }
     if (updates.failed_retention_days !== undefined && (updates.failed_retention_days < 1 || updates.failed_retention_days > 365)) {
       return { success: false, error: "ระยะเวลาเก็บรักษาไฟล์ที่ล้มเหลวต้องอยู่ระหว่าง 1 ถึง 365 วัน" };
     }
-    if (updates.source_document_retention_days !== undefined && (updates.source_document_retention_days < 1 || updates.source_document_retention_days > 3650)) {
-      return { success: false, error: "ระยะเวลาเก็บรักษาเอกสารต้นทางต้องอยู่ระหว่าง 1 ถึง 3650 วัน" };
+    if (updates.source_document_retention_days !== undefined && (updates.source_document_retention_days < 7 || updates.source_document_retention_days > 3650)) {
+      return { success: false, error: "ระยะเวลาเก็บรักษาเอกสารต้นทางต้องอยู่ระหว่าง 7 ถึง 3650 วัน" };
     }
 
     const settings = await DataStore.updateStorageRetentionSettings(user.id, updates);
@@ -102,7 +102,8 @@ export async function getCleanupDryRunAction(): Promise<DryRunResponse> {
     const slips = await DataStore.getSlips(user.id);
 
     const dryRun = evaluateUnifiedStorageCleanupDryRun(documents, slips, {
-      retentionDays: settings.slip_retention_days,
+      slipRetentionDays: settings.slip_retention_days,
+      sourceDocumentRetentionDays: settings.source_document_retention_days,
       failedRetentionDays: settings.failed_retention_days,
     });
 
@@ -164,6 +165,8 @@ export async function pruneEvidenceBinaryAction(
 
 /**
  * Bulk prunes eligible binaries with safety checks and error accumulation.
+ * Authoritatively recomputes retention eligibility on the server:
+ * Malicious client cannot supply an ineligible target ID to bypass retention rules.
  */
 export async function bulkPruneAction(
   targets: Array<{ targetId: string; targetType: "slip" | "source_document" }>
@@ -179,17 +182,45 @@ export async function bulkPruneAction(
     };
   }
 
+  // 1. Load current retention settings, source documents, and slips on the server
+  const settings = await DataStore.getStorageRetentionSettings(user.id);
+  const documents = await DataStore.getSourceDocuments(user.id);
+  const slips = await DataStore.getSlips(user.id);
+
+  // 2. Authoritatively recompute dry-run candidates on the server
+  const dryRun = evaluateUnifiedStorageCleanupDryRun(documents, slips, {
+    slipRetentionDays: settings.slip_retention_days,
+    sourceDocumentRetentionDays: settings.source_document_retention_days,
+    failedRetentionDays: settings.failed_retention_days,
+  });
+
+  // 3. Construct an authoritative eligible target Set
+  const eligibleSet = new Set<string>();
+  for (const c of dryRun.candidates) {
+    eligibleSet.add(`${c.kind}:${c.id}`);
+  }
+
   let totalPruned = 0;
   let totalBytesFreed = 0;
   let failedCount = 0;
   const errors: string[] = [];
 
+  // 4. Reject/skip any submitted target not currently eligible
   for (const item of targets) {
+    const key = `${item.targetType}:${item.targetId}`;
+    if (!eligibleSet.has(key)) {
+      failedCount++;
+      errors.push(
+        `${item.targetType} ${item.targetId}: ไม่เข้าเกณฑ์การล้างไฟล์ที่หมดอายุ (ไฟล์ต้องผ่านเกณฑ์ระยะเวลาเก็บรักษาและไม่ถูกปักหมุด)`
+      );
+      continue;
+    }
+
     try {
       const res =
         item.targetType === "slip"
-          ? await privateStorage.pruneSlipBinary(user.id, item.targetId, "bulk_manual_prune")
-          : await privateStorage.pruneSourceDocumentBinary(user.id, item.targetId, "bulk_manual_prune");
+          ? await privateStorage.pruneSlipBinary(user.id, item.targetId, "bulk_retention_prune")
+          : await privateStorage.pruneSourceDocumentBinary(user.id, item.targetId, "bulk_retention_prune");
 
       if (res.success) {
         totalPruned++;
@@ -212,7 +243,7 @@ export async function bulkPruneAction(
   revalidatePath("/review");
 
   return {
-    success: failedCount === 0,
+    success: failedCount === 0 && totalPruned > 0,
     totalPruned,
     totalBytesFreed,
     failedCount,
