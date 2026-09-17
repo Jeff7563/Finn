@@ -22,6 +22,7 @@ import {
   UploadCloud,
 } from "lucide-react";
 import { SlipUploadModal } from "@/components/slips/SlipUploadModal";
+import { RestoreTransactionModal } from "@/components/transactions/RestoreTransactionModal";
 
 interface TransactionListClientProps {
   initialTransactions: TransactionWithRelations[];
@@ -54,6 +55,17 @@ export function TransactionListClient({
   const [sortOrder, setSortOrder] = useState<"desc" | "asc">("desc");
   const [showFilters, setShowFilters] = useState(Boolean(initialDate));
   const [isUploadModalOpen, setIsUploadModalOpen] = useState(false);
+  const [statusFilter, setStatusFilter] = useState<"all" | "active" | "voided">("all");
+  const [restoreTarget, setRestoreTarget] = useState<TransactionWithRelations | null>(null);
+
+  const activeCount = useMemo(
+    () => initialTransactions.filter((tx) => !tx.voided_at).length,
+    [initialTransactions]
+  );
+  const voidedCount = useMemo(
+    () => initialTransactions.filter((tx) => Boolean(tx.voided_at)).length,
+    [initialTransactions]
+  );
 
   const activeFilterCount =
     (selectedType !== "all" ? 1 : 0) +
@@ -62,7 +74,8 @@ export function TransactionListClient({
     (selectedPersonId ? 1 : 0) +
     (selectedMerchantId ? 1 : 0) +
     (startDate ? 1 : 0) +
-    (endDate ? 1 : 0);
+    (endDate ? 1 : 0) +
+    (statusFilter !== "all" ? 1 : 0);
 
   const clearFilters = () => {
     setSearch("");
@@ -73,6 +86,7 @@ export function TransactionListClient({
     setSelectedMerchantId("");
     setStartDate("");
     setEndDate("");
+    setStatusFilter("all");
   };
 
   const filteredTransactions = useMemo(() => {
@@ -85,6 +99,10 @@ export function TransactionListClient({
       merchantId: selectedMerchantId || undefined,
       startDate: startDate || undefined,
       endDate: endDate || undefined,
+    }).filter((tx) => {
+      if (statusFilter === "active") return !tx.voided_at;
+      if (statusFilter === "voided") return Boolean(tx.voided_at);
+      return true;
     });
 
     return sortTransactionsChronological(filtered, sortOrder);
@@ -98,6 +116,7 @@ export function TransactionListClient({
     selectedMerchantId,
     startDate,
     endDate,
+    statusFilter,
     sortOrder,
   ]);
 
@@ -195,6 +214,59 @@ export function TransactionListClient({
         </div>
       </div>
 
+      {/* Status Filter Tabs (ทั้งหมด / ใช้งาน / ยกเลิกแล้ว) */}
+      <div className="flex items-center justify-between gap-2 flex-wrap">
+        <div className="inline-flex items-center gap-1 p-1 bg-surface-soft border border-border rounded-xl text-xs font-medium">
+          <button
+            type="button"
+            onClick={() => setStatusFilter("all")}
+            className={`px-3 py-1 rounded-lg transition-colors ${
+              statusFilter === "all"
+                ? "bg-surface dark:bg-surface-raised text-text-primary shadow-xs font-semibold"
+                : "text-text-muted hover:text-text-primary"
+            }`}
+          >
+            ทั้งหมด ({initialTransactions.length})
+          </button>
+          <button
+            type="button"
+            onClick={() => setStatusFilter("active")}
+            className={`px-3 py-1 rounded-lg transition-colors ${
+              statusFilter === "active"
+                ? "bg-surface dark:bg-surface-raised text-text-primary shadow-xs font-semibold"
+                : "text-text-muted hover:text-text-primary"
+            }`}
+          >
+            ใช้งาน ({activeCount})
+          </button>
+          <button
+            type="button"
+            onClick={() => setStatusFilter("voided")}
+            className={`px-3 py-1 rounded-lg transition-colors flex items-center gap-1.5 ${
+              statusFilter === "voided"
+                ? "bg-surface dark:bg-surface-raised text-rose-600 dark:text-rose-400 shadow-xs font-semibold"
+                : "text-text-muted hover:text-text-primary"
+            }`}
+          >
+            <span>ยกเลิกแล้ว</span>
+            {voidedCount > 0 && (
+              <span className="px-1.5 py-0.2 rounded-full bg-rose-100 text-rose-700 dark:bg-rose-950 dark:text-rose-300 text-[10px] font-bold">
+                {voidedCount}
+              </span>
+            )}
+          </button>
+        </div>
+
+        {activeFilterCount > 0 && (
+          <button
+            onClick={clearFilters}
+            className="text-xs text-expense hover:opacity-80 font-semibold px-2 py-1 ml-auto"
+          >
+            ล้างตัวกรอง ({activeFilterCount})
+          </button>
+        )}
+      </div>
+
       {/* Quick Type Pill Filter */}
       <div className="flex items-center gap-1.5 overflow-x-auto pb-1 text-xs">
         {typeLabels.map((t) => (
@@ -210,14 +282,6 @@ export function TransactionListClient({
             {t.label}
           </button>
         ))}
-        {activeFilterCount > 0 && (
-          <button
-            onClick={clearFilters}
-            className="text-xs text-expense hover:opacity-80 font-semibold px-2 py-1 ml-auto"
-          >
-            ล้างตัวกรอง
-          </button>
-        )}
       </div>
 
       {/* Expanded Filters Drawer / Panel */}
@@ -331,7 +395,7 @@ export function TransactionListClient({
       {/* Results Counter */}
       <div className="flex items-center justify-between text-xs text-text-muted px-1">
         <span>
-          แสดง {filteredTransactions.length} จากทั้งหมด {initialTransactions.length} รายการ
+          แสดง {filteredTransactions.length} รายการ (ใช้งาน {activeCount} รายการ{voidedCount > 0 ? `, ยกเลิกแล้ว ${voidedCount} รายการ` : ""})
         </span>
       </div>
 
@@ -352,7 +416,11 @@ export function TransactionListClient({
               </h3>
               <div className="bg-surface dark:bg-surface-raised rounded-2xl border border-border shadow-sm overflow-hidden divide-y divide-border">
                 {group.items.map((tx) => (
-                  <TransactionItem key={tx.id} transaction={tx} />
+                  <TransactionItem
+                    key={tx.id}
+                    transaction={tx}
+                    onRestore={(target) => setRestoreTarget(target)}
+                  />
                 ))}
               </div>
             </div>
@@ -366,6 +434,27 @@ export function TransactionListClient({
         onClose={() => setIsUploadModalOpen(false)}
         onSuccess={() => router.refresh()}
       />
+
+      {/* Restore Transaction Modal */}
+      {restoreTarget && (
+        <RestoreTransactionModal
+          isOpen={Boolean(restoreTarget)}
+          transactionId={restoreTarget.id}
+          transactionDescription={
+            restoreTarget.description ||
+            restoreTarget.merchant?.display_name ||
+            restoreTarget.person?.display_name ||
+            restoreTarget.category?.name
+          }
+          amount={restoreTarget.amount}
+          currency={restoreTarget.currency}
+          onClose={() => setRestoreTarget(null)}
+          onSuccess={() => {
+            setRestoreTarget(null);
+            router.refresh();
+          }}
+        />
+      )}
     </div>
   );
 }

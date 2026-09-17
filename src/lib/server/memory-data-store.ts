@@ -5,6 +5,9 @@ import {
   Person,
   Transaction,
   TransactionWithRelations,
+  TransactionVoidEvent,
+  VoidTransactionResult,
+  RestoreTransactionResult,
 } from "@/types/finance";
 import {
   AccountFormData,
@@ -108,6 +111,7 @@ export interface MemoryDatabaseState {
   ingestion_items: IngestionItem[];
   transaction_evidence: TransactionEvidence[];
   reconciliation_runs: ReconciliationRun[];
+  transaction_void_events: TransactionVoidEvent[];
 }
 
 function getInitialState(): MemoryDatabaseState {
@@ -135,6 +139,7 @@ function getInitialState(): MemoryDatabaseState {
     ingestion_items: [],
     transaction_evidence: [],
     reconciliation_runs: [],
+    transaction_void_events: [],
   };
 }
 
@@ -184,6 +189,43 @@ function assertUserId(userId: unknown): asserts userId is string {
   if (!userId || typeof userId !== "string" || userId.trim() === "") {
     throw new Error("Authentication required: valid user ID is mandatory");
   }
+}
+
+function enrichTransactions(
+  transactions: Transaction[],
+  preloadedRelations?: PreloadedRelations
+): TransactionWithRelations[] {
+  const accounts = preloadedRelations?.accounts ?? dbState.accounts;
+  const people = preloadedRelations?.people ?? dbState.people;
+  const merchants = preloadedRelations?.merchants ?? dbState.merchants;
+  const categories = preloadedRelations?.categories ?? dbState.categories;
+
+  return transactions.map((tx) => {
+    const fromAcc = tx.from_account_id
+      ? accounts.find((a) => a.id === tx.from_account_id) || null
+      : null;
+    const toAcc = tx.to_account_id
+      ? accounts.find((a) => a.id === tx.to_account_id) || null
+      : null;
+    const person = tx.person_id
+      ? people.find((p) => p.id === tx.person_id) || null
+      : null;
+    const merchant = tx.merchant_id
+      ? merchants.find((m) => m.id === tx.merchant_id) || null
+      : null;
+    const category = tx.category_id
+      ? categories.find((c) => c.id === tx.category_id) || null
+      : null;
+
+    return {
+      ...tx,
+      from_account: fromAcc,
+      to_account: toAcc,
+      person,
+      merchant,
+      category,
+    };
+  });
 }
 
 export const MemoryDataStore: IDataStore = {
@@ -435,45 +477,24 @@ export const MemoryDataStore: IDataStore = {
     return updated;
   },
 
-  // TRANSACTIONS
   async getTransactions(
     userId: string,
     preloadedRelations?: PreloadedRelations
   ): Promise<TransactionWithRelations[]> {
     assertUserId(userId);
+    const userTxs = dbState.transactions.filter(
+      (t) => t.user_id === userId && !t.voided_at
+    );
+    return enrichTransactions(userTxs, preloadedRelations);
+  },
+
+  async getTransactionsIncludingVoided(
+    userId: string,
+    preloadedRelations?: PreloadedRelations
+  ): Promise<TransactionWithRelations[]> {
+    assertUserId(userId);
     const userTxs = dbState.transactions.filter((t) => t.user_id === userId);
-
-    const accounts = preloadedRelations?.accounts ?? dbState.accounts;
-    const people = preloadedRelations?.people ?? dbState.people;
-    const merchants = preloadedRelations?.merchants ?? dbState.merchants;
-    const categories = preloadedRelations?.categories ?? dbState.categories;
-
-    return userTxs.map((tx) => {
-      const fromAcc = tx.from_account_id
-        ? accounts.find((a) => a.id === tx.from_account_id) || null
-        : null;
-      const toAcc = tx.to_account_id
-        ? accounts.find((a) => a.id === tx.to_account_id) || null
-        : null;
-      const person = tx.person_id
-        ? people.find((p) => p.id === tx.person_id) || null
-        : null;
-      const merchant = tx.merchant_id
-        ? merchants.find((m) => m.id === tx.merchant_id) || null
-        : null;
-      const category = tx.category_id
-        ? categories.find((c) => c.id === tx.category_id) || null
-        : null;
-
-      return {
-        ...tx,
-        from_account: fromAcc,
-        to_account: toAcc,
-        person,
-        merchant,
-        category,
-      };
-    });
+    return enrichTransactions(userTxs, preloadedRelations);
   },
 
   async getTransactionsPageData(userId: string): Promise<TransactionsPageData> {
@@ -499,13 +520,38 @@ export const MemoryDataStore: IDataStore = {
     };
   },
 
+  async getTransactionsPageDataIncludingVoided(userId: string): Promise<TransactionsPageData> {
+    assertUserId(userId);
+    const [accounts, categories, people, merchants] = await Promise.all([
+      this.getAccounts(userId),
+      this.getCategories(userId),
+      this.getPeople(userId),
+      this.getMerchants(userId),
+    ]);
+    const transactions = await this.getTransactionsIncludingVoided(userId, {
+      accounts,
+      categories,
+      people,
+      merchants,
+    });
+    return {
+      transactions,
+      accounts,
+      categories,
+      people,
+      merchants,
+    };
+  },
+
   async getTransactionById(
     userId: string,
     id: string,
     preloadedRelations?: PreloadedRelations
   ): Promise<TransactionWithRelations | null> {
-    const list = await this.getTransactions(userId, preloadedRelations);
-    return list.find((t) => t.id === id) || null;
+    assertUserId(userId);
+    const tx = dbState.transactions.find((t) => t.id === id && t.user_id === userId);
+    if (!tx) return null;
+    return enrichTransactions([tx], preloadedRelations)[0] || null;
   },
 
   async createTransaction(
@@ -513,6 +559,17 @@ export const MemoryDataStore: IDataStore = {
     data: TransactionInput | TransactionFormData
   ): Promise<Transaction> {
     assertUserId(userId);
+
+    const rawData = data as Record<string, unknown>;
+    if (
+      rawData.voided_at !== undefined ||
+      rawData.voided_by !== undefined ||
+      rawData.void_reason !== undefined
+    ) {
+      throw new Error(
+        "Direct insertion of transaction void state (voided_at, voided_by, void_reason) is prohibited. Transactions must be created active and voided via voidTransaction() RPC."
+      );
+    }
 
     // Idempotency: if transaction for this source_slip_id was already created, return it
     if (data.source_slip_id) {
@@ -598,6 +655,9 @@ export const MemoryDataStore: IDataStore = {
       tax_year: data.tax_year || null,
       confidence: data.confidence !== undefined ? data.confidence : 1.0,
       review_status: data.review_status || "confirmed",
+      voided_at: null,
+      voided_by: null,
+      void_reason: null,
       created_at: now,
       updated_at: now,
     };
@@ -616,6 +676,17 @@ export const MemoryDataStore: IDataStore = {
       (t) => t.id === id && t.user_id === userId
     );
     if (idx === -1) throw new Error("Transaction not found or access denied");
+
+    const rawData = data as Record<string, unknown>;
+    if (
+      rawData.voided_at !== undefined ||
+      rawData.voided_by !== undefined ||
+      rawData.void_reason !== undefined
+    ) {
+      throw new Error(
+        "Direct modification of transaction void state (voided_at, voided_by, void_reason) is prohibited. Use voidTransaction() or restoreTransaction() RPC."
+      );
+    }
 
     const current = dbState.transactions[idx];
 
@@ -736,7 +807,136 @@ export const MemoryDataStore: IDataStore = {
       );
     }
 
+    // Foreign key constraint: transaction_void_events(transaction_id) ON DELETE RESTRICT
+    const hasVoidEvents = dbState.transaction_void_events.some((e) => e.transaction_id === id);
+    if (hasVoidEvents) {
+      throw new Error(
+        `Cannot delete transaction ${id}: associated void audit history exists (foreign key constraint ON DELETE RESTRICT)`
+      );
+    }
+
     dbState.transactions.splice(idx, 1);
+  },
+
+  async voidTransaction(
+    userId: string,
+    transactionId: string,
+    reason: string
+  ): Promise<VoidTransactionResult> {
+    assertUserId(userId);
+    const trimmedReason = (reason || "").trim();
+    if (!trimmedReason) {
+      throw new Error("Void reason is required");
+    }
+    if (trimmedReason.length > 500) {
+      throw new Error("Void reason cannot exceed 500 characters");
+    }
+
+    const tx = dbState.transactions.find(
+      (t) => t.id === transactionId && t.user_id === userId
+    );
+    if (!tx) {
+      throw new Error(`Transaction ${transactionId} not found or does not belong to user ${userId}`);
+    }
+
+    // Concurrency / Idempotency check: if already voided
+    if (tx.voided_at) {
+      return {
+        success: true,
+        already_voided: true,
+        transaction_id: transactionId,
+        voided_at: tx.voided_at,
+        void_reason: tx.void_reason,
+      };
+    }
+
+    const nowIso = new Date().toISOString();
+    tx.voided_at = nowIso;
+    tx.voided_by = userId;
+    tx.void_reason = trimmedReason;
+    tx.updated_at = nowIso;
+
+    const eventId = crypto.randomUUID();
+    const event: TransactionVoidEvent = {
+      id: eventId,
+      user_id: userId,
+      transaction_id: transactionId,
+      action: "void",
+      reason: trimmedReason,
+      created_at: nowIso,
+    };
+    dbState.transaction_void_events.push(event);
+
+    return {
+      success: true,
+      already_voided: false,
+      transaction_id: transactionId,
+      voided_at: nowIso,
+      void_reason: trimmedReason,
+      event_id: eventId,
+    };
+  },
+
+  async restoreTransaction(
+    userId: string,
+    transactionId: string,
+    reason?: string
+  ): Promise<RestoreTransactionResult> {
+    assertUserId(userId);
+    const trimmedReason = (reason || "").trim();
+    if (trimmedReason.length > 500) {
+      throw new Error("Restore reason cannot exceed 500 characters");
+    }
+
+    const tx = dbState.transactions.find(
+      (t) => t.id === transactionId && t.user_id === userId
+    );
+    if (!tx) {
+      throw new Error(`Transaction ${transactionId} not found or does not belong to user ${userId}`);
+    }
+
+    // Concurrency / Idempotency check: if not voided (already active)
+    if (!tx.voided_at) {
+      return {
+        success: true,
+        already_active: true,
+        transaction_id: transactionId,
+      };
+    }
+
+    const nowIso = new Date().toISOString();
+    tx.voided_at = null;
+    tx.voided_by = null;
+    tx.void_reason = null;
+    tx.updated_at = nowIso;
+
+    const eventId = crypto.randomUUID();
+    const event: TransactionVoidEvent = {
+      id: eventId,
+      user_id: userId,
+      transaction_id: transactionId,
+      action: "restore",
+      reason: trimmedReason || null,
+      created_at: nowIso,
+    };
+    dbState.transaction_void_events.push(event);
+
+    return {
+      success: true,
+      already_active: false,
+      transaction_id: transactionId,
+      event_id: eventId,
+    };
+  },
+
+  async getTransactionVoidEvents(
+    userId: string,
+    transactionId: string
+  ): Promise<TransactionVoidEvent[]> {
+    assertUserId(userId);
+    return dbState.transaction_void_events
+      .filter((e) => e.user_id === userId && e.transaction_id === transactionId)
+      .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
   },
 
   // INGEST TOKENS
@@ -2044,6 +2244,9 @@ export const MemoryDataStore: IDataStore = {
         confidence: 1.0,
         review_status: "confirmed",
         tax_deductible: txData.tax_deductible ?? false,
+        voided_at: null,
+        voided_by: null,
+        void_reason: null,
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
       };

@@ -106,8 +106,36 @@ export interface Transaction {
   tax_year?: number | null;
   confidence: number;
   review_status: ReviewStatus;
+  voided_at?: string | null;
+  voided_by?: string | null;
+  void_reason?: string | null;
   created_at: string;
   updated_at: string;
+}
+
+export interface TransactionVoidEvent {
+  id: string;
+  user_id: string;
+  transaction_id: string;
+  action: "void" | "restore";
+  reason?: string | null;
+  created_at: string;
+}
+
+export interface VoidTransactionResult {
+  success: boolean;
+  already_voided?: boolean;
+  transaction_id: string;
+  voided_at?: string | null;
+  void_reason?: string | null;
+  event_id?: string;
+}
+
+export interface RestoreTransactionResult {
+  success: boolean;
+  already_active?: boolean;
+  transaction_id: string;
+  event_id?: string;
 }
 
 export interface TransactionWithRelations extends Transaction {

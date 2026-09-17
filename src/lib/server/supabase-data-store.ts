@@ -7,6 +7,9 @@ import {
   Person,
   Transaction,
   TransactionWithRelations,
+  TransactionVoidEvent,
+  VoidTransactionResult,
+  RestoreTransactionResult,
 } from "@/types/finance";
 import {
   AccountFormData,
@@ -193,6 +196,9 @@ function mapTransaction(row: Record<string, unknown>): Transaction {
     tax_year: row.tax_year !== null && row.tax_year !== undefined ? Number(row.tax_year) : null,
     confidence: row.confidence !== null && row.confidence !== undefined ? Number(row.confidence) : 1.0,
     review_status: (row.review_status as Transaction["review_status"]) || "confirmed",
+    voided_at: row.voided_at ? String(row.voided_at) : null,
+    voided_by: row.voided_by ? String(row.voided_by) : null,
+    void_reason: row.void_reason ? String(row.void_reason) : null,
     created_at: String(row.created_at),
     updated_at: String(row.updated_at),
   };
@@ -775,6 +781,7 @@ export class SupabaseDataStoreImpl implements IDataStore {
             .from("transactions")
             .select("*")
             .eq("user_id", userId)
+            .is("voided_at", null)
             .order("transaction_date", { ascending: false })
         ),
         accountsPromise,
@@ -785,6 +792,68 @@ export class SupabaseDataStoreImpl implements IDataStore {
 
       if (txsRes.error) {
         throw new Error(`Failed to fetch transactions: ${(txsRes.error as Error).message}`);
+      }
+
+      const txs = (txsRes.data || []).map(mapTransaction);
+
+      return txs.map((tx) => ({
+        ...tx,
+        from_account: tx.from_account_id
+          ? accounts.find((a) => a.id === tx.from_account_id) || null
+          : null,
+        to_account: tx.to_account_id
+          ? accounts.find((a) => a.id === tx.to_account_id) || null
+          : null,
+        category: tx.category_id
+          ? categories.find((c) => c.id === tx.category_id) || null
+          : null,
+        person: tx.person_id
+          ? people.find((p) => p.id === tx.person_id) || null
+          : null,
+        merchant: tx.merchant_id
+          ? merchants.find((m) => m.id === tx.merchant_id) || null
+          : null,
+      }));
+    }, (res) => res.length);
+  }
+
+  async getTransactionsIncludingVoided(
+    userId: string,
+    preloadedRelations?: PreloadedRelations
+  ): Promise<TransactionWithRelations[]> {
+    assertUserId(userId);
+    return measurePerf("data.transactionsIncludingVoided", async () => {
+      const client = await this.getClient(userId);
+
+      const accountsPromise = preloadedRelations?.accounts
+        ? Promise.resolve(preloadedRelations.accounts)
+        : this.getAccounts(userId);
+      const categoriesPromise = preloadedRelations?.categories
+        ? Promise.resolve(preloadedRelations.categories)
+        : this.getCategories(userId);
+      const peoplePromise = preloadedRelations?.people
+        ? Promise.resolve(preloadedRelations.people)
+        : this.getPeople(userId);
+      const merchantsPromise = preloadedRelations?.merchants
+        ? Promise.resolve(preloadedRelations.merchants)
+        : this.getMerchants(userId);
+
+      const [txsRes, accounts, categories, people, merchants] = await Promise.all([
+        this.executeRead(() =>
+          client
+            .from("transactions")
+            .select("*")
+            .eq("user_id", userId)
+            .order("transaction_date", { ascending: false })
+        ),
+        accountsPromise,
+        categoriesPromise,
+        peoplePromise,
+        merchantsPromise,
+      ]);
+
+      if (txsRes.error) {
+        throw new Error(`Failed to fetch transactions including voided: ${(txsRes.error as Error).message}`);
       }
 
       const txs = (txsRes.data || []).map(mapTransaction);
@@ -825,12 +894,66 @@ export class SupabaseDataStoreImpl implements IDataStore {
             .from("transactions")
             .select("*")
             .eq("user_id", userId)
+            .is("voided_at", null)
             .order("transaction_date", { ascending: false })
         ),
       ]);
 
       if (txsRes.error) {
         throw new Error(`Failed to fetch transactions page data: ${(txsRes.error as Error).message}`);
+      }
+
+      const txs = (txsRes.data || []).map(mapTransaction);
+      const transactions = txs.map((tx) => ({
+        ...tx,
+        from_account: tx.from_account_id
+          ? accounts.find((a) => a.id === tx.from_account_id) || null
+          : null,
+        to_account: tx.to_account_id
+          ? accounts.find((a) => a.id === tx.to_account_id) || null
+          : null,
+        category: tx.category_id
+          ? categories.find((c) => c.id === tx.category_id) || null
+          : null,
+        person: tx.person_id
+          ? people.find((p) => p.id === tx.person_id) || null
+          : null,
+        merchant: tx.merchant_id
+          ? merchants.find((m) => m.id === tx.merchant_id) || null
+          : null,
+      }));
+
+      return {
+        transactions,
+        accounts,
+        categories,
+        people,
+        merchants,
+      };
+    }, (res) => res.transactions.length);
+  }
+
+  async getTransactionsPageDataIncludingVoided(userId: string): Promise<TransactionsPageData> {
+    assertUserId(userId);
+    return measurePerf("data.getTransactionsPageDataIncludingVoided", async () => {
+      const client = await this.getClient(userId);
+
+      const [accounts, categories, people, merchants, txsRes] = await Promise.all([
+        this.getAccounts(userId),
+        this.getCategories(userId),
+        this.getPeople(userId),
+        this.getMerchants(userId),
+        this.executeRead(() =>
+          client
+            .from("transactions")
+            .select("*")
+            .eq("user_id", userId)
+            .order("transaction_date", { ascending: false })
+        ),
+      ]);
+
+      if (txsRes.error) {
+        throw new Error(`Failed to fetch transactions page data including voided: ${(txsRes.error as Error).message}`);
       }
 
       const txs = (txsRes.data || []).map(mapTransaction);
@@ -1133,8 +1256,97 @@ export class SupabaseDataStoreImpl implements IDataStore {
       .eq("user_id", userId);
 
     if (error) {
-      throw new Error("Transaction not found or access denied");
+      if (
+        error.code === "23503" ||
+        error.message?.toLowerCase().includes("foreign key") ||
+        error.message?.toLowerCase().includes("restrict")
+      ) {
+        throw new Error(
+          "Cannot delete transaction with linked audit evidence or history. Please void the transaction instead."
+        );
+      }
+      throw new Error(error.message || "Transaction not found or access denied");
     }
+  }
+
+  async voidTransaction(
+    userId: string,
+    transactionId: string,
+    reason: string
+  ): Promise<VoidTransactionResult> {
+    assertUserId(userId);
+    const trimmedReason = (reason || "").trim();
+    if (!trimmedReason) {
+      throw new Error("Void reason is required");
+    }
+    if (trimmedReason.length > 500) {
+      throw new Error("Void reason cannot exceed 500 characters");
+    }
+
+    const client = await this.getClient(userId);
+    const { data, error } = await client.rpc("void_transaction", {
+      p_user_id: userId,
+      p_transaction_id: transactionId,
+      p_reason: trimmedReason,
+    });
+
+    if (error) {
+      throw new Error(`Failed to void transaction: ${error.message}`);
+    }
+
+    return data as VoidTransactionResult;
+  }
+
+  async restoreTransaction(
+    userId: string,
+    transactionId: string,
+    reason?: string
+  ): Promise<RestoreTransactionResult> {
+    assertUserId(userId);
+    const trimmedReason = (reason || "").trim();
+    if (trimmedReason.length > 500) {
+      throw new Error("Restore reason cannot exceed 500 characters");
+    }
+
+    const client = await this.getClient(userId);
+    const { data, error } = await client.rpc("restore_transaction", {
+      p_user_id: userId,
+      p_transaction_id: transactionId,
+      p_reason: trimmedReason || null,
+    });
+
+    if (error) {
+      throw new Error(`Failed to restore transaction: ${error.message}`);
+    }
+
+    return data as RestoreTransactionResult;
+  }
+
+  async getTransactionVoidEvents(
+    userId: string,
+    transactionId: string
+  ): Promise<TransactionVoidEvent[]> {
+    assertUserId(userId);
+    const client = await this.getClient(userId);
+    const { data, error } = await client
+      .from("transaction_void_events")
+      .select("*")
+      .eq("user_id", userId)
+      .eq("transaction_id", transactionId)
+      .order("created_at", { ascending: false });
+
+    if (error) {
+      throw new Error(`Failed to fetch transaction void events: ${error.message}`);
+    }
+
+    return (data || []).map((row) => ({
+      id: String(row.id),
+      user_id: String(row.user_id),
+      transaction_id: String(row.transaction_id),
+      action: row.action as "void" | "restore",
+      reason: row.reason ? String(row.reason) : null,
+      created_at: String(row.created_at),
+    }));
   }
 
   // INGEST TOKENS

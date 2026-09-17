@@ -16,11 +16,12 @@ export default async function TransactionPage({
   const user = await requireUser();
   const { id } = await params;
 
-  const [accounts, categories, people, merchants] = await Promise.all([
+  const [accounts, categories, people, merchants, voidEvents] = await Promise.all([
     DataStore.getAccounts(user.id),
     DataStore.getCategories(user.id),
     DataStore.getPeople(user.id),
     DataStore.getMerchants(user.id),
+    DataStore.getTransactionVoidEvents(user.id, id),
   ]);
 
   const transaction = await DataStore.getTransactionById(user.id, id, {
@@ -34,6 +35,8 @@ export default async function TransactionPage({
     notFound();
   }
 
+  const hasVoidHistory = voidEvents.length > 0;
+
   return (
     <TransactionDetailClient
       transaction={transaction}
@@ -41,6 +44,7 @@ export default async function TransactionPage({
       categories={categories}
       people={people}
       merchants={merchants}
+      hasVoidHistory={hasVoidHistory}
     />
   );
 }

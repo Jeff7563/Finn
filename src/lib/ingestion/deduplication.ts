@@ -104,6 +104,9 @@ export function classifyIngestionMatch(context: ClassifyMatchContext): MatchResu
     accountMap = new Map(),
   } = context;
 
+  // Voided transactions MUST NOT be offered as active financial match candidates
+  const activeTransactions = existingTransactions.filter((tx) => !tx.voided_at);
+
   // ==========================================================================
   // Signal B: Exact Original File SHA-256 (where document semantics support exact duplication)
   // ==========================================================================
@@ -127,9 +130,10 @@ export function classifyIngestionMatch(context: ClassifyMatchContext): MatchResu
   }
 
   // ==========================================================================
-  // Signal A: Provider External ID (Scoped by: user_id + connection_id + external_id)
+  // Signal A: Scoped Provider External ID
+  // Scoped STRICTLY within user + connection
   // ==========================================================================
-  if (item.provider_external_id && item.connection_id) {
+  if (item.connection_id && item.provider_external_id) {
     const existingSameExternal = existingIngestionItems.find(
       (existing) =>
         existing.id !== item.id &&
@@ -172,7 +176,7 @@ export function classifyIngestionMatch(context: ClassifyMatchContext): MatchResu
     const itemDirection = item.parsed_data?.direction;
     const itemAccountLast4 = (item.parsed_data?.account_number ?? "").replace(/\D/g, "").slice(-4);
 
-    for (const tx of existingTransactions) {
+    for (const tx of activeTransactions) {
       if (tx.user_id !== item.user_id) continue;
 
       const txRef = (tx.reference_number ?? "").trim().toLowerCase();
@@ -294,7 +298,7 @@ export function classifyIngestionMatch(context: ClassifyMatchContext): MatchResu
 
   const itemFingerprint = item.fingerprint || generateCandidateFingerprint(item.parsed_data);
 
-  for (const tx of existingTransactions) {
+  for (const tx of activeTransactions) {
     if (tx.user_id !== item.user_id) continue;
 
     const txSatang = Math.round(Number(tx.amount || 0) * 100);

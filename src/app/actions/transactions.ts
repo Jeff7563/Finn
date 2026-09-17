@@ -124,6 +124,37 @@ export async function updateTransactionAction(
 export async function deleteTransactionAction(id: string): Promise<ActionResult> {
   try {
     const user = await requireUser();
+
+    // 1. Fetch transaction
+    const tx = await DataStore.getTransactionById(user.id, id);
+    if (!tx) {
+      return { success: false, error: "ไม่พบรายการที่ต้องการลบ" };
+    }
+
+    // 2. Check for evidence (poly-source evidence bridge or legacy slip/document)
+    const isEvidenceBacked =
+      tx.source !== "manual" ||
+      Boolean(tx.source_slip_id) ||
+      Boolean(tx.source_document_id);
+
+    let hasEvidence = isEvidenceBacked;
+    if (!hasEvidence) {
+      const evidenceList = await DataStore.getTransactionEvidence(user.id, id);
+      hasEvidence = evidenceList.length > 0;
+    }
+
+    // 3. Check for void/restore audit history
+    const voidEvents = await DataStore.getTransactionVoidEvents(user.id, id);
+    const hasVoidHistory = voidEvents.length > 0;
+
+    if (hasEvidence || hasVoidHistory) {
+      return {
+        success: false,
+        error:
+          "รายการนี้มีหลักฐานหรือประวัติการยกเลิก จึงไม่สามารถลบถาวรได้ กรุณาใช้ยกเลิกรายการ (Void) แทน",
+      };
+    }
+
     await DataStore.deleteTransaction(user.id, id);
 
     revalidatePath("/transactions");
@@ -137,6 +168,92 @@ export async function deleteTransactionAction(id: string): Promise<ActionResult>
   } catch (err: unknown) {
     const message =
       err instanceof Error ? err.message : "Failed to delete transaction";
+    return { success: false, error: message };
+  }
+}
+
+export async function voidTransactionAction(
+  id: string,
+  reason: string
+): Promise<ActionResult> {
+  try {
+    const user = await requireUser();
+    const trimmedReason = (reason || "").trim();
+    if (!trimmedReason) {
+      return {
+        success: false,
+        error: "กรุณาระบุเหตุผลในการยกเลิกรายการ (Void reason is required)",
+      };
+    }
+    if (trimmedReason.length > 500) {
+      return {
+        success: false,
+        error: "เหตุผลต้องมีความยาวไม่เกิน 500 ตัวอักษร",
+      };
+    }
+
+    await DataStore.voidTransaction(user.id, id, trimmedReason);
+
+    revalidatePath(`/transactions/${id}`);
+    revalidatePath("/transactions");
+    revalidatePath("/today");
+    revalidatePath("/overview");
+    revalidatePath("/accounts");
+    revalidatePath("/people");
+    revalidatePath("/merchants");
+    revalidatePath("/inbox");
+
+    return { success: true };
+  } catch (err: unknown) {
+    const message =
+      err instanceof Error ? err.message : "Failed to void transaction";
+    return { success: false, error: message };
+  }
+}
+
+export async function restoreTransactionAction(
+  id: string,
+  reason?: string
+): Promise<ActionResult> {
+  try {
+    const user = await requireUser();
+    const trimmedReason = reason?.trim();
+    if (trimmedReason && trimmedReason.length > 500) {
+      return {
+        success: false,
+        error: "เหตุผลต้องมีความยาวไม่เกิน 500 ตัวอักษร",
+      };
+    }
+
+    await DataStore.restoreTransaction(user.id, id, trimmedReason);
+
+    revalidatePath(`/transactions/${id}`);
+    revalidatePath("/transactions");
+    revalidatePath("/today");
+    revalidatePath("/overview");
+    revalidatePath("/accounts");
+    revalidatePath("/people");
+    revalidatePath("/merchants");
+    revalidatePath("/inbox");
+
+    return { success: true };
+  } catch (err: unknown) {
+    const message =
+      err instanceof Error ? err.message : "Failed to restore transaction";
+    return { success: false, error: message };
+  }
+}
+
+export async function getTransactionVoidEventsAction(
+  id: string
+): Promise<{ success: boolean; events?: import("@/types/finance").TransactionVoidEvent[]; error?: string }> {
+  try {
+    const user = await requireUser();
+    const events = await DataStore.getTransactionVoidEvents(user.id, id);
+    return { success: true, events };
+  } catch (err: unknown) {
+    const message =
+      err instanceof Error ? err.message : "Failed to fetch void events";
     return { success: false, error: message };
   }
 }

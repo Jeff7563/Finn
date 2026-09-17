@@ -3,6 +3,7 @@ import {
   TransactionWithRelations,
 } from "@/types/finance";
 import { roundToTwoDecimals } from "./formatters";
+import { isFinanciallyActiveTransaction } from "./balances";
 
 export type HeatmapIntensity = 0 | 1 | 2 | 3 | 4;
 
@@ -149,6 +150,7 @@ export function getDailyFinancialSummaries(
 
   // Filter transactions for this month and group by local Bangkok date
   for (const tx of transactions) {
+    if (!isFinanciallyActiveTransaction(tx)) continue;
     const localDate = getLocalDateString(tx.transaction_date);
     if (!localDate) continue;
 
