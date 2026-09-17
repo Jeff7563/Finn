@@ -4,6 +4,7 @@ import React, { useEffect } from "react";
 import Link from "next/link";
 import { MonthCalendarDay } from "@/lib/finance/calendar";
 import { formatDateThai, formatMoney, formatSignedMoney } from "@/lib/finance/formatters";
+import { getCategoryDisplayName } from "@/lib/finance/category-labels";
 import { X, ArrowRight, Plus, Calendar, Tag, ArrowLeftRight } from "lucide-react";
 
 interface DaySummarySheetProps {
@@ -169,7 +170,7 @@ export function DaySummarySheet({ day, onClose }: DaySummarySheetProps) {
                             {title}
                           </span>
                           <span className="text-[10px] text-text-muted">
-                            {tx.category?.name || (tx.type === "transfer" ? "โอนเงิน" : "ทั่วไป")}
+                            {getCategoryDisplayName(tx.category) || (tx.type === "transfer" ? "โอนเงิน" : "ทั่วไป")}
                           </span>
                         </div>
                         <div className="tabular-nums font-semibold flex-shrink-0">

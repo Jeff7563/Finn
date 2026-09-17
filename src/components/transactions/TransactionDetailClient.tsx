@@ -21,6 +21,7 @@ import {
   formatDateTimeThai,
   canonicalInstantToBangkokDateTimeLocal,
 } from "@/lib/finance/formatters";
+import { getCategoryDisplayName } from "@/lib/finance/category-labels";
 import {
   Trash2,
   Edit2,
@@ -324,7 +325,7 @@ export function TransactionDetailClient({
                   หมวดหมู่
                 </span>
                 <span className="font-medium text-text-primary">
-                  {transaction.category?.name || "ไม่มีหมวดหมู่"}
+                  {getCategoryDisplayName(transaction.category) || "ไม่มีหมวดหมู่"}
                 </span>
               </div>
             )}
@@ -519,7 +520,7 @@ export function TransactionDetailClient({
                   <option value="">ไม่มีหมวดหมู่</option>
                   {categories.map((c) => (
                     <option key={c.id} value={c.id}>
-                      {c.name} ({c.type === "expense" ? "รายจ่าย" : "รายรับ"})
+                      {getCategoryDisplayName(c)} ({c.type === "expense" ? "รายจ่าย" : "รายรับ"})
                     </option>
                   ))}
                 </select>
@@ -652,7 +653,7 @@ export function TransactionDetailClient({
           transaction.description ||
           transaction.merchant?.display_name ||
           transaction.person?.display_name ||
-          transaction.category?.name
+          getCategoryDisplayName(transaction.category)
         }
         amount={transaction.amount}
         currency={transaction.currency}
@@ -671,7 +672,7 @@ export function TransactionDetailClient({
           transaction.description ||
           transaction.merchant?.display_name ||
           transaction.person?.display_name ||
-          transaction.category?.name
+          getCategoryDisplayName(transaction.category)
         }
         amount={transaction.amount}
         currency={transaction.currency}

@@ -3,6 +3,7 @@ import Link from "next/link";
 import { TransactionWithRelations } from "@/types/finance";
 import { MoneyAmount } from "./MoneyAmount";
 import { formatDateTimeThai } from "@/lib/finance/formatters";
+import { getCategoryDisplayName } from "@/lib/finance/category-labels";
 import {
   ArrowDownLeft,
   ArrowUpRight,
@@ -31,7 +32,7 @@ export function TransactionItem({ transaction, onRestore }: TransactionItemProps
   } else if (transaction.person?.display_name) {
     title = transaction.person.display_name;
   } else if (transaction.category?.name) {
-    title = transaction.category.name;
+    title = getCategoryDisplayName(transaction.category);
   }
 
   // Account label
@@ -149,7 +150,7 @@ export function TransactionItem({ transaction, onRestore }: TransactionItemProps
               <>
                 {transaction.category && (
                   <span className="text-text-secondary font-medium">
-                    {transaction.category.name}
+                    {getCategoryDisplayName(transaction.category)}
                   </span>
                 )}
                 {accountName && (

@@ -117,7 +117,7 @@ export function CsvImportModal({
       const res = await importStatementCsvAction(formData);
       setResultData(res);
 
-      if (res.status === "success") {
+      if (res.status === "success" && (res.totalItems ?? 0) > 0) {
         setModalState("success");
       } else if (res.status === "duplicate") {
         setModalState("duplicate");
@@ -125,7 +125,7 @@ export function CsvImportModal({
         setErrorMessage(res.error || "ข้อมูลไม่ถูกต้อง");
         setModalState("validation_error");
       } else {
-        setErrorMessage(res.error || "เกิดข้อผิดพลาดในการนำเข้าไฟล์");
+        setErrorMessage(res.error || "ไม่สามารถนำเข้าไฟล์ได้ หรือไม่พบรายการธุรกรรมในไฟล์");
         setModalState("import_failure");
       }
     } catch (err: unknown) {
@@ -295,19 +295,25 @@ export function CsvImportModal({
                 <h3 className="font-bold text-base text-text-primary">
                   {modalState === "validation_error"
                     ? "ข้อมูลไม่ถูกต้อง (Validation Error)"
-                    : "การนำเข้าล้มเหลว (Import Failed)"}
+                    : "นำเข้าไม่สำเร็จ (Import Failed)"}
                 </h3>
                 <p className="text-xs text-red-600 max-w-sm mx-auto">
                   {errorMessage || "เกิดข้อผิดพลาดในการตรวจสอบไฟล์หรือการนำเข้า"}
                 </p>
               </div>
 
-              <div className="pt-2 flex justify-center">
+              <div className="pt-2 flex justify-center gap-2">
                 <button
-                  onClick={() => setModalState("idle")}
-                  className="px-5 py-2 rounded-xl bg-primary text-primary-foreground text-xs font-semibold transition-colors"
+                  onClick={handleReset}
+                  className="px-4 py-2 rounded-xl bg-surface-soft hover:bg-surface-soft/80 text-text-primary text-xs font-semibold transition-colors"
                 >
-                  กลับไปแก้ไขข้อมูล
+                  เลือกไฟล์ใหม่
+                </button>
+                <button
+                  onClick={handleClose}
+                  className="px-4 py-2 rounded-xl bg-slate-900 dark:bg-white text-white dark:text-slate-900 text-xs font-semibold transition-colors"
+                >
+                  ปิด
                 </button>
               </div>
             </div>

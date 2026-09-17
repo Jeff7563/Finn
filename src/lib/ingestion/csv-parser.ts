@@ -106,7 +106,7 @@ export function parseBankStatementCsv(
         original_filename: filename,
         file_hash: fileHash,
         file_size: fileSize,
-        status: "processed",
+        status: "failed",
         provider_metadata: { bankHint, rowCount: 0 },
       },
       items: [],

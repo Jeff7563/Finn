@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import { Account, Category, Merchant, Person, TransactionType } from "@/types/finance";
 import { createTransactionAction } from "@/app/actions/transactions";
 import { canonicalInstantToBangkokDateTimeLocal } from "@/lib/finance/formatters";
+import { getCategoryDisplayName } from "@/lib/finance/category-labels";
 import {
   ArrowDownLeft,
   ArrowUpRight,
@@ -309,7 +310,7 @@ export function TransactionForm({
                 {(type === "expense" ? expenseCategories : incomeCategories).map(
                   (c) => (
                     <option key={c.id} value={c.id}>
-                      {c.name}
+                      {getCategoryDisplayName(c)}
                     </option>
                   )
                 )}

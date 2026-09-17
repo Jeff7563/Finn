@@ -3,6 +3,7 @@
 import React, { useState, useActionState } from "react";
 import { Category } from "@/types/finance";
 import { createCategoryAction } from "@/app/actions/categories";
+import { getCategoryLabelPair } from "@/lib/finance/category-labels";
 import { Plus, Tag, X, Check } from "lucide-react";
 
 interface CategoriesClientProps {
@@ -67,33 +68,43 @@ export function CategoriesClient({
 
       {/* Grid of Categories (Restrained, Modern) */}
       <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
-        {categories.map((cat) => (
-          <div
-            key={cat.id}
-            className="p-3.5 bg-surface dark:bg-surface-raised rounded-xl border border-border shadow-sm flex items-center justify-between hover:border-border-strong transition-colors"
-          >
-            <div className="flex items-center gap-2.5 min-w-0">
-              <div
-                className={`w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0 ${
-                  cat.type === "expense"
-                    ? "bg-surface-soft border border-border text-text-secondary"
-                    : "bg-income-soft text-income"
-                }`}
-              >
-                <Tag className="w-3.5 h-3.5" />
+        {categories.map((cat) => {
+          const { primary, secondary } = getCategoryLabelPair(cat);
+          return (
+            <div
+              key={cat.id}
+              className="p-3.5 bg-surface dark:bg-surface-raised rounded-xl border border-border shadow-sm flex items-center justify-between hover:border-border-strong transition-colors"
+            >
+              <div className="flex items-center gap-2.5 min-w-0">
+                <div
+                  className={`w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0 ${
+                    cat.type === "expense"
+                      ? "bg-surface-soft border border-border text-text-secondary"
+                      : "bg-income-soft text-income"
+                  }`}
+                >
+                  <Tag className="w-3.5 h-3.5" />
+                </div>
+                <div className="min-w-0 flex flex-col">
+                  <span className="font-semibold text-xs sm:text-sm text-text-primary truncate">
+                    {primary}
+                  </span>
+                  {secondary && (
+                    <span className="text-[11px] text-text-muted truncate">
+                      {secondary}
+                    </span>
+                  )}
+                </div>
               </div>
-              <span className="font-semibold text-xs sm:text-sm text-text-primary truncate">
-                {cat.name}
-              </span>
-            </div>
 
-            {!cat.is_system && (
-              <span className="text-[10px] font-medium text-text-muted bg-surface-soft border border-border px-1.5 py-0.5 rounded">
-                กำหนดเอง
-              </span>
-            )}
-          </div>
-        ))}
+              {!cat.is_system && (
+                <span className="text-[10px] font-medium text-text-muted bg-surface-soft border border-border px-1.5 py-0.5 rounded flex-shrink-0">
+                  กำหนดเอง
+                </span>
+              )}
+            </div>
+          );
+        })}
       </div>
 
       {/* Add Custom Category Modal */}
