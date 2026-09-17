@@ -75,7 +75,41 @@ CREATE TRIGGER trg_validate_transaction_void_event_ownership
     EXECUTE FUNCTION public.validate_transaction_void_event_ownership();
 
 -- ============================================================================
--- 5. Atomic Void RPC: void_transaction
+-- 5. Guard against direct void-state mutations on public.transactions
+-- ============================================================================
+-- Rejects any change to voided_at, voided_by, or void_reason unless executing
+-- through the trusted void_transaction() or restore_transaction() RPC path.
+-- Ordinary updates (description, amount, category, date, etc.) remain permitted.
+CREATE OR REPLACE FUNCTION public.guard_transaction_void_state_mutation()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF TG_OP = 'UPDATE' THEN
+        IF (OLD.voided_at IS DISTINCT FROM NEW.voided_at)
+           OR (OLD.voided_by IS DISTINCT FROM NEW.voided_by)
+           OR (OLD.void_reason IS DISTINCT FROM NEW.void_reason) THEN
+            IF COALESCE(current_setting('app.allow_void_mutation', true), 'false') <> 'true' THEN
+                RAISE EXCEPTION 'Direct modification of transaction void state (voided_at, voided_by, void_reason) is prohibited. Use void_transaction() or restore_transaction() RPC.';
+            END IF;
+        END IF;
+    ELSIF TG_OP = 'INSERT' THEN
+        IF NEW.voided_at IS NOT NULL OR NEW.voided_by IS NOT NULL OR NEW.void_reason IS NOT NULL THEN
+            IF COALESCE(current_setting('app.allow_void_mutation', true), 'false') <> 'true' THEN
+                RAISE EXCEPTION 'Direct insertion of transaction void state (voided_at, voided_by, void_reason) is prohibited. Transactions must be created active and voided via void_transaction() RPC.';
+            END IF;
+        END IF;
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public;
+
+DROP TRIGGER IF EXISTS trg_guard_transaction_void_state_mutation ON public.transactions;
+CREATE TRIGGER trg_guard_transaction_void_state_mutation
+    BEFORE INSERT OR UPDATE ON public.transactions
+    FOR EACH ROW
+    EXECUTE FUNCTION public.guard_transaction_void_state_mutation();
+
+-- ============================================================================
+-- 6. Atomic Void RPC: void_transaction
 -- ============================================================================
 CREATE OR REPLACE FUNCTION public.void_transaction(
     p_user_id UUID,
@@ -154,7 +188,9 @@ BEGIN
         );
     END IF;
 
-    -- 5. Mark Transaction as Voided
+    -- 5. Mark Transaction as Voided (with trusted RPC context)
+    PERFORM set_config('app.allow_void_mutation', 'true', true);
+
     UPDATE public.transactions
     SET
         voided_at = now(),
@@ -163,6 +199,8 @@ BEGIN
         updated_at = now()
     WHERE id = p_transaction_id
     RETURNING * INTO v_tx;
+
+    PERFORM set_config('app.allow_void_mutation', 'false', true);
 
     -- 6. Insert Append-Only Audit Event
     INSERT INTO public.transaction_void_events (
@@ -196,7 +234,7 @@ GRANT EXECUTE ON FUNCTION public.void_transaction(UUID, UUID, TEXT) TO authentic
 GRANT EXECUTE ON FUNCTION public.void_transaction(UUID, UUID, TEXT) TO service_role;
 
 -- ============================================================================
--- 6. Atomic Restore RPC: restore_transaction
+-- 7. Atomic Restore RPC: restore_transaction
 -- ============================================================================
 CREATE OR REPLACE FUNCTION public.restore_transaction(
     p_user_id UUID,
@@ -270,7 +308,9 @@ BEGIN
         );
     END IF;
 
-    -- 5. Restore Transaction (Clear void state)
+    -- 5. Restore Transaction (Clear void state with trusted RPC context)
+    PERFORM set_config('app.allow_void_mutation', 'true', true);
+
     UPDATE public.transactions
     SET
         voided_at = NULL,
@@ -279,6 +319,8 @@ BEGIN
         updated_at = now()
     WHERE id = p_transaction_id
     RETURNING * INTO v_tx;
+
+    PERFORM set_config('app.allow_void_mutation', 'false', true);
 
     -- 6. Insert Append-Only Audit Event
     INSERT INTO public.transaction_void_events (
@@ -308,3 +350,92 @@ REVOKE ALL ON FUNCTION public.restore_transaction(UUID, UUID, TEXT) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.restore_transaction(UUID, UUID, TEXT) FROM anon;
 GRANT EXECUTE ON FUNCTION public.restore_transaction(UUID, UUID, TEXT) TO authenticated;
 GRANT EXECUTE ON FUNCTION public.restore_transaction(UUID, UUID, TEXT) TO service_role;
+
+-- ============================================================================
+-- 8. Operator Verification SQL Queries (Audit Invariant Validation)
+-- ============================================================================
+-- The following queries allow operators to verify that all database-level
+-- security invariants, triggers, RPC permissions, and constraints are active.
+-- Operators can execute these queries to get explicit boolean PASS/FAIL confirmations.
+--
+-- Query 1: Verify guard trigger exists on public.transactions
+-- SELECT 
+--     CASE WHEN COUNT(*) > 0 THEN 'PASS' ELSE 'FAIL' END AS status,
+--     'guard trigger trg_guard_transaction_void_state_mutation exists on public.transactions' AS check_name
+-- FROM information_schema.triggers
+-- WHERE event_object_schema = 'public'
+--   AND event_object_table = 'transactions'
+--   AND trigger_name = 'trg_guard_transaction_void_state_mutation'
+--   AND event_manipulation = 'UPDATE'
+--   AND action_timing = 'BEFORE';
+--
+-- Query 2: Verify void_transaction and restore_transaction RPCs exist with SECURITY DEFINER
+-- SELECT 
+--     CASE WHEN COUNT(*) = 2 THEN 'PASS' ELSE 'FAIL' END AS status,
+--     'void_transaction and restore_transaction RPCs exist with SECURITY DEFINER' AS check_name
+-- FROM pg_proc p
+-- JOIN pg_namespace n ON p.pronamespace = n.oid
+-- WHERE n.nspname = 'public'
+--   AND p.proname IN ('void_transaction', 'restore_transaction')
+--   AND p.prosecdef = true;
+--
+-- Query 3: Verify ROW LEVEL SECURITY is enabled on public.transaction_void_events
+-- SELECT 
+--     CASE WHEN relrowsecurity = true THEN 'PASS' ELSE 'FAIL' END AS status,
+--     'Row Level Security enabled on public.transaction_void_events' AS check_name
+-- FROM pg_class c
+-- JOIN pg_namespace n ON c.relnamespace = n.oid
+-- WHERE n.nspname = 'public'
+--   AND c.relname = 'transaction_void_events';
+--
+-- Query 4: Verify direct audit event mutations (INSERT, UPDATE, DELETE) are denied
+-- SELECT 
+--     CASE WHEN COUNT(*) = 0 THEN 'PASS' ELSE 'FAIL' END AS status,
+--     'Direct INSERT, UPDATE, DELETE revoked from authenticated and anon on transaction_void_events' AS check_name
+-- FROM information_schema.role_table_grants
+-- WHERE table_schema = 'public'
+--   AND table_name = 'transaction_void_events'
+--   AND grantee IN ('authenticated', 'anon', 'PUBLIC')
+--   AND privilege_type IN ('INSERT', 'UPDATE', 'DELETE');
+--
+-- Query 5: Verify transaction_void_events foreign key enforces ON DELETE RESTRICT
+-- SELECT 
+--     CASE WHEN confdeltype = 'r' THEN 'PASS' ELSE 'FAIL' END AS status,
+--     'transaction_void_events.transaction_id foreign key enforces ON DELETE RESTRICT' AS check_name
+-- FROM pg_constraint con
+-- JOIN pg_class c ON con.conrelid = c.oid
+-- JOIN pg_namespace n ON c.relnamespace = n.oid
+-- WHERE n.nspname = 'public'
+--   AND c.relname = 'transaction_void_events'
+--   AND con.contype = 'f'
+--   AND con.confdeltype = 'r'
+--   AND con.confrelid = 'public.transactions'::regclass;
+--
+-- Consolidated Operator Audit Verification Query:
+-- WITH audit_checks AS (
+--     SELECT '1. Guard Trigger on transactions' AS item,
+--            EXISTS (SELECT 1 FROM information_schema.triggers WHERE event_object_schema = 'public' AND event_object_table = 'transactions' AND trigger_name = 'trg_guard_transaction_void_state_mutation' AND event_manipulation = 'UPDATE' AND action_timing = 'BEFORE') AS passed,
+--            'BEFORE UPDATE trigger prevents direct modification of voided_at, voided_by, void_reason' AS details
+--     UNION ALL
+--     SELECT '2. void_transaction RPC exists & secure',
+--            EXISTS (SELECT 1 FROM pg_proc p JOIN pg_namespace n ON p.pronamespace = n.oid WHERE n.nspname = 'public' AND p.proname = 'void_transaction' AND p.prosecdef = true),
+--            'void_transaction exists as SECURITY DEFINER with restricted search_path'
+--     UNION ALL
+--     SELECT '3. restore_transaction RPC exists & secure',
+--            EXISTS (SELECT 1 FROM pg_proc p JOIN pg_namespace n ON p.pronamespace = n.oid WHERE n.nspname = 'public' AND p.proname = 'restore_transaction' AND p.prosecdef = true),
+--            'restore_transaction exists as SECURITY DEFINER with restricted search_path'
+--     UNION ALL
+--     SELECT '4. Audit table RLS enabled',
+--            EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON c.relnamespace = n.oid WHERE n.nspname = 'public' AND c.relname = 'transaction_void_events' AND c.relrowsecurity = true),
+--            'ROW LEVEL SECURITY is active on transaction_void_events'
+--     UNION ALL
+--     SELECT '5. Direct audit event mutations denied',
+--            NOT EXISTS (SELECT 1 FROM information_schema.role_table_grants WHERE table_schema = 'public' AND table_name = 'transaction_void_events' AND grantee IN ('authenticated', 'anon', 'PUBLIC') AND privilege_type IN ('INSERT', 'UPDATE', 'DELETE')),
+--            'No direct INSERT, UPDATE, DELETE permissions for authenticated or anon'
+--     UNION ALL
+--     SELECT '6. Audit FK ON DELETE RESTRICT',
+--            EXISTS (SELECT 1 FROM pg_constraint con JOIN pg_class c ON con.conrelid = c.oid JOIN pg_namespace n ON c.relnamespace = n.oid WHERE n.nspname = 'public' AND c.relname = 'transaction_void_events' AND con.contype = 'f' AND con.confdeltype = 'r'),
+--            'transaction_void_events.transaction_id enforces ON DELETE RESTRICT'
+-- )
+-- SELECT item, CASE WHEN passed THEN 'PASS' ELSE 'FAIL' END AS status, details FROM audit_checks;
+

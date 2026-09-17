@@ -49,6 +49,7 @@ interface TransactionDetailClientProps {
   categories: Category[];
   people: Person[];
   merchants: Merchant[];
+  hasVoidHistory?: boolean;
 }
 
 export function TransactionDetailClient({
@@ -57,6 +58,7 @@ export function TransactionDetailClient({
   categories,
   people,
   merchants,
+  hasVoidHistory = false,
 }: TransactionDetailClientProps) {
   const router = useRouter();
   const [isEditing, setIsEditing] = useState(false);
@@ -71,6 +73,7 @@ export function TransactionDetailClient({
     transaction.source !== "manual" ||
     Boolean(transaction.source_slip_id) ||
     Boolean(transaction.source_document_id);
+  const canDelete = !isVoided && !isEvidenceBacked && !hasVoidHistory;
 
   const handleViewSlip = async () => {
     if (!transaction.source_slip_id) return;
@@ -233,7 +236,7 @@ export function TransactionDetailClient({
                   <Ban className="w-4 h-4" />
                   <span>ยกเลิก</span>
                 </button>
-                {!isEvidenceBacked && (
+                {canDelete && (
                   <button
                     type="button"
                     onClick={handleDelete}

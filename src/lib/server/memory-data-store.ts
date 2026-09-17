@@ -560,6 +560,17 @@ export const MemoryDataStore: IDataStore = {
   ): Promise<Transaction> {
     assertUserId(userId);
 
+    const rawData = data as Record<string, unknown>;
+    if (
+      rawData.voided_at !== undefined ||
+      rawData.voided_by !== undefined ||
+      rawData.void_reason !== undefined
+    ) {
+      throw new Error(
+        "Direct insertion of transaction void state (voided_at, voided_by, void_reason) is prohibited. Transactions must be created active and voided via voidTransaction() RPC."
+      );
+    }
+
     // Idempotency: if transaction for this source_slip_id was already created, return it
     if (data.source_slip_id) {
       const existing = dbState.transactions.find(
@@ -665,6 +676,17 @@ export const MemoryDataStore: IDataStore = {
       (t) => t.id === id && t.user_id === userId
     );
     if (idx === -1) throw new Error("Transaction not found or access denied");
+
+    const rawData = data as Record<string, unknown>;
+    if (
+      rawData.voided_at !== undefined ||
+      rawData.voided_by !== undefined ||
+      rawData.void_reason !== undefined
+    ) {
+      throw new Error(
+        "Direct modification of transaction void state (voided_at, voided_by, void_reason) is prohibited. Use voidTransaction() or restoreTransaction() RPC."
+      );
+    }
 
     const current = dbState.transactions[idx];
 

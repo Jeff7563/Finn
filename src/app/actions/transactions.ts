@@ -124,6 +124,37 @@ export async function updateTransactionAction(
 export async function deleteTransactionAction(id: string): Promise<ActionResult> {
   try {
     const user = await requireUser();
+
+    // 1. Fetch transaction
+    const tx = await DataStore.getTransactionById(user.id, id);
+    if (!tx) {
+      return { success: false, error: "ไม่พบรายการที่ต้องการลบ" };
+    }
+
+    // 2. Check for evidence (poly-source evidence bridge or legacy slip/document)
+    const isEvidenceBacked =
+      tx.source !== "manual" ||
+      Boolean(tx.source_slip_id) ||
+      Boolean(tx.source_document_id);
+
+    let hasEvidence = isEvidenceBacked;
+    if (!hasEvidence) {
+      const evidenceList = await DataStore.getTransactionEvidence(user.id, id);
+      hasEvidence = evidenceList.length > 0;
+    }
+
+    // 3. Check for void/restore audit history
+    const voidEvents = await DataStore.getTransactionVoidEvents(user.id, id);
+    const hasVoidHistory = voidEvents.length > 0;
+
+    if (hasEvidence || hasVoidHistory) {
+      return {
+        success: false,
+        error:
+          "รายการนี้มีหลักฐานหรือประวัติการยกเลิก จึงไม่สามารถลบถาวรได้ กรุณาใช้ยกเลิกรายการ (Void) แทน",
+      };
+    }
+
     await DataStore.deleteTransaction(user.id, id);
 
     revalidatePath("/transactions");
