@@ -29,8 +29,10 @@ import {
   TransactionEvidence,
   ReconciliationRun,
 } from "@/types/multi-source";
+import { StorageRetentionSettings, StorageBinaryEvent } from "@/types/storage";
 import {
   IDataStore,
+  StorageMutationOptions,
   PreloadedRelations,
   TransactionsPageData,
   ConfirmSlipTransactionInput,
@@ -300,16 +302,25 @@ export const DataStore: IDataStore = {
     return getActiveStore().getPendingReviewSlips(userId);
   },
 
-  async createSlip(userId: string, data: Partial<Slip>): Promise<Slip> {
-    return getActiveStore().createSlip(userId, data);
+  async createSlip(userId: string, data: Partial<Slip>, options?: StorageMutationOptions): Promise<Slip> {
+    return getActiveStore().createSlip(userId, data, options);
   },
 
   async updateSlip(
     userId: string,
     id: string,
-    data: Partial<Slip>
+    data: Partial<Slip>,
+    options?: StorageMutationOptions
   ): Promise<Slip> {
-    return getActiveStore().updateSlip(userId, id, data);
+    return getActiveStore().updateSlip(userId, id, data, options);
+  },
+
+  async deleteSlip(
+    userId: string,
+    id: string,
+    options?: StorageMutationOptions
+  ): Promise<void> {
+    return getActiveStore().deleteSlip(userId, id, options);
   },
 
   // SLIP JOBS
@@ -359,16 +370,50 @@ export const DataStore: IDataStore = {
     return getActiveStore().getSlipFile(storagePath);
   },
 
-  async createSignedSlipUrl(
-    userId: string,
-    slipId: string,
-    expiresInSeconds = 900
-  ): Promise<string> {
-    return getActiveStore().createSignedSlipUrl(userId, slipId, expiresInSeconds);
+  async deleteSlipFile(storagePath: string): Promise<void> {
+    return getActiveStore().deleteSlipFile(storagePath);
   },
 
-  verifySlipPreviewSignature(slipId: string, exp: number, sig: string): boolean {
-    return getActiveStore().verifySlipPreviewSignature(slipId, exp, sig);
+  async slipFileExists(storagePath: string): Promise<boolean> {
+    return getActiveStore().slipFileExists(storagePath);
+  },
+
+  // STORAGE RETENTION & PINNED EVIDENCE
+  async getStorageRetentionSettings(userId: string): Promise<StorageRetentionSettings> {
+    return getActiveStore().getStorageRetentionSettings(userId);
+  },
+
+  async updateStorageRetentionSettings(
+    userId: string,
+    data: Partial<StorageRetentionSettings>
+  ): Promise<StorageRetentionSettings> {
+    return getActiveStore().updateStorageRetentionSettings(userId, data);
+  },
+
+  async createStorageBinaryEvent(
+    userId: string,
+    data: Omit<StorageBinaryEvent, "id" | "created_at">
+  ): Promise<StorageBinaryEvent> {
+    return getActiveStore().createStorageBinaryEvent(userId, data);
+  },
+
+  async getStorageBinaryEvents(
+    userId: string,
+    filter?: { slipId?: string; sourceDocumentId?: string; limit?: number }
+  ): Promise<StorageBinaryEvent[]> {
+    return getActiveStore().getStorageBinaryEvents(userId, filter);
+  },
+
+  async setSlipPinned(userId: string, slipId: string, isPinned: boolean): Promise<Slip> {
+    return getActiveStore().setSlipPinned(userId, slipId, isPinned);
+  },
+
+  async setSourceDocumentPinned(
+    userId: string,
+    docId: string,
+    isPinned: boolean
+  ): Promise<SourceDocument> {
+    return getActiveStore().setSourceDocumentPinned(userId, docId, isPinned);
   },
 
   // ACCOUNT MATCH ALIASES
@@ -447,17 +492,19 @@ export const DataStore: IDataStore = {
 
   async createSourceDocument(
     userId: string,
-    data: Partial<SourceDocument>
+    data: Partial<SourceDocument>,
+    options?: StorageMutationOptions
   ): Promise<SourceDocument> {
-    return getActiveStore().createSourceDocument(userId, data);
+    return getActiveStore().createSourceDocument(userId, data, options);
   },
 
   async updateSourceDocument(
     userId: string,
     id: string,
-    data: Partial<SourceDocument>
+    data: Partial<SourceDocument>,
+    options?: StorageMutationOptions
   ): Promise<SourceDocument> {
-    return getActiveStore().updateSourceDocument(userId, id, data);
+    return getActiveStore().updateSourceDocument(userId, id, data, options);
   },
 
   // Import Batches

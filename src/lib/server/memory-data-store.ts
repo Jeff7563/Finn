@@ -36,6 +36,7 @@ import {
   TransactionEvidence,
   ReconciliationRun,
 } from "@/types/multi-source";
+import { StorageRetentionSettings, StorageBinaryEvent } from "@/types/storage";
 import { normalizeBankName } from "../slip/bank-normalization";
 import {
   countVisibleDigits,
@@ -47,7 +48,9 @@ import {
   TransactionsPageData,
   ConfirmSlipTransactionInput,
   ConfirmSlipTransactionResult,
+  StorageMutationOptions,
 } from "./data-store-interface";
+import { evaluateStorageMutationGuard } from "./storage-guards";
 import {
   generateIngestToken,
   hashToken,
@@ -112,6 +115,8 @@ export interface MemoryDatabaseState {
   transaction_evidence: TransactionEvidence[];
   reconciliation_runs: ReconciliationRun[];
   transaction_void_events: TransactionVoidEvent[];
+  storage_retention_settings: StorageRetentionSettings[];
+  storage_binary_events: StorageBinaryEvent[];
 }
 
 function getInitialState(): MemoryDatabaseState {
@@ -140,6 +145,8 @@ function getInitialState(): MemoryDatabaseState {
     transaction_evidence: [],
     reconciliation_runs: [],
     transaction_void_events: [],
+    storage_retention_settings: [],
+    storage_binary_events: [],
   };
 }
 
@@ -936,7 +943,7 @@ export const MemoryDataStore: IDataStore = {
     assertUserId(userId);
     return dbState.transaction_void_events
       .filter((e) => e.user_id === userId && e.transaction_id === transactionId)
-      .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+      .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
   },
 
   // INGEST TOKENS
@@ -1047,8 +1054,28 @@ export const MemoryDataStore: IDataStore = {
       .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
   },
 
-  async createSlip(userId: string, data: Partial<Slip>): Promise<Slip> {
+  async createSlip(
+    userId: string,
+    data: Partial<Slip>,
+    options?: StorageMutationOptions
+  ): Promise<Slip> {
     assertUserId(userId);
+
+    if (options?.asClientRole === "authenticated" || options?.asClientRole === "anon") {
+      if (
+        data.storage_path !== undefined ||
+        data.file_hash_sha256 !== undefined ||
+        data.file_size !== undefined ||
+        data.stored_file_size !== undefined ||
+        data.binary_deleted_at !== undefined ||
+        (data.is_pinned !== undefined && data.is_pinned !== false)
+      ) {
+        throw new Error(
+          "Direct client initialization of slip storage metadata or pin state is prohibited. Mutations must execute via trusted server flow."
+        );
+      }
+    }
+
     const now = new Date().toISOString();
 
     const newSlip: Slip = {
@@ -1067,9 +1094,15 @@ export const MemoryDataStore: IDataStore = {
       status: data.status || "uploaded",
       linked_transaction_id: data.linked_transaction_id || null,
       duplicate_of_slip_id: data.duplicate_of_slip_id || null,
-      created_at: now,
+      created_at: data.created_at || now,
       processed_at: data.processed_at || null,
       deleted_at: null,
+      stored_file_size:
+        data.stored_file_size !== undefined
+          ? data.stored_file_size
+          : (data.file_size || 0),
+      binary_deleted_at: data.binary_deleted_at || null,
+      is_pinned: data.is_pinned ?? false,
     };
 
     dbState.slips.push(newSlip);
@@ -1079,9 +1112,30 @@ export const MemoryDataStore: IDataStore = {
   async updateSlip(
     userId: string,
     id: string,
-    data: Partial<Slip>
+    data: Partial<Slip>,
+    options?: StorageMutationOptions
   ): Promise<Slip> {
     assertUserId(userId);
+
+    if (options?.asClientRole === "authenticated" || options?.asClientRole === "anon") {
+      if (
+        data.storage_path !== undefined ||
+        data.file_hash_sha256 !== undefined ||
+        data.file_size !== undefined ||
+        data.stored_file_size !== undefined ||
+        data.binary_deleted_at !== undefined ||
+        data.is_pinned !== undefined
+      ) {
+        throw new Error(
+          "Direct client modification of slip storage metadata or pin state is prohibited. Mutations must execute via trusted server flow."
+        );
+      }
+    } else if (data.is_pinned !== undefined && !options?.trustedServer) {
+      throw new Error(
+        "Direct client modification of is_pinned is prohibited. Use pin/unpin server action."
+      );
+    }
+
     const idx = dbState.slips.findIndex(
       (s) => s.id === id && s.user_id === userId
     );
@@ -1105,8 +1159,28 @@ export const MemoryDataStore: IDataStore = {
       id: current.id,
     };
 
+    if (data.stored_file_size !== undefined) updated.stored_file_size = data.stored_file_size;
+    if (data.binary_deleted_at !== undefined) updated.binary_deleted_at = data.binary_deleted_at;
+    if (data.is_pinned !== undefined) updated.is_pinned = data.is_pinned;
+
     dbState.slips[idx] = updated;
     return updated;
+  },
+
+  async deleteSlip(
+    userId: string,
+    id: string,
+    options?: StorageMutationOptions
+  ): Promise<void> {
+    assertUserId(userId);
+    const guard = evaluateStorageMutationGuard("slips", "DELETE", {}, options);
+    if (!guard.allowed) {
+      throw new Error(guard.error);
+    }
+    // Hard delete of slip records is strictly prohibited to protect audit retention
+    throw new Error(
+      "Direct client deletion of slip records is prohibited. Metadata and audit evidence must be preserved for retention."
+    );
   },
 
   // SLIP JOBS
@@ -1211,47 +1285,201 @@ export const MemoryDataStore: IDataStore = {
     return memorySlipFiles.get(storagePath) || null;
   },
 
-  async createSignedSlipUrl(
+  async deleteSlipFile(storagePath: string): Promise<void> {
+    memorySlipFiles.delete(storagePath);
+  },
+
+  async slipFileExists(storagePath: string): Promise<boolean> {
+    return memorySlipFiles.has(storagePath);
+  },
+
+  // Storage Retention Settings
+  async getStorageRetentionSettings(userId: string): Promise<StorageRetentionSettings> {
+    assertUserId(userId);
+    const existing = dbState.storage_retention_settings.find((s) => s.user_id === userId);
+    if (existing) return existing;
+
+    const now = new Date().toISOString();
+    const defaultSettings: StorageRetentionSettings = {
+      user_id: userId,
+      slip_retention_days: 90,
+      failed_retention_days: 7,
+      source_document_retention_days: 90,
+      created_at: now,
+      updated_at: now,
+    };
+    dbState.storage_retention_settings.push(defaultSettings);
+    return defaultSettings;
+  },
+
+  async updateStorageRetentionSettings(
     userId: string,
-    slipId: string,
-    expiresInSeconds = 900
-  ): Promise<string> {
+    data: Partial<StorageRetentionSettings>
+  ): Promise<StorageRetentionSettings> {
+    assertUserId(userId);
+    let settings = dbState.storage_retention_settings.find((s) => s.user_id === userId);
+    const now = new Date().toISOString();
+
+    if (data.slip_retention_days !== undefined) {
+      if (data.slip_retention_days < 7 || data.slip_retention_days > 3650) {
+        throw new Error("slip_retention_days must be between 7 and 3650 days");
+      }
+    }
+    if (data.failed_retention_days !== undefined) {
+      if (data.failed_retention_days < 1 || data.failed_retention_days > 365) {
+        throw new Error("failed_retention_days must be between 1 and 365 days");
+      }
+    }
+    if (data.source_document_retention_days !== undefined) {
+      if (data.source_document_retention_days < 7 || data.source_document_retention_days > 3650) {
+        throw new Error("source_document_retention_days must be between 7 and 3650 days");
+      }
+    }
+
+    if (!settings) {
+      settings = {
+        user_id: userId,
+        slip_retention_days: data.slip_retention_days ?? 90,
+        failed_retention_days: data.failed_retention_days ?? 7,
+        source_document_retention_days: data.source_document_retention_days ?? 90,
+        created_at: now,
+        updated_at: now,
+      };
+      dbState.storage_retention_settings.push(settings);
+    } else {
+      if (data.slip_retention_days !== undefined) settings.slip_retention_days = data.slip_retention_days;
+      if (data.failed_retention_days !== undefined) settings.failed_retention_days = data.failed_retention_days;
+      if (data.source_document_retention_days !== undefined) settings.source_document_retention_days = data.source_document_retention_days;
+      settings.updated_at = now;
+    }
+
+    return settings;
+  },
+
+  // Storage Binary Events
+  async createStorageBinaryEvent(
+    userId: string,
+    data: Omit<StorageBinaryEvent, "id" | "created_at">
+  ): Promise<StorageBinaryEvent> {
+    assertUserId(userId);
+
+    const hasSlip = Boolean(data.slip_id);
+    const hasDoc = Boolean(data.source_document_id);
+    if ((hasSlip && hasDoc) || (!hasSlip && !hasDoc)) {
+      throw new Error(
+        "Storage binary event must specify exactly one target: either slip_id or source_document_id"
+      );
+    }
+
+    // Enforce audit ownership integrity (fail-closed)
+    if (data.slip_id) {
+      const slip = dbState.slips.find((s) => s.id === data.slip_id);
+      if (!slip) {
+        throw new Error(`Target slip ${data.slip_id} does not exist`);
+      }
+      if (slip.user_id !== userId) {
+        throw new Error(
+          `Storage binary audit event user_id ${userId} does not match slip owner ${slip.user_id}`
+        );
+      }
+    } else if (data.source_document_id) {
+      const doc = dbState.source_documents.find((d) => d.id === data.source_document_id);
+      if (!doc) {
+        throw new Error(`Target source document ${data.source_document_id} does not exist`);
+      }
+      if (doc.user_id !== userId) {
+        throw new Error(
+          `Storage binary audit event user_id ${userId} does not match source document owner ${doc.user_id}`
+        );
+      }
+    }
+
+    const event: StorageBinaryEvent = {
+      id: crypto.randomUUID(),
+      user_id: userId,
+      slip_id: data.slip_id || null,
+      source_document_id: data.source_document_id || null,
+      action: data.action,
+      storage_path_snapshot: data.storage_path_snapshot || null,
+      file_hash_snapshot: data.file_hash_snapshot || null,
+      bytes_affected: data.bytes_affected ?? null,
+      reason: data.reason || null,
+      safe_error_message: data.safe_error_message || null,
+      created_at: new Date().toISOString(),
+    };
+
+    dbState.storage_binary_events.push(event);
+    return event;
+  },
+
+  async getStorageBinaryEvents(
+    userId: string,
+    filter?: { slipId?: string; sourceDocumentId?: string; limit?: number }
+  ): Promise<StorageBinaryEvent[]> {
+    assertUserId(userId);
+    let events = dbState.storage_binary_events.filter((e) => e.user_id === userId);
+    if (filter?.slipId) {
+      events = events.filter((e) => e.slip_id === filter.slipId);
+    }
+    if (filter?.sourceDocumentId) {
+      events = events.filter((e) => e.source_document_id === filter.sourceDocumentId);
+    }
+
+    // Sort descending by created_at
+    events.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+
+    if (filter?.limit) {
+      events = events.slice(0, filter.limit);
+    }
+
+    return events;
+  },
+
+  // Pinned Evidence
+  async setSlipPinned(userId: string, slipId: string, isPinned: boolean): Promise<Slip> {
     assertUserId(userId);
     const slip = await this.getSlipById(userId, slipId);
     if (!slip) {
       throw new Error("Slip not found or access denied");
     }
 
-    const exp = Date.now() + expiresInSeconds * 1000;
-    const secret =
-      process.env.SESSION_SECRET || "finn-preview-signature-secret-2026";
-    const sig = crypto
-      .createHmac("sha256", secret)
-      .update(`${slipId}:${exp}`)
-      .digest("hex");
+    const updated = await this.updateSlip(userId, slipId, { is_pinned: isPinned }, { trustedServer: true });
 
-    return `/api/slips/${slipId}/preview?exp=${exp}&sig=${sig}`;
+    await this.createStorageBinaryEvent(userId, {
+      user_id: userId,
+      slip_id: slip.id,
+      action: isPinned ? "pin" : "unpin",
+      storage_path_snapshot: slip.storage_path,
+      file_hash_snapshot: slip.file_hash_sha256,
+      bytes_affected: slip.stored_file_size ?? slip.file_size,
+    });
+
+    return updated;
   },
 
-  verifySlipPreviewSignature(slipId: string, exp: number, sig: string): boolean {
-    if (!slipId || !exp || !sig) return false;
-    if (Date.now() > exp) return false;
-
-    const secret =
-      process.env.SESSION_SECRET || "finn-preview-signature-secret-2026";
-    const expectedSig = crypto
-      .createHmac("sha256", secret)
-      .update(`${slipId}:${exp}`)
-      .digest("hex");
-
-    try {
-      const expectedBuf = Buffer.from(expectedSig, "hex");
-      const actualBuf = Buffer.from(sig, "hex");
-      if (expectedBuf.length !== actualBuf.length) return false;
-      return crypto.timingSafeEqual(expectedBuf, actualBuf);
-    } catch {
-      return false;
+  async setSourceDocumentPinned(
+    userId: string,
+    docId: string,
+    isPinned: boolean
+  ): Promise<SourceDocument> {
+    assertUserId(userId);
+    const doc = await this.getSourceDocumentById(userId, docId);
+    if (!doc) {
+      throw new Error("Source document not found or access denied");
     }
+
+    const updated = await this.updateSourceDocument(userId, docId, { is_pinned: isPinned }, { trustedServer: true });
+
+    await this.createStorageBinaryEvent(userId, {
+      user_id: userId,
+      source_document_id: doc.id,
+      action: isPinned ? "pin" : "unpin",
+      storage_path_snapshot: doc.storage_path,
+      file_hash_snapshot: doc.file_hash,
+      bytes_affected: doc.stored_file_size ?? doc.file_size,
+    });
+
+    return updated;
   },
 
   // Account Match Aliases
@@ -1722,9 +1950,25 @@ export const MemoryDataStore: IDataStore = {
 
   async createSourceDocument(
     userId: string,
-    data: Partial<SourceDocument>
+    data: Partial<SourceDocument>,
+    options?: StorageMutationOptions
   ): Promise<SourceDocument> {
     const dbState = getDbState();
+
+    if (options?.asClientRole === "authenticated" || options?.asClientRole === "anon") {
+      if (
+        data.storage_path !== undefined ||
+        data.file_hash !== undefined ||
+        data.file_size !== undefined ||
+        data.stored_file_size !== undefined ||
+        data.binary_deleted_at !== undefined ||
+        (data.is_pinned !== undefined && data.is_pinned !== false)
+      ) {
+        throw new Error(
+          "Direct client initialization of source document storage metadata or pin state is prohibited. Mutations must execute via trusted server flow."
+        );
+      }
+    }
 
     if (data.connection_id) {
       const conn = dbState.source_connections.find((c) => c.id === data.connection_id);
@@ -1766,9 +2010,30 @@ export const MemoryDataStore: IDataStore = {
   async updateSourceDocument(
     userId: string,
     id: string,
-    data: Partial<SourceDocument>
+    data: Partial<SourceDocument>,
+    options?: StorageMutationOptions
   ): Promise<SourceDocument> {
     const dbState = getDbState();
+
+    if (options?.asClientRole === "authenticated" || options?.asClientRole === "anon") {
+      if (
+        data.storage_path !== undefined ||
+        data.file_hash !== undefined ||
+        data.file_size !== undefined ||
+        data.stored_file_size !== undefined ||
+        data.binary_deleted_at !== undefined ||
+        data.is_pinned !== undefined
+      ) {
+        throw new Error(
+          "Direct client modification of source document storage metadata or pin state is prohibited. Mutations must execute via trusted server flow."
+        );
+      }
+    } else if (data.is_pinned !== undefined && !options?.trustedServer) {
+      throw new Error(
+        "Direct client modification of is_pinned is prohibited. Use pin/unpin server action."
+      );
+    }
+
     const idx = dbState.source_documents.findIndex((d) => d.user_id === userId && d.id === id);
     if (idx === -1) throw new Error("Source document not found");
 

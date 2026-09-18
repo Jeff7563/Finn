@@ -5,6 +5,7 @@ import { hashToken } from "@/lib/slip/token";
 import { calculateTotalActiveBalance, calculateAccountBalance } from "@/lib/finance/balances";
 import { calculateMonthSummary } from "@/lib/finance/summaries";
 import { isProductionEnvironment, DataStore } from "@/lib/server/data-store";
+import { createSlipSignedViewUrl, verifySlipPreviewSignature } from "@/lib/server/private-storage";
 
 interface MockDatabaseBackend {
   tables: Record<string, any[]>;
@@ -452,24 +453,24 @@ describe("Supabase Production Data Layer & Security Verification", () => {
       status: "needs_review",
     });
 
-    // Generate signed preview URL (15 minutes validity)
-    const signedUrl = await storeA.createSignedSlipUrl(USER_A, slip.id, 900);
+    // Generate signed preview URL (clamped to 300s max)
+    const { url: signedUrl } = await createSlipSignedViewUrl(USER_A, slip.id, 120, storeA);
     const url = new URL(`http://localhost${signedUrl}`);
     const exp = parseInt(url.searchParams.get("exp") || "0", 10);
     const sig = url.searchParams.get("sig") || "";
 
     expect(sig).toBeTruthy();
-    expect(storeA.verifySlipPreviewSignature(slip.id, exp, sig)).toBe(true);
+    expect(verifySlipPreviewSignature(slip.id, exp, sig)).toBe(true);
 
     // Tampered signature is rejected
-    expect(storeA.verifySlipPreviewSignature(slip.id, exp, "forged_hex_signature")).toBe(false);
+    expect(verifySlipPreviewSignature(slip.id, exp, "forged_hex_signature")).toBe(false);
 
     // Tampered slip ID is rejected
-    expect(storeA.verifySlipPreviewSignature("different-slip-uuid", exp, sig)).toBe(false);
+    expect(verifySlipPreviewSignature("different-slip-uuid", exp, sig)).toBe(false);
 
     // Expired timestamp is rejected
     const expiredExp = Date.now() - 5000;
-    expect(storeA.verifySlipPreviewSignature(slip.id, expiredExp, sig)).toBe(false);
+    expect(verifySlipPreviewSignature(slip.id, expiredExp, sig)).toBe(false);
   });
 
   // 6. Finance Calculations Remain Unchanged

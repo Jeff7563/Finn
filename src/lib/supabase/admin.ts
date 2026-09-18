@@ -1,3 +1,4 @@
+import "server-only";
 import { createClient as createSupabaseClient, SupabaseClient } from "@supabase/supabase-js";
 
 /**

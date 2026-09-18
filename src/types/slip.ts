@@ -65,7 +65,7 @@ export interface SlipExtraction {
 export interface Slip {
   id: string;
   user_id: string;
-  storage_path: string;
+  storage_path: string | null;
   file_hash_sha256: string;
   mime_type: string;
   file_size: number;
@@ -81,6 +81,9 @@ export interface Slip {
   created_at: string;
   processed_at?: string | null;
   deleted_at?: string | null;
+  stored_file_size?: number | null;
+  binary_deleted_at?: string | null;
+  is_pinned?: boolean;
 }
 
 export interface SlipIngestionJob {

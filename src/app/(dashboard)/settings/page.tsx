@@ -14,11 +14,20 @@ import {
 import { SeedSampleDataButton } from "@/components/settings/SeedSampleDataButton";
 import { ThemeSettingsControl } from "@/components/settings/ThemeSettingsControl";
 import { AutomationSettings } from "@/components/settings/AutomationSettings";
+import { StorageRetentionSettingsClient } from "@/components/settings/StorageRetentionSettingsClient";
 import { DataStore } from "@/lib/server/data-store";
+import { getStorageUsageSummary } from "@/lib/storage/retention";
 
 export default async function SettingsPage() {
   const user = await requireUser();
-  const tokens = await DataStore.getIngestTokens(user.id);
+  const [tokens, retentionSettings, sourceDocs, slips] = await Promise.all([
+    DataStore.getIngestTokens(user.id),
+    DataStore.getStorageRetentionSettings(user.id),
+    DataStore.getSourceDocuments(user.id),
+    DataStore.getSlips(user.id),
+  ]);
+
+  const storageUsageSummary = getStorageUsageSummary(sourceDocs, [], slips);
 
   const userInitial = user.display_name?.charAt(0).toUpperCase() || user.email?.charAt(0).toUpperCase() || "U";
   const userDisplayName = user.display_name || user.email?.split("@")[0] || "ผู้ใช้งาน";
@@ -126,6 +135,12 @@ export default async function SettingsPage() {
           </button>
         </form>
       </div>
+
+      {/* 3.1 การจัดการพื้นที่จัดเก็บและนโยบายการเก็บรักษา (Storage & Privacy) */}
+      <StorageRetentionSettingsClient
+        initialSettings={retentionSettings}
+        initialSummary={storageUsageSummary}
+      />
 
       {/* 4. ข้อมูลและการส่งออก (Data & Export) */}
       <div className="p-6 bg-surface dark:bg-surface-raised rounded-2xl border border-border shadow-sm space-y-3">

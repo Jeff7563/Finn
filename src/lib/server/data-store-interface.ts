@@ -29,6 +29,7 @@ import {
   TransactionEvidence,
   ReconciliationRun,
 } from "@/types/multi-source";
+import { StorageRetentionSettings, StorageBinaryEvent } from "@/types/storage";
 
 export interface PreloadedRelations {
   accounts?: Account[];
@@ -43,6 +44,11 @@ export interface TransactionsPageData {
   categories: Category[];
   people: Person[];
   merchants: Merchant[];
+}
+
+export interface StorageMutationOptions {
+  trustedServer?: boolean;
+  asClientRole?: "authenticated" | "anon";
 }
 
 export interface IDataStore {
@@ -98,8 +104,9 @@ export interface IDataStore {
   getSlipByIdUnscoped(id: string): Promise<Slip | null>;
   getSlipByFileHash(userId: string, hash: string): Promise<Slip | null>;
   getPendingReviewSlips(userId: string): Promise<Slip[]>;
-  createSlip(userId: string, data: Partial<Slip>): Promise<Slip>;
-  updateSlip(userId: string, id: string, data: Partial<Slip>): Promise<Slip>;
+  createSlip(userId: string, data: Partial<Slip>, options?: StorageMutationOptions): Promise<Slip>;
+  updateSlip(userId: string, id: string, data: Partial<Slip>, options?: StorageMutationOptions): Promise<Slip>;
+  deleteSlip(userId: string, id: string, options?: StorageMutationOptions): Promise<void>;
 
   // Slip Jobs
   createSlipJob(userId: string, data: Partial<SlipIngestionJob>): Promise<SlipIngestionJob>;
@@ -128,8 +135,25 @@ export interface IDataStore {
   // Storage
   saveSlipFile(storagePath: string, buffer: Buffer): Promise<void>;
   getSlipFile(storagePath: string): Promise<Buffer | null>;
-  createSignedSlipUrl(userId: string, slipId: string, expiresInSeconds?: number): Promise<string>;
-  verifySlipPreviewSignature(slipId: string, exp: number, sig: string): boolean;
+  deleteSlipFile(storagePath: string): Promise<void>;
+  slipFileExists(storagePath: string): Promise<boolean>;
+
+  // Storage Retention & Pinned Evidence
+  getStorageRetentionSettings(userId: string): Promise<StorageRetentionSettings>;
+  updateStorageRetentionSettings(
+    userId: string,
+    data: Partial<StorageRetentionSettings>
+  ): Promise<StorageRetentionSettings>;
+  createStorageBinaryEvent(
+    userId: string,
+    data: Omit<StorageBinaryEvent, "id" | "created_at">
+  ): Promise<StorageBinaryEvent>;
+  getStorageBinaryEvents(
+    userId: string,
+    filter?: { slipId?: string; sourceDocumentId?: string; limit?: number }
+  ): Promise<StorageBinaryEvent[]>;
+  setSlipPinned(userId: string, slipId: string, isPinned: boolean): Promise<Slip>;
+  setSourceDocumentPinned(userId: string, docId: string, isPinned: boolean): Promise<SourceDocument>;
 
   // Atomic Slip Confirmation
   confirmSlipTransaction(
@@ -148,8 +172,8 @@ export interface IDataStore {
   getSourceDocuments(userId: string): Promise<SourceDocument[]>;
   getSourceDocumentById(userId: string, id: string): Promise<SourceDocument | null>;
   getSourceDocumentByHash(userId: string, hash: string): Promise<SourceDocument | null>;
-  createSourceDocument(userId: string, data: Partial<SourceDocument>): Promise<SourceDocument>;
-  updateSourceDocument(userId: string, id: string, data: Partial<SourceDocument>): Promise<SourceDocument>;
+  createSourceDocument(userId: string, data: Partial<SourceDocument>, options?: StorageMutationOptions): Promise<SourceDocument>;
+  updateSourceDocument(userId: string, id: string, data: Partial<SourceDocument>, options?: StorageMutationOptions): Promise<SourceDocument>;
 
   // Import Batches
   getImportBatches(userId: string): Promise<ImportBatch[]>;

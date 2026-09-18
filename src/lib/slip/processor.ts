@@ -1,4 +1,6 @@
+import crypto from "crypto";
 import { DataStore } from "@/lib/server/data-store";
+import { privateStorage } from "@/lib/server/private-storage";
 import {
   SlipProcessingResult,
   SlipSource,
@@ -9,7 +11,6 @@ import {
 import {
   validateSlipFile,
   computeFileSha256,
-  generateSlipStoragePath,
 } from "./validation";
 import { DefaultQrDecoder, QrDecoder } from "./qr/decoder";
 import { parseSlipQrPayload } from "./qr/parser";
@@ -94,19 +95,57 @@ export class SlipProcessor {
       };
     }
 
-    // 3. Save Privately to Storage
-    const storagePath = generateSlipStoragePath(userId, validation.extension || "jpg");
-    await DataStore.saveSlipFile(storagePath, buffer);
+    // 3. Save Privately to Storage via server-only privateStorage boundary
+    const slipId = crypto.randomUUID();
+    const { storagePath } = await privateStorage.saveSlipBinary(
+      userId,
+      slipId,
+      buffer,
+      validation.mime
+    );
 
-    // 4. Create Slip Record
-    const slip = await DataStore.createSlip(userId, {
-      storage_path: storagePath,
-      file_hash_sha256: fileHash,
-      mime_type: validation.mime,
-      file_size: buffer.length,
-      source,
-      status: "processing",
-    });
+    // 4. Create Slip Record with Compensating Rollback
+    let slip: Slip;
+    try {
+      slip = await DataStore.createSlip(userId, {
+        id: slipId,
+        storage_path: storagePath,
+        file_hash_sha256: fileHash,
+        mime_type: validation.mime,
+        file_size: buffer.length,
+        source,
+        status: "processing",
+      });
+    } catch (createErr: unknown) {
+      // Compensating cleanup: delete just-uploaded binary so no orphan binary remains
+      let rollbackDiagnostic: string | undefined;
+      try {
+        const rollbackResult = await privateStorage.rollbackUploadedSlipBinary(
+          userId,
+          slipId,
+          storagePath
+        );
+        if (!rollbackResult.cleaned) {
+          rollbackDiagnostic = rollbackResult.diagnostic;
+        }
+      } catch (rbErr: unknown) {
+        rollbackDiagnostic =
+          rbErr instanceof Error ? rbErr.message : "Rollback execution failed";
+      }
+
+      const originalMessage =
+        createErr instanceof Error ? createErr.message : String(createErr);
+      const safeDiagnostic = rollbackDiagnostic
+        ? ` (Compensating cleanup diagnostic: ${rollbackDiagnostic})`
+        : "";
+
+      const enhancedError = new Error(`${originalMessage}${safeDiagnostic}`);
+      (enhancedError as unknown as { cause: unknown; rollbackDiagnostic?: string }).cause =
+        createErr;
+      (enhancedError as unknown as { rollbackDiagnostic?: string }).rollbackDiagnostic =
+        rollbackDiagnostic;
+      throw enhancedError;
+    }
 
     // 5. Create Job Record
     const job = await DataStore.createSlipJob(userId, {
