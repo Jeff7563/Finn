@@ -66,13 +66,13 @@ export async function updateRetentionSettingsAction(
 
   try {
     // Basic bounds validation matching database CHECK constraints exactly
-    if (updates.slip_retention_days !== undefined && (updates.slip_retention_days < 7 || updates.slip_retention_days > 3650)) {
+    if (updates.slip_retention_days !== undefined && (!Number.isInteger(updates.slip_retention_days) || updates.slip_retention_days < 7 || updates.slip_retention_days > 3650)) {
       return { success: false, error: "ระยะเวลาเก็บรักษาสลิปต้องอยู่ระหว่าง 7 ถึง 3650 วัน" };
     }
-    if (updates.failed_retention_days !== undefined && (updates.failed_retention_days < 1 || updates.failed_retention_days > 365)) {
+    if (updates.failed_retention_days !== undefined && (!Number.isInteger(updates.failed_retention_days) || updates.failed_retention_days < 1 || updates.failed_retention_days > 365)) {
       return { success: false, error: "ระยะเวลาเก็บรักษาไฟล์ที่ล้มเหลวต้องอยู่ระหว่าง 1 ถึง 365 วัน" };
     }
-    if (updates.source_document_retention_days !== undefined && (updates.source_document_retention_days < 7 || updates.source_document_retention_days > 3650)) {
+    if (updates.source_document_retention_days !== undefined && (!Number.isInteger(updates.source_document_retention_days) || updates.source_document_retention_days < 7 || updates.source_document_retention_days > 3650)) {
       return { success: false, error: "ระยะเวลาเก็บรักษาเอกสารต้นทางต้องอยู่ระหว่าง 7 ถึง 3650 วัน" };
     }
 
@@ -101,13 +101,14 @@ export async function getCleanupDryRunAction(): Promise<DryRunResponse> {
     const documents = await DataStore.getSourceDocuments(user.id);
     const slips = await DataStore.getSlips(user.id);
 
-    const dryRun = evaluateUnifiedStorageCleanupDryRun(documents, slips, {
+    const cleanupOptions = {
       slipRetentionDays: settings.slip_retention_days,
       sourceDocumentRetentionDays: settings.source_document_retention_days,
       failedRetentionDays: settings.failed_retention_days,
-    });
+    };
 
-    const usageSummary = getStorageUsageSummary(documents, [], slips);
+    const dryRun = evaluateUnifiedStorageCleanupDryRun(documents, slips, cleanupOptions);
+    const usageSummary = getStorageUsageSummary(documents, [], slips, cleanupOptions);
 
     return {
       success: true,

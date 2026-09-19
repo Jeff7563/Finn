@@ -27,7 +27,11 @@ export default async function SettingsPage() {
     DataStore.getSlips(user.id),
   ]);
 
-  const storageUsageSummary = getStorageUsageSummary(sourceDocs, [], slips);
+  const storageUsageSummary = getStorageUsageSummary(sourceDocs, [], slips, {
+    slipRetentionDays: retentionSettings.slip_retention_days,
+    sourceDocumentRetentionDays: retentionSettings.source_document_retention_days,
+    failedRetentionDays: retentionSettings.failed_retention_days,
+  });
 
   const userInitial = user.display_name?.charAt(0).toUpperCase() || user.email?.charAt(0).toUpperCase() || "U";
   const userDisplayName = user.display_name || user.email?.split("@")[0] || "ผู้ใช้งาน";

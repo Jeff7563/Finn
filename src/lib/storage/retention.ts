@@ -518,7 +518,8 @@ export const pruneSlipBinary = deleteSlipBinary;
 export function getStorageUsageSummary(
   documents: SourceDocument[],
   ingestionItems: IngestionItem[] = [],
-  slips: Slip[] = []
+  slips: Slip[] = [],
+  options: StorageCleanupOptions = {}
 ): StorageUsageSummary {
   let totalOriginalBytes = 0;
   let totalStoredBytes = 0;
@@ -550,7 +551,7 @@ export function getStorageUsageSummary(
 
     if (doc.is_pinned) {
       pinnedCount++;
-    } else if (!doc.binary_deleted_at && isDocumentRetentionEligible(doc).eligible) {
+    } else if (!doc.binary_deleted_at && isDocumentRetentionEligible(doc, options).eligible) {
       cleanupEligibleCount++;
     }
   }
@@ -588,7 +589,7 @@ export function getStorageUsageSummary(
 
     if (slip.is_pinned) {
       pinnedCount++;
-    } else if (!slip.binary_deleted_at && isSlipRetentionEligible(slip).eligible) {
+    } else if (!slip.binary_deleted_at && isSlipRetentionEligible(slip, options).eligible) {
       cleanupEligibleCount++;
     }
   }
