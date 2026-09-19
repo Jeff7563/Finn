@@ -71,7 +71,12 @@ export interface UnifiedCleanupDryRunResult {
   exemptPinnedCount: number;
   exemptRecentCount: number;
   exemptUnresolvedCount: number;
+  /** @deprecated Use actuallyPrunedCount instead. Kept for backward compat = actuallyPrunedCount */
   alreadyPrunedCount: number;
+  /** Documents/slips whose binary was actually deleted (binary_deleted_at IS NOT NULL) */
+  actuallyPrunedCount: number;
+  /** Documents that never had a stored binary (e.g. CSV imports, metadata-only). NOT cleanup candidates. */
+  metadataOnlyCount: number;
   totalItems: number;
   bytesRecoverable: number;
   slipCandidatesCount: number;
@@ -126,11 +131,20 @@ export function isDocumentRetentionEligible(
     };
   }
 
-  // Rule 2: Already pruned
-  if (doc.binary_deleted_at || !doc.storage_path) {
+  // Rule 2a: Actually pruned — binary was explicitly deleted
+  if (doc.binary_deleted_at) {
     return {
       eligible: false,
-      reason: "Binary already deleted (already pruned)",
+      reason: "Binary already deleted (actually pruned)",
+      ageDays: 0,
+    };
+  }
+
+  // Rule 2b: Metadata-only — never had a stored binary (e.g. CSV import)
+  if (!doc.storage_path && !doc.stored_file_size) {
+    return {
+      eligible: false,
+      reason: "No binary stored (metadata-only document)",
       ageDays: 0,
     };
   }
@@ -206,11 +220,20 @@ export function isSlipRetentionEligible(
     };
   }
 
-  // Rule 2: Already pruned
-  if (slip.binary_deleted_at || !slip.storage_path) {
+  // Rule 2a: Actually pruned — binary was explicitly deleted
+  if (slip.binary_deleted_at) {
     return {
       eligible: false,
-      reason: "Binary already deleted (already pruned)",
+      reason: "Binary already deleted (actually pruned)",
+      ageDays: 0,
+    };
+  }
+
+  // Rule 2b: Metadata-only — never had a stored binary
+  if (!slip.storage_path && !slip.stored_file_size) {
+    return {
+      eligible: false,
+      reason: "No binary stored (metadata-only)",
       ageDays: 0,
     };
   }
@@ -273,8 +296,12 @@ export function evaluateStorageCleanupDryRun(
   let bytesRecoverable = 0;
 
   for (const doc of documents) {
-    if (doc.binary_deleted_at || !doc.storage_path) {
+    if (doc.binary_deleted_at) {
       alreadyPrunedCount++;
+      continue;
+    }
+    if (!doc.storage_path && !doc.stored_file_size) {
+      // metadata-only document — not counted as pruned
       continue;
     }
 
@@ -328,14 +355,22 @@ export function evaluateUnifiedStorageCleanupDryRun(
   let exemptPinnedCount = 0;
   let exemptRecentCount = 0;
   let exemptUnresolvedCount = 0;
-  let alreadyPrunedCount = 0;
+  let actuallyPrunedCount = 0;
+  let metadataOnlyCount = 0;
   let bytesRecoverable = 0;
   let slipCandidatesCount = 0;
   let sourceDocumentCandidatesCount = 0;
 
   for (const doc of documents) {
-    if (doc.binary_deleted_at || !doc.storage_path) {
-      alreadyPrunedCount++;
+    // Actually pruned: binary_deleted_at IS NOT NULL
+    if (doc.binary_deleted_at) {
+      actuallyPrunedCount++;
+      continue;
+    }
+
+    // Metadata-only: never had a stored binary (e.g. CSV import)
+    if (!doc.storage_path && !doc.stored_file_size) {
+      metadataOnlyCount++;
       continue;
     }
 
@@ -372,8 +407,15 @@ export function evaluateUnifiedStorageCleanupDryRun(
   }
 
   for (const slip of slips) {
-    if (slip.binary_deleted_at || !slip.storage_path) {
-      alreadyPrunedCount++;
+    // Actually pruned: binary_deleted_at IS NOT NULL
+    if (slip.binary_deleted_at) {
+      actuallyPrunedCount++;
+      continue;
+    }
+
+    // Metadata-only: never had a stored binary
+    if (!slip.storage_path && !slip.stored_file_size) {
+      metadataOnlyCount++;
       continue;
     }
 
@@ -415,7 +457,9 @@ export function evaluateUnifiedStorageCleanupDryRun(
     exemptPinnedCount,
     exemptRecentCount,
     exemptUnresolvedCount,
-    alreadyPrunedCount,
+    alreadyPrunedCount: actuallyPrunedCount, // backward compat
+    actuallyPrunedCount,
+    metadataOnlyCount,
     totalItems: documents.length + slips.length,
     bytesRecoverable,
     slipCandidatesCount,
@@ -474,7 +518,8 @@ export const pruneSlipBinary = deleteSlipBinary;
 export function getStorageUsageSummary(
   documents: SourceDocument[],
   ingestionItems: IngestionItem[] = [],
-  slips: Slip[] = []
+  slips: Slip[] = [],
+  options: StorageCleanupOptions = {}
 ): StorageUsageSummary {
   let totalOriginalBytes = 0;
   let totalStoredBytes = 0;
@@ -506,7 +551,7 @@ export function getStorageUsageSummary(
 
     if (doc.is_pinned) {
       pinnedCount++;
-    } else if (!doc.binary_deleted_at && isDocumentRetentionEligible(doc).eligible) {
+    } else if (!doc.binary_deleted_at && isDocumentRetentionEligible(doc, options).eligible) {
       cleanupEligibleCount++;
     }
   }
@@ -544,7 +589,7 @@ export function getStorageUsageSummary(
 
     if (slip.is_pinned) {
       pinnedCount++;
-    } else if (!slip.binary_deleted_at && isSlipRetentionEligible(slip).eligible) {
+    } else if (!slip.binary_deleted_at && isSlipRetentionEligible(slip, options).eligible) {
       cleanupEligibleCount++;
     }
   }

@@ -44,6 +44,80 @@ function formatBytes(bytes: number): string {
   return `${(bytes / Math.pow(k, i)).toFixed(1)} ${sizes[i]}`;
 }
 
+export interface RetentionValidationResult {
+  valid: boolean;
+  error?: string;
+  parsed?: number;
+}
+
+export function validateSlipRetentionDays(rawInput: string): RetentionValidationResult {
+  const trimmed = rawInput.trim();
+  if (trimmed === "") {
+    return { valid: false, error: "กรุณาระบุจำนวนวันเก็บรักษาสลิป" };
+  }
+  const n = Number(trimmed);
+  if (!Number.isInteger(n) || n < 7 || n > 3650) {
+    return { valid: false, error: "ระยะเวลาเก็บรักษาสลิปต้องเป็นจำนวนเต็มระหว่าง 7 ถึง 3,650 วัน" };
+  }
+  return { valid: true, parsed: n };
+}
+
+export function validateSourceDocRetentionDays(rawInput: string): RetentionValidationResult {
+  const trimmed = rawInput.trim();
+  if (trimmed === "") {
+    return { valid: false, error: "กรุณาระบุจำนวนวันเก็บรักษาเอกสารนำเข้า" };
+  }
+  const n = Number(trimmed);
+  if (!Number.isInteger(n) || n < 7 || n > 3650) {
+    return { valid: false, error: "ระยะเวลาเก็บรักษาเอกสารนำเข้าต้องเป็นจำนวนเต็มระหว่าง 7 ถึง 3,650 วัน" };
+  }
+  return { valid: true, parsed: n };
+}
+
+export function validateFailedRetentionDays(rawInput: string): RetentionValidationResult {
+  const trimmed = rawInput.trim();
+  if (trimmed === "") {
+    return { valid: false, error: "กรุณาระบุจำนวนวันเก็บรักษาไฟล์ที่ล้มเหลว" };
+  }
+  const n = Number(trimmed);
+  if (!Number.isInteger(n) || n < 1 || n > 365) {
+    return { valid: false, error: "ระยะเวลาเก็บรักษาไฟล์ที่ล้มเหลวต้องเป็นจำนวนเต็มระหว่าง 1 ถึง 365 วัน" };
+  }
+  return { valid: true, parsed: n };
+}
+
+export function validateRetentionInputs(
+  slipDaysInput: string,
+  sourceDocDaysInput: string,
+  failedDaysInput: string
+): {
+  valid: boolean;
+  error?: string;
+  values?: {
+    slipDays: number;
+    sourceDocDays: number;
+    failedDays: number;
+  };
+} {
+  const slipVal = validateSlipRetentionDays(slipDaysInput);
+  if (!slipVal.valid) return { valid: false, error: slipVal.error };
+
+  const sourceVal = validateSourceDocRetentionDays(sourceDocDaysInput);
+  if (!sourceVal.valid) return { valid: false, error: sourceVal.error };
+
+  const failedVal = validateFailedRetentionDays(failedDaysInput);
+  if (!failedVal.valid) return { valid: false, error: failedVal.error };
+
+  return {
+    valid: true,
+    values: {
+      slipDays: slipVal.parsed!,
+      sourceDocDays: sourceVal.parsed!,
+      failedDays: failedVal.parsed!,
+    },
+  };
+}
+
 export function StorageRetentionSettingsClient({
   initialSettings,
   initialSummary,
@@ -52,10 +126,12 @@ export function StorageRetentionSettingsClient({
   const [summary, setSummary] = useState<StorageUsageSummary>(initialSummary);
 
   // Form states
-  const [slipDays, setSlipDays] = useState(settings.slip_retention_days);
-  const [failedDays, setFailedDays] = useState(settings.failed_retention_days);
+  const [slipDaysInput, setSlipDaysInput] = useState(String(settings.slip_retention_days));
+  const [sourceDocDaysInput, setSourceDocDaysInput] = useState(String(settings.source_document_retention_days));
+  const [failedDaysInput, setFailedDaysInput] = useState(String(settings.failed_retention_days));
   const [isSavingSettings, setIsSavingSettings] = useState(false);
   const [settingsMessage, setSettingsMessage] = useState<string | null>(null);
+  const [validationError, setValidationError] = useState<string | null>(null);
 
   // Dry-run states
   const [dryRunResult, setDryRunResult] = useState<UnifiedCleanupDryRunResult | null>(null);
@@ -77,15 +153,33 @@ export function StorageRetentionSettingsClient({
 
   const handleSaveSettings = async (e: React.FormEvent) => {
     e.preventDefault();
-    setIsSavingSettings(true);
+    setValidationError(null);
     setSettingsMessage(null);
+
+    const validation = validateRetentionInputs(
+      slipDaysInput,
+      sourceDocDaysInput,
+      failedDaysInput
+    );
+    if (!validation.valid || !validation.values) {
+      setValidationError(validation.error || "ข้อมูลไม่ถูกต้อง");
+      return;
+    }
+
+    const { slipDays, sourceDocDays, failedDays } = validation.values;
+
+    setIsSavingSettings(true);
     try {
       const res = await updateRetentionSettingsAction({
         slip_retention_days: slipDays,
+        source_document_retention_days: sourceDocDays,
         failed_retention_days: failedDays,
       });
       if (res.success && res.settings) {
         setSettings(res.settings);
+        setSlipDaysInput(String(res.settings.slip_retention_days));
+        setSourceDocDaysInput(String(res.settings.source_document_retention_days));
+        setFailedDaysInput(String(res.settings.failed_retention_days));
         setSettingsMessage("บันทึกนโยบายการเก็บรักษาข้อมูลสำเร็จ");
         setTimeout(() => setSettingsMessage(null), 3500);
       } else {
@@ -295,21 +389,38 @@ export function StorageRetentionSettingsClient({
           <span>กำหนดระยะเวลาจัดเก็บไฟล์ต้นฉบับ (Retention Window)</span>
         </div>
 
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 text-xs">
           <div>
             <label className="block text-text-muted font-medium mb-1">
               สลิปที่บันทึกแล้ว (วัน)
             </label>
             <input
               type="number"
-              min={1}
+              min={7}
               max={3650}
-              value={slipDays}
-              onChange={(e) => setSlipDays(parseInt(e.target.value, 10) || 1)}
+              value={slipDaysInput}
+              onChange={(e) => setSlipDaysInput(e.target.value)}
               className="w-full px-3 py-2 bg-surface-soft border border-border rounded-xl text-text-primary text-xs focus:outline-none focus:ring-1 focus:ring-primary"
             />
             <p className="text-[10px] text-text-muted mt-1">
-              สลิปที่ยืนยันแล้วเกินกำหนดนี้จะถือว่าครบกำหนดลบไฟล์ภาพ (ค่าเริ่มต้น 90 วัน)
+              สลิปที่ยืนยันแล้วเกินกำหนดนี้จะถือว่าครบกำหนดลบไฟล์ภาพ (ค่าเริ่มต้น 90 วัน, ต่ำสุด 7 วัน)
+            </p>
+          </div>
+
+          <div>
+            <label className="block text-text-muted font-medium mb-1">
+              เอกสารนำเข้า / Statement (วัน)
+            </label>
+            <input
+              type="number"
+              min={7}
+              max={3650}
+              value={sourceDocDaysInput}
+              onChange={(e) => setSourceDocDaysInput(e.target.value)}
+              className="w-full px-3 py-2 bg-surface-soft border border-border rounded-xl text-text-primary text-xs focus:outline-none focus:ring-1 focus:ring-primary"
+            />
+            <p className="text-[10px] text-text-muted mt-1">
+              เอกสารต้นทางที่นำเข้า (CSV, PDF) เกินกำหนดนี้จะถือว่าครบกำหนดลบไฟล์ (ค่าเริ่มต้น 90 วัน, ต่ำสุด 7 วัน)
             </p>
           </div>
 
@@ -321,15 +432,22 @@ export function StorageRetentionSettingsClient({
               type="number"
               min={1}
               max={365}
-              value={failedDays}
-              onChange={(e) => setFailedDays(parseInt(e.target.value, 10) || 1)}
+              value={failedDaysInput}
+              onChange={(e) => setFailedDaysInput(e.target.value)}
               className="w-full px-3 py-2 bg-surface-soft border border-border rounded-xl text-text-primary text-xs focus:outline-none focus:ring-1 focus:ring-primary"
             />
             <p className="text-[10px] text-text-muted mt-1">
-              สลิปที่ล้มเหลวหรือซ้ำซ้อนจะถูกลบเร็วกว่าเพื่อประหยัดพื้นที่ (ค่าเริ่มต้น 7 วัน)
+              สลิปที่ล้มเหลวหรือซ้ำซ้อนจะถูกลบเร็วกว่าเพื่อประหยัดพื้นที่ (ค่าเริ่มต้น 7 วัน, ต่ำสุด 1 วัน)
             </p>
           </div>
         </div>
+
+        {validationError && (
+          <div className="p-2.5 rounded-xl bg-rose-50 dark:bg-rose-950/30 border border-rose-200 dark:border-rose-900 text-xs text-rose-700 dark:text-rose-400 flex items-center gap-2">
+            <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+            <span>{validationError}</span>
+          </div>
+        )}
 
         <div className="flex items-center justify-between pt-1">
           <button
@@ -390,10 +508,13 @@ export function StorageRetentionSettingsClient({
                 </span>
                 )
               </div>
-              <div className="text-[10px] text-text-muted flex gap-2">
+              <div className="text-[10px] text-text-muted flex flex-wrap gap-x-3 gap-y-0.5">
+                <span>ครบกำหนดลบได้: {dryRunResult.candidates.length}</span>
                 <span>ปักหมุดยกเว้น: {dryRunResult.exemptPinnedCount}</span>
                 <span>ยังไม่ครบกำหนด: {dryRunResult.exemptRecentCount}</span>
-                <span>ลบแล้ว: {dryRunResult.alreadyPrunedCount}</span>
+                <span>รอตรวจสอบ/กำลังประมวลผล: {dryRunResult.exemptUnresolvedCount}</span>
+                <span>ไม่มีไฟล์ต้นฉบับ (Metadata-only): {dryRunResult.metadataOnlyCount}</span>
+                <span>ลบไฟล์ต้นฉบับแล้วจริง: {dryRunResult.actuallyPrunedCount}</span>
               </div>
             </div>
 

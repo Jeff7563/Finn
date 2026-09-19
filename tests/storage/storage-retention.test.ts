@@ -132,7 +132,7 @@ describe("Storage Retention & Image Optimization", () => {
       // Second check: already pruned document is not eligible for further cleanup
       const check = isDocumentRetentionEligible(pruned, { now, retentionDays: 90 });
       expect(check.eligible).toBe(false);
-      expect(check.reason).toContain("already pruned");
+      expect(check.reason).toContain("actually pruned");
     });
   });
 
