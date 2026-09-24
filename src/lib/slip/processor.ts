@@ -46,25 +46,8 @@ export interface ReprocessSlipOptions {
   buffer: Buffer;
 }
 
-/**
- * Maps typed vision error codes to user-facing, non-secret-safe Thai messages.
- */
-export function getFriendlyVisionErrorMessage(errorCode?: string | null): string {
-  switch (errorCode) {
-    case "VISION_PROVIDER_TIMEOUT":
-      return "ระบบอ่านสลิปตอบกลับช้ากว่ากำหนด กรุณาลองประมวลผลใหม่อีกครั้ง";
-    case "VISION_AUTH_FAILED":
-      return "การยืนยันสิทธิ์กับผู้ให้บริการอ่านสลิปล้มเหลว กรุณาตรวจสอบการตั้งค่า";
-    case "VISION_RATE_LIMITED":
-      return "ระบบอ่านสลิปถูกจำกัดอัตราการเรียกใช้งานชั่วคราว กรุณารอสักครู่แล้วลองใหม่";
-    case "VISION_PROVIDER_UNAVAILABLE":
-      return "ผู้ให้บริการอ่านสลิปไม่พร้อมใช้งานชั่วคราว กรุณาลองใหม่ในภายหลัง";
-    case "VISION_EMPTY_EXTRACTION":
-      return "ไม่สามารถอ่านข้อมูลที่จำเป็นจากภาพสลิปได้";
-    default:
-      return "การประมวลผลสลิปไม่สำเร็จ กรุณาลองใหม่อีกครั้ง";
-  }
-}
+import { getFriendlyVisionErrorMessage } from "./error-messages";
+export { getFriendlyVisionErrorMessage };
 
 export class SlipProcessor {
   private qrDecoder: QrDecoder;
@@ -289,20 +272,25 @@ export class SlipProcessor {
       // Handle failed or materially unusable provider response
       if (newExtractionFailed || !rawExtraction) {
         const timeoutConfig = getVisionTimeoutConfig();
-        const isTimeout =
-          extractionErrorCode === "VISION_PROVIDER_TIMEOUT" ||
-          Boolean(extractionDiagnostics?.timeout) ||
-          extractionDiagnostics?.errorCode === "VISION_PROVIDER_TIMEOUT";
+        const effectiveErrorCode =
+          extractionDiagnostics?.terminalErrorCode ||
+          extractionErrorCode ||
+          extractionDiagnostics?.errorCode ||
+          "VISION_EXTRACTION_FAILED";
+
+        const isTimeout = effectiveErrorCode === "VISION_PROVIDER_TIMEOUT";
+        const isTypedProviderError =
+          effectiveErrorCode === "VISION_PROVIDER_OVERLOADED" ||
+          effectiveErrorCode === "VISION_RATE_LIMITED" ||
+          effectiveErrorCode === "VISION_PROVIDER_TIMEOUT" ||
+          effectiveErrorCode === "VISION_PROVIDER_UNAVAILABLE" ||
+          effectiveErrorCode === "VISION_AUTH_FAILED";
 
         if (isReprocess && existingExtraction) {
           // Reprocess Quality Gate: Preserve existing extraction completely
-          const safeUserMessage = isTimeout
-            ? "ระบบอ่านสลิปตอบกลับช้ากว่ากำหนด กรุณาลองประมวลผลใหม่อีกครั้ง"
+          const safeUserMessage = isTypedProviderError
+            ? getFriendlyVisionErrorMessage(effectiveErrorCode)
             : "การประมวลผลใหม่อ่านข้อมูลได้ไม่ครบ จึงคงข้อมูลเดิมไว้";
-
-          const effectiveErrorCode = isTimeout
-            ? "VISION_PROVIDER_TIMEOUT"
-            : extractionErrorCode || "VISION_EMPTY_EXTRACTION";
 
           const diagJson = JSON.stringify({
             parser: slip.parser_version || "v2-vision",
@@ -330,9 +318,14 @@ export class SlipProcessor {
               extractionDiagnostics?.totalConfiguredDeadlineMs ??
               timeoutConfig.totalDeadlineMs,
             totalDurationMs: extractionDiagnostics?.totalDurationMs ?? 0,
+            hadPriorTimeout: extractionDiagnostics?.hadPriorTimeout ?? false,
+            priorFailureCodes: extractionDiagnostics?.priorFailureCodes ?? [],
+            terminalErrorCode: extractionDiagnostics?.terminalErrorCode ?? effectiveErrorCode,
+            terminalHttpStatus: extractionDiagnostics?.terminalHttpStatus ?? extractionDiagnostics?.httpStatus ?? null,
+            terminalModel: extractionDiagnostics?.terminalModel ?? (extractionDiagnostics?.fallbackModelUsed ? extractionDiagnostics?.fallbackModel : extractionDiagnostics?.primaryModel) ?? null,
             httpStatus: extractionDiagnostics?.httpStatus ?? null,
             errorCode: effectiveErrorCode,
-            timeoutStage: extractionDiagnostics?.timeoutStage ?? (isTimeout ? "primary" : null),
+            timeoutStage: isTimeout ? (extractionDiagnostics?.timeoutStage ?? "total") : null,
             model: extractionDiagnostics?.model,
             attemptCount: extractionDiagnostics?.attemptCount,
             timeout: isTimeout,
@@ -375,17 +368,12 @@ export class SlipProcessor {
           };
         } else {
           // Initial first-time ingestion failure
-          const safeError = extractionErrorMessage || "Slip extraction failed";
-          const safeUserMessage = isTimeout
-            ? "ระบบอ่านสลิปตอบกลับช้ากว่ากำหนด กรุณาลองประมวลผลใหม่อีกครั้ง"
-            : safeError;
+          const safeUserMessage = isTypedProviderError
+            ? getFriendlyVisionErrorMessage(effectiveErrorCode)
+            : (extractionErrorMessage || getFriendlyVisionErrorMessage(effectiveErrorCode));
           const warningMessage = isTimeout
-            ? "ระบบอ่านสลิปตอบกลับช้ากว่ากำหนด กรุณาลองประมวลผลใหม่อีกครั้ง"
+            ? getFriendlyVisionErrorMessage("VISION_PROVIDER_TIMEOUT")
             : "ระบบอ่านสลิปอัตโนมัติไม่พร้อมใช้งานชั่วคราว";
-
-          const effectiveErrorCode = isTimeout
-            ? "VISION_PROVIDER_TIMEOUT"
-            : extractionErrorCode || "VISION_EXTRACTION_FAILED";
 
           const firstTimeDiag = JSON.stringify({
             parser: slip.parser_version || "v2-vision",
@@ -413,9 +401,14 @@ export class SlipProcessor {
               extractionDiagnostics?.totalConfiguredDeadlineMs ??
               timeoutConfig.totalDeadlineMs,
             totalDurationMs: extractionDiagnostics?.totalDurationMs ?? 0,
+            hadPriorTimeout: extractionDiagnostics?.hadPriorTimeout ?? false,
+            priorFailureCodes: extractionDiagnostics?.priorFailureCodes ?? [],
+            terminalErrorCode: extractionDiagnostics?.terminalErrorCode ?? effectiveErrorCode,
+            terminalHttpStatus: extractionDiagnostics?.terminalHttpStatus ?? extractionDiagnostics?.httpStatus ?? null,
+            terminalModel: extractionDiagnostics?.terminalModel ?? (extractionDiagnostics?.fallbackModelUsed ? extractionDiagnostics?.fallbackModel : extractionDiagnostics?.primaryModel) ?? null,
             httpStatus: extractionDiagnostics?.httpStatus ?? null,
             errorCode: effectiveErrorCode,
-            timeoutStage: extractionDiagnostics?.timeoutStage ?? (isTimeout ? "primary" : null),
+            timeoutStage: isTimeout ? (extractionDiagnostics?.timeoutStage ?? "total") : null,
             model: extractionDiagnostics?.model,
             attemptCount: extractionDiagnostics?.attemptCount,
             timeout: isTimeout,

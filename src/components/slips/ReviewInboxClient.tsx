@@ -31,6 +31,7 @@ import { matchCounterparty } from "@/lib/slip/counterparty-match";
 import { suggestCategory } from "@/lib/slip/category-suggest";
 import { getCategoryDisplayName } from "@/lib/finance/category-labels";
 import { useSlipsRealtime } from "@/lib/slip/realtime/slips-realtime";
+import { getFriendlyVisionErrorMessage } from "@/lib/slip/error-messages";
 import {
   Check,
   Edit2,
@@ -126,10 +127,11 @@ export function ReviewInboxClient({
       const res = await reprocessSlipAction(slipId);
       if (res.success && res.result) {
         if (res.result.preservedPrevious || res.result.warningMessage) {
-          alert(
+          const userMessage =
+            (res.result.errorCode && getFriendlyVisionErrorMessage(res.result.errorCode)) ||
             res.result.warningMessage ||
-              "ประมวลผลใหม่ไม่สำเร็จ — ระบบคงข้อมูลเดิมไว้แล้ว"
-          );
+            "ประมวลผลใหม่ไม่สำเร็จ — ระบบคงข้อมูลเดิมไว้แล้ว";
+          alert(userMessage);
         }
         if (res.result.status === "created") {
           // Auto created, remove from review inbox
@@ -154,7 +156,11 @@ export function ReviewInboxClient({
         }
         router.refresh();
       } else {
-        alert(res.error || "ไม่สามารถประมวลผลสลิปใหม่ได้");
+        const errorMsg =
+          (res.result?.errorCode && getFriendlyVisionErrorMessage(res.result.errorCode)) ||
+          res.error ||
+          "ไม่สามารถประมวลผลสลิปใหม่ได้";
+        alert(errorMsg);
       }
     } finally {
       setReprocessingId(null);
