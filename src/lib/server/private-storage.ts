@@ -3,7 +3,7 @@ import "server-only";
 import crypto from "crypto";
 import { DataStore } from "@/lib/server/data-store";
 import type { IDataStore } from "./data-store-interface";
-import { StoragePruneResult } from "@/types/storage";
+import { StoragePruneResult, SlipBinaryStatus } from "@/types/storage";
 import { evaluateStorageMutationGuard } from "./storage-guards";
 
 /**
@@ -247,7 +247,7 @@ export async function authorizeAndReadSlipPreview(params: {
   // 5. Fetch file buffer from private storage
   const buffer = await DataStore.getSlipFile(slip.storage_path);
   if (!buffer) {
-    return { status: 404, error: "ไม่พบไฟล์หลักฐาน" };
+    return { status: 404, error: "ไม่พบไฟล์ต้นฉบับในพื้นที่จัดเก็บ" };
   }
 
   return {
@@ -602,11 +602,219 @@ export async function rollbackUploadedSlipBinary(
   }
 }
 
+/**
+ * Validates that stored storage_path belongs strictly to the current user and slip ID.
+ * Supports current Finn format ({userId}/{YYYY}/{MM}/{slipId}.{ext}) and legacy ({userId}/{slipId}.{ext}).
+ * Rejects path traversal and cross-user paths.
+ */
+export function validateSlipStoragePath(
+  storagePath: string,
+  userId: string,
+  slipId: string
+): boolean {
+  if (!storagePath || typeof storagePath !== "string") return false;
+  if (!userId || !slipId) return false;
+
+  // Path traversal check
+  if (storagePath.includes("..") || storagePath.includes("//") || storagePath.startsWith("/")) {
+    return false;
+  }
+
+  const cleanUserId = userId.replace(/[^a-zA-Z0-9_-]/g, "");
+  const cleanSlipId = slipId.replace(/[^a-zA-Z0-9_-]/g, "");
+
+  // Must strictly start with cleanUserId/
+  if (!storagePath.startsWith(`${cleanUserId}/`)) {
+    return false;
+  }
+
+  // Allowed extensions: jpg, jpeg, png, webp, pdf
+  const allowedExts = ["jpg", "jpeg", "png", "webp", "pdf"];
+  const parts = storagePath.split("/");
+  const filename = parts[parts.length - 1];
+  const dotIdx = filename.lastIndexOf(".");
+  if (dotIdx === -1) return false;
+  const base = filename.substring(0, dotIdx);
+  const ext = filename.substring(dotIdx + 1).toLowerCase();
+
+  if (base !== cleanSlipId) return false;
+  if (!allowedExts.includes(ext)) return false;
+
+  return true;
+}
+
+/**
+ * Detects whether a slip's binary is physically present in private storage.
+ * Fails closed on unauthorized access.
+ * Returns: 'available' | 'missing' | 'pruned' | 'metadata_only'
+ */
+export async function detectSlipBinaryStatus(
+  userId: string,
+  slipId: string
+): Promise<SlipBinaryStatus> {
+  if (!userId || !slipId) {
+    throw new Error("Access denied: valid user session and slipId required");
+  }
+
+  const slip = await DataStore.getSlipById(userId, slipId);
+  if (!slip || slip.user_id !== userId) {
+    throw new Error("ไม่พบข้อมูลสลิป (Slip not found or access denied)");
+  }
+
+  if (slip.binary_deleted_at) {
+    return "pruned";
+  }
+
+  if (!slip.storage_path) {
+    return "metadata_only";
+  }
+
+  const exists = await DataStore.slipFileExists(slip.storage_path);
+  if (!exists) {
+    return "missing";
+  }
+
+  return "available";
+}
+
+/**
+ * Restores a physically missing slip binary to an existing slip record.
+ * Validates ownership, trusted storage path, and requires EXACT SHA-256 match.
+ * Fails closed if SHA-256 differs.
+ * Idempotent: does not silently overwrite if binary already exists.
+ */
+export async function restoreMissingSlipBinary(
+  userId: string,
+  slipId: string,
+  fileBuffer: Buffer,
+  mimeType: string = "image/jpeg"
+): Promise<{
+  success: boolean;
+  slipId: string;
+  storagePath: string;
+  bytes: number;
+  message?: string;
+}> {
+  if (!userId || !slipId) {
+    throw new Error("Access denied: valid user session and slipId required");
+  }
+
+  // 1. Load slip and verify ownership
+  const slip = await DataStore.getSlipById(userId, slipId);
+  if (!slip || slip.user_id !== userId) {
+    throw new Error("ไม่พบข้อมูลสลิป (Slip not found or access denied)");
+  }
+
+  // 2. Validate that stored storage_path belongs to current user & current slip
+  if (!slip.storage_path || !validateSlipStoragePath(slip.storage_path, userId, slip.id)) {
+    throw new Error("เส้นทางจัดเก็บไฟล์ไม่ถูกต้องหรือไม่ปลอดภัย (Invalid or unsafe slip storage path)");
+  }
+
+  // 3. Confirm physical object is currently missing (Idempotency)
+  const currentlyExists = await DataStore.slipFileExists(slip.storage_path);
+  if (currentlyExists) {
+    return {
+      success: true,
+      slipId: slip.id,
+      storagePath: slip.storage_path,
+      bytes: slip.stored_file_size || fileBuffer.length,
+      message: "ไฟล์ต้นฉบับยังอยู่ในระบบ ไม่จำเป็นต้องกู้คืน",
+    };
+  }
+
+  // 4. Validate uploaded file buffer size & type
+  const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
+  if (!fileBuffer || fileBuffer.length === 0) {
+    throw new Error("ไฟล์ที่อัปโหลดว่างเปล่า (Uploaded file is empty)");
+  }
+  if (fileBuffer.length > MAX_FILE_SIZE) {
+    throw new Error("ขนาดไฟล์เกินขีดจำกัดสูงสุด 10MB");
+  }
+  const allowedMimes = ["image/jpeg", "image/png", "image/webp"];
+  if (mimeType && !allowedMimes.includes(mimeType.toLowerCase())) {
+    throw new Error("ประเภทไฟล์ไม่ถูกต้อง รองรับเฉพาะไฟล์รูปภาพ (JPEG, PNG, WebP)");
+  }
+
+  // 5. Calculate SHA-256 from ORIGINAL uploaded bytes
+  const uploadedHash = crypto.createHash("sha256").update(fileBuffer).digest("hex");
+
+  // 6. Require: uploadedHash === slip.file_hash_sha256 (FAIL CLOSED)
+  if (uploadedHash.toLowerCase() !== slip.file_hash_sha256.toLowerCase()) {
+    throw new Error(
+      "ไฟล์ที่เลือกไม่ใช่ไฟล์ต้นฉบับของสลิปนี้\nรหัส SHA-256 ไม่ตรงกับหลักฐานเดิม"
+    );
+  }
+
+  // 7. Record restore_requested audit event
+  await DataStore.createStorageBinaryEvent(userId, {
+    user_id: userId,
+    slip_id: slip.id,
+    action: "restore_requested",
+    storage_path_snapshot: slip.storage_path,
+    file_hash_snapshot: slip.file_hash_sha256,
+    bytes_affected: fileBuffer.length,
+    reason: "missing_binary_repair",
+  });
+
+  // 8. Upload exact matching binary & verify
+  try {
+    await DataStore.saveSlipFile(slip.storage_path, fileBuffer);
+
+    const verified = await DataStore.slipFileExists(slip.storage_path);
+    if (!verified) {
+      throw new Error("การตรวจสอบไฟล์หลังจากอัปโหลดล้มเหลว (Storage verification failed)");
+    }
+  } catch (err: unknown) {
+    const errMsg = err instanceof Error ? err.message : "Upload to storage failed";
+    await DataStore.createStorageBinaryEvent(userId, {
+      user_id: userId,
+      slip_id: slip.id,
+      action: "restore_failed",
+      storage_path_snapshot: slip.storage_path,
+      file_hash_snapshot: slip.file_hash_sha256,
+      bytes_affected: fileBuffer.length,
+      reason: "missing_binary_repair",
+      safe_error_message: errMsg,
+    });
+    throw new Error(`การอัปโหลดไฟล์ไปยังพื้นที่จัดเก็บล้มเหลว: ${errMsg}`);
+  }
+
+  // 9. Update stored_file_size and clear binary_deleted_at
+  await DataStore.updateSlip(
+    userId,
+    slip.id,
+    {
+      stored_file_size: fileBuffer.length,
+      binary_deleted_at: null,
+    },
+    { trustedServer: true }
+  );
+
+  // 10. Record restore_completed audit event
+  await DataStore.createStorageBinaryEvent(userId, {
+    user_id: userId,
+    slip_id: slip.id,
+    action: "restore_completed",
+    storage_path_snapshot: slip.storage_path,
+    file_hash_snapshot: slip.file_hash_sha256,
+    bytes_affected: fileBuffer.length,
+    reason: "missing_binary_repair",
+  });
+
+  return {
+    success: true,
+    slipId: slip.id,
+    storagePath: slip.storage_path,
+    bytes: fileBuffer.length,
+  };
+}
+
 export { evaluateStorageMutationGuard } from "./storage-guards";
 
 export const privateStorage = {
   requirePreviewSigningSecret,
   deriveTrustedSlipPath,
+  validateSlipStoragePath,
   saveSlipBinary,
   rollbackUploadedSlipBinary,
   createSlipSignedViewUrl,
@@ -614,6 +822,8 @@ export const privateStorage = {
   verifySlipPreviewSignature,
   authorizeAndReadSlipPreview,
   binaryExists,
+  detectSlipBinaryStatus,
+  restoreMissingSlipBinary,
   getSlipBinary,
   readSlipBinary,
   pruneSlipBinary,

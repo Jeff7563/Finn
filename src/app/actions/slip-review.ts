@@ -422,15 +422,36 @@ export async function getPendingReviewCountAction(): Promise<number> {
  */
 export async function getSlipSignedPreviewUrlAction(
   slipId: string
-): Promise<{ success: boolean; url?: string; error?: string }> {
+): Promise<{
+  success: boolean;
+  url?: string;
+  binaryStatus?: import("@/types/storage").SlipBinaryStatus;
+  error?: string;
+}> {
   const user = await getAuthenticatedUser();
   if (!user) {
     return { success: false, error: "กรุณาเข้าสู่ระบบก่อนทำรายการ" };
   }
 
   try {
+    const status = await privateStorage.detectSlipBinaryStatus(user.id, slipId);
+    if (status === "missing") {
+      return {
+        success: false,
+        binaryStatus: "missing",
+        error: "ไม่พบไฟล์ต้นฉบับในพื้นที่จัดเก็บ",
+      };
+    }
+    if (status === "pruned") {
+      return {
+        success: false,
+        binaryStatus: "pruned",
+        error: "ไฟล์ต้นฉบับถูกลบตามนโยบายการเก็บรักษาแล้ว",
+      };
+    }
+
     const { url } = await privateStorage.createSlipSignedViewUrl(user.id, slipId, 120);
-    return { success: true, url };
+    return { success: true, url, binaryStatus: "available" };
   } catch (err: unknown) {
     return {
       success: false,

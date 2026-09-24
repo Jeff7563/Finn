@@ -257,3 +257,58 @@ export async function getTransactionVoidEventsAction(
     return { success: false, error: message };
   }
 }
+
+export interface ReplaceTransactionActionResult {
+  success: boolean;
+  newTransactionId?: string;
+  error?: string;
+}
+
+export async function replaceVoidedSlipTransactionAction(
+  input: import("@/types/finance").ReplaceVoidedSlipTransactionInput
+): Promise<ReplaceTransactionActionResult> {
+  try {
+    const user = await requireUser();
+    const res = await DataStore.replaceVoidedSlipTransaction(user.id, input);
+
+    revalidatePath(`/transactions/${input.old_transaction_id}`);
+    revalidatePath(`/transactions/${res.transaction.id}`);
+    revalidatePath("/transactions");
+    revalidatePath("/today");
+    revalidatePath("/overview");
+    revalidatePath("/accounts");
+    revalidatePath("/people");
+    revalidatePath("/merchants");
+    revalidatePath("/inbox");
+    revalidatePath("/review");
+
+    return {
+      success: true,
+      newTransactionId: res.transaction.id,
+    };
+  } catch (err: unknown) {
+    const message =
+      err instanceof Error ? err.message : "Failed to replace voided transaction";
+    return { success: false, error: message };
+  }
+}
+
+export async function getTransactionReplacementEventsAction(
+  id: string
+): Promise<{
+  success: boolean;
+  replacedBy?: import("@/types/finance").TransactionReplacementEvent | null;
+  replaces?: import("@/types/finance").TransactionReplacementEvent | null;
+  error?: string;
+}> {
+  try {
+    const user = await requireUser();
+    const result = await DataStore.getTransactionReplacementEvents(user.id, id);
+    return { success: true, ...result };
+  } catch (err: unknown) {
+    const message =
+      err instanceof Error ? err.message : "Failed to fetch replacement events";
+    return { success: false, error: message };
+  }
+}
+

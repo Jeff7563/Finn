@@ -3,7 +3,7 @@
 import React, { useState } from "react";
 import { restoreTransactionAction } from "@/app/actions/transactions";
 import { formatMoney } from "@/lib/finance/formatters";
-import { RotateCcw, X, Loader2, CheckCircle2 } from "lucide-react";
+import { RotateCcw, X, Loader2, CheckCircle2, AlertCircle } from "lucide-react";
 
 interface RestoreTransactionModalProps {
   isOpen: boolean;
@@ -11,6 +11,7 @@ interface RestoreTransactionModalProps {
   transactionDescription?: string | null;
   amount?: number;
   currency?: string;
+  hasActiveReplacement?: boolean;
   onClose: () => void;
   onSuccess: () => void;
 }
@@ -21,6 +22,7 @@ export function RestoreTransactionModal({
   transactionDescription,
   amount,
   currency = "THB",
+  hasActiveReplacement = false,
   onClose,
   onSuccess,
 }: RestoreTransactionModalProps) {
@@ -119,6 +121,18 @@ export function RestoreTransactionModal({
             </div>
           </div>
 
+          {hasActiveReplacement && (
+            <div className="p-3 bg-amber-50 dark:bg-amber-950/40 text-amber-800 dark:text-amber-200 border border-amber-300 dark:border-amber-800 rounded-xl text-xs space-y-1">
+              <div className="flex items-center gap-1.5 font-semibold">
+                <AlertCircle className="w-4 h-4 flex-shrink-0" />
+                <span>ไม่สามารถคืนรายการได้</span>
+              </div>
+              <p className="leading-relaxed">
+                ไม่สามารถคืนรายการนี้ได้ เนื่องจากมีรายการทดแทนที่กำลังใช้งานอยู่ กรุณายกเลิกรายการทดแทนก่อน
+              </p>
+            </div>
+          )}
+
           {error && (
             <div className="p-2.5 bg-expense-soft text-expense rounded-lg text-xs font-medium border border-expense/20">
               {error}
@@ -137,7 +151,7 @@ export function RestoreTransactionModal({
             </button>
             <button
               type="submit"
-              disabled={isSubmitting}
+              disabled={isSubmitting || hasActiveReplacement}
               className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold rounded-xl text-white bg-slate-900 hover:bg-slate-800 dark:bg-primary dark:text-primary-foreground dark:hover:bg-primary-hover transition-colors shadow-xs disabled:opacity-50"
             >
               {isSubmitting ? (

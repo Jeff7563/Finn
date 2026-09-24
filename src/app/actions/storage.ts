@@ -15,6 +15,7 @@ import {
   StorageBinaryEvent,
   StoragePruneResult,
   StorageBulkPruneResult,
+  SlipBinaryStatus,
 } from "@/types/storage";
 
 export interface DryRunResponse {
@@ -304,3 +305,77 @@ export async function getStorageAuditEventsAction(
     };
   }
 }
+
+/**
+ * Detects physical existence and retention status of a slip binary.
+ */
+export async function getSlipBinaryStatusAction(
+  slipId: string
+): Promise<{ success: boolean; status?: SlipBinaryStatus; error?: string }> {
+  const user = await getAuthenticatedUser();
+  if (!user) {
+    return { success: false, error: "กรุณาเข้าสู่ระบบก่อนทำรายการ" };
+  }
+
+  try {
+    const status = await privateStorage.detectSlipBinaryStatus(user.id, slipId);
+    return { success: true, status };
+  } catch (err: unknown) {
+    return {
+      success: false,
+      error: err instanceof Error ? err.message : "ไม่สามารถตรวจสอบสถานะไฟล์ได้",
+    };
+  }
+}
+
+/**
+ * Trusted server action to restore a physically missing slip binary to an existing slip record.
+ * Validates ownership, trusted storage path, and strictly requires SHA-256 exact match.
+ */
+export async function restoreMissingSlipBinaryAction(
+  slipId: string,
+  formData: FormData
+): Promise<{ success: boolean; message?: string; error?: string }> {
+  const user = await getAuthenticatedUser();
+  if (!user) {
+    return { success: false, error: "กรุณาเข้าสู่ระบบก่อนทำรายการ" };
+  }
+
+  if (!slipId) {
+    return { success: false, error: "ไม่พบรหัสสลิป (Missing slip ID)" };
+  }
+
+  const file = formData.get("file");
+  if (!file || !(file instanceof File)) {
+    return { success: false, error: "กรุณาเลือกไฟล์สลิปที่ต้องการกู้คืน" };
+  }
+
+  try {
+    const arrayBuffer = await file.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
+    const mimeType = file.type || "image/jpeg";
+
+    const result = await privateStorage.restoreMissingSlipBinary(
+      user.id,
+      slipId,
+      buffer,
+      mimeType
+    );
+
+    revalidatePath("/review");
+    revalidatePath("/transactions");
+    revalidatePath(`/transactions/${slipId}`);
+    revalidatePath("/settings");
+
+    return {
+      success: true,
+      message: result.message || "กู้คืนไฟล์ต้นฉบับสำเร็จ",
+    };
+  } catch (err: unknown) {
+    return {
+      success: false,
+      error: err instanceof Error ? err.message : "เกิดข้อผิดพลาดในการกู้คืนไฟล์",
+    };
+  }
+}
+

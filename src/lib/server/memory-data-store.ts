@@ -8,6 +8,9 @@ import {
   TransactionVoidEvent,
   VoidTransactionResult,
   RestoreTransactionResult,
+  TransactionReplacementEvent,
+  ReplaceVoidedSlipTransactionInput,
+  ReplaceVoidedSlipTransactionResult,
 } from "@/types/finance";
 import {
   AccountFormData,
@@ -117,6 +120,7 @@ export interface MemoryDatabaseState {
   transaction_void_events: TransactionVoidEvent[];
   storage_retention_settings: StorageRetentionSettings[];
   storage_binary_events: StorageBinaryEvent[];
+  transaction_replacement_events: TransactionReplacementEvent[];
 }
 
 function getInitialState(): MemoryDatabaseState {
@@ -147,6 +151,7 @@ function getInitialState(): MemoryDatabaseState {
     transaction_void_events: [],
     storage_retention_settings: [],
     storage_binary_events: [],
+    transaction_replacement_events: [],
   };
 }
 
@@ -578,10 +583,10 @@ export const MemoryDataStore: IDataStore = {
       );
     }
 
-    // Idempotency: if transaction for this source_slip_id was already created, return it
+    // Idempotency: if an active transaction for this source_slip_id was already created, return it
     if (data.source_slip_id) {
       const existing = dbState.transactions.find(
-        (t) => t.source_slip_id === data.source_slip_id && t.user_id === userId
+        (t) => !t.voided_at && t.source_slip_id === data.source_slip_id && t.user_id === userId
       );
       if (existing) {
         return existing;
@@ -911,6 +916,23 @@ export const MemoryDataStore: IDataStore = {
       };
     }
 
+    // Restore Safety Check: Fail closed if transaction has been replaced
+    const replacement = dbState.transaction_replacement_events.find(
+      (e) => e.old_transaction_id === transactionId && e.user_id === userId
+    );
+    if (replacement) {
+      const newTx = dbState.transactions.find((t) => t.id === replacement.new_transaction_id);
+      if (newTx && !newTx.voided_at) {
+        throw new Error(
+          "ไม่สามารถคืนรายการนี้ได้ เนื่องจากมีรายการทดแทนที่กำลังใช้งานอยู่ กรุณายกเลิกรายการทดแทนก่อน"
+        );
+      } else {
+        throw new Error(
+          "ไม่สามารถคืนรายการนี้ได้ เนื่องจากรายการนี้ถูกแทนที่ไปแล้ว (กรุณาจัดการที่รายการทดแทนล่าสุด)"
+        );
+      }
+    }
+
     const nowIso = new Date().toISOString();
     tx.voided_at = null;
     tx.voided_by = null;
@@ -944,6 +966,228 @@ export const MemoryDataStore: IDataStore = {
     return dbState.transaction_void_events
       .filter((e) => e.user_id === userId && e.transaction_id === transactionId)
       .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+  },
+
+  async replaceVoidedSlipTransaction(
+    userId: string,
+    input: ReplaceVoidedSlipTransactionInput
+  ): Promise<ReplaceVoidedSlipTransactionResult> {
+    assertUserId(userId);
+    const trimmedReason = (input.reason || "").trim();
+    if (!trimmedReason) {
+      throw new Error("Replacement reason is required");
+    }
+    if (trimmedReason.length > 500) {
+      throw new Error("Replacement reason cannot exceed 500 characters");
+    }
+
+    // 1. Lock Slip and verify ownership
+    const slip = dbState.slips.find((s) => s.id === input.slip_id && s.user_id === userId);
+    if (!slip) {
+      throw new Error(`Slip ${input.slip_id} not found or does not belong to user ${userId}`);
+    }
+
+    // 2. Lock Old Transaction and verify ownership
+    const oldTx = dbState.transactions.find(
+      (t) => t.id === input.old_transaction_id && t.user_id === userId
+    );
+    if (!oldTx) {
+      throw new Error(`Old transaction ${input.old_transaction_id} not found or does not belong to user ${userId}`);
+    }
+
+    // 3. Old transaction MUST be voided
+    if (!oldTx.voided_at) {
+      throw new Error(
+        `สามารถสร้างรายการทดแทนได้เฉพาะรายการที่ถูกยกเลิก (Voided) แล้วเท่านั้น (Cannot replace active transaction ${input.old_transaction_id})`
+      );
+    }
+
+    // 4. Slip must currently/canonically reference old transaction
+    if (slip.linked_transaction_id && slip.linked_transaction_id !== input.old_transaction_id) {
+      const activeLinked = dbState.transactions.some(
+        (t) => t.id === slip.linked_transaction_id && !t.voided_at
+      );
+      if (activeLinked) {
+        throw new Error(
+          `สลิปนี้ถูกเชื่อมโยงกับรายการที่กำลังใช้งานอยู่แล้ว (Slip ${input.slip_id} is already linked to active transaction ${slip.linked_transaction_id})`
+        );
+      }
+    }
+
+    const hasEvidence = dbState.transaction_evidence.some(
+      (e) => e.slip_id === input.slip_id && e.transaction_id === input.old_transaction_id
+    );
+    if (
+      slip.linked_transaction_id !== input.old_transaction_id &&
+      oldTx.source_slip_id !== input.slip_id &&
+      !hasEvidence
+    ) {
+      throw new Error(
+        `สามารถสร้างรายการทดแทนได้เฉพาะรายการที่มีหลักฐานสลิปเท่านั้น (Slip ${input.slip_id} is not linked to transaction ${input.old_transaction_id})`
+      );
+    }
+
+    // 5. Verify old transaction has not already been replaced
+    if (dbState.transaction_replacement_events.some((e) => e.old_transaction_id === input.old_transaction_id)) {
+      throw new Error(
+        `มีรายการทดแทนอยู่แล้ว (Transaction ${input.old_transaction_id} has already been replaced)`
+      );
+    }
+
+    // 6. Validate payload
+    if (!["income", "expense", "transfer"].includes(input.type)) {
+      throw new Error(`Invalid transaction type ${input.type}: replacement only allows income, expense, or transfer`);
+    }
+    if (!input.amount || input.amount <= 0) {
+      throw new Error("Invalid amount: must be greater than 0");
+    }
+    if (input.amount > 999999999999.99) {
+      throw new Error("Invalid amount: exceeds maximum allowable limit");
+    }
+    if (!input.transaction_date) {
+      throw new Error("Transaction date is required");
+    }
+
+    if (input.type === "transfer") {
+      if (!input.from_account_id || !input.to_account_id) {
+        throw new Error("Transfer requires both from_account_id and to_account_id");
+      }
+      if (input.from_account_id === input.to_account_id) {
+        throw new Error("Source and destination accounts must not be identical");
+      }
+    } else if (input.type === "expense") {
+      if (!input.from_account_id) {
+        throw new Error("Expense requires from_account_id");
+      }
+      if (input.to_account_id) {
+        throw new Error("Expense must not have to_account_id");
+      }
+    } else if (input.type === "income") {
+      if (!input.to_account_id) {
+        throw new Error("Income requires to_account_id");
+      }
+      if (input.from_account_id) {
+        throw new Error("Income must not have from_account_id");
+      }
+    }
+
+    // Validate ownership of referenced accounts, categories, merchants, people
+    if (input.from_account_id) {
+      const exists = dbState.accounts.some((a) => a.id === input.from_account_id && a.user_id === userId);
+      if (!exists) {
+        throw new Error(`Foreign source account does not belong to user ${userId}`);
+      }
+    }
+    if (input.to_account_id) {
+      const exists = dbState.accounts.some((a) => a.id === input.to_account_id && a.user_id === userId);
+      if (!exists) {
+        throw new Error(`Foreign destination account does not belong to user ${userId}`);
+      }
+    }
+    if (input.category_id) {
+      const exists = dbState.categories.some((c) => c.id === input.category_id && (c.user_id === userId || c.is_system));
+      if (!exists) {
+        throw new Error(`Foreign category does not belong to user ${userId}`);
+      }
+    }
+    if (input.merchant_id) {
+      const exists = dbState.merchants.some((m) => m.id === input.merchant_id && m.user_id === userId);
+      if (!exists) {
+        throw new Error(`Foreign merchant does not belong to user ${userId}`);
+      }
+    }
+    if (input.person_id) {
+      const exists = dbState.people.some((p) => p.id === input.person_id && p.user_id === userId);
+      if (!exists) {
+        throw new Error(`Foreign person does not belong to user ${userId}`);
+      }
+    }
+
+    // 7. Atomic Execution: Create new transaction
+    const newTx = await this.createTransaction(userId, {
+      type: input.type,
+      amount: input.amount,
+      currency: input.currency || "THB",
+      transaction_date: input.transaction_date,
+      description: input.description || null,
+      note: input.note || null,
+      from_account_id: input.from_account_id || null,
+      to_account_id: input.to_account_id || null,
+      category_id: input.category_id || null,
+      merchant_id: input.merchant_id || null,
+      person_id: input.person_id || null,
+      source: "slip",
+      source_slip_id: input.slip_id,
+      reference_number: input.reference_number || null,
+      confidence: 1.0,
+      review_status: "confirmed",
+    });
+
+    try {
+      // 8. Move canonical slip evidence association from old tx -> new tx
+      const ev = dbState.transaction_evidence.find((e) => e.slip_id === input.slip_id);
+      if (ev) {
+        ev.transaction_id = newTx.id;
+      } else {
+        dbState.transaction_evidence.push({
+          id: crypto.randomUUID(),
+          user_id: userId,
+          transaction_id: newTx.id,
+          evidence_type: "slip",
+          slip_id: input.slip_id,
+          created_at: new Date().toISOString(),
+        });
+      }
+
+      // 9. Update slip linked_transaction_id -> new tx
+      slip.linked_transaction_id = newTx.id;
+      slip.status = "created";
+
+      // 10. Record replacement audit event
+      const eventId = crypto.randomUUID();
+      const event: TransactionReplacementEvent = {
+        id: eventId,
+        user_id: userId,
+        slip_id: input.slip_id,
+        old_transaction_id: input.old_transaction_id,
+        new_transaction_id: newTx.id,
+        reason: trimmedReason,
+        created_at: new Date().toISOString(),
+      };
+      dbState.transaction_replacement_events.push(event);
+
+      return {
+        success: true,
+        transaction: newTx,
+        event,
+      };
+    } catch (err) {
+      // Rollback newly created transaction on any failure
+      const txIdx = dbState.transactions.findIndex((t) => t.id === newTx.id);
+      if (txIdx !== -1) {
+        dbState.transactions.splice(txIdx, 1);
+      }
+      throw err;
+    }
+  },
+
+  async getTransactionReplacementEvents(
+    userId: string,
+    transactionId: string
+  ): Promise<{
+    replacedBy?: TransactionReplacementEvent | null;
+    replaces?: TransactionReplacementEvent | null;
+  }> {
+    assertUserId(userId);
+    const replacedBy = dbState.transaction_replacement_events.find(
+      (e) => e.user_id === userId && e.old_transaction_id === transactionId
+    ) || null;
+
+    const replaces = dbState.transaction_replacement_events.find(
+      (e) => e.user_id === userId && e.new_transaction_id === transactionId
+    ) || null;
+
+    return { replacedBy, replaces };
   },
 
   // INGEST TOKENS

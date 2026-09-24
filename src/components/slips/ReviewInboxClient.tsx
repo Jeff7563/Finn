@@ -51,6 +51,7 @@ import {
   UploadCloud,
 } from "lucide-react";
 import { SlipUploadModal } from "./SlipUploadModal";
+import { RestoreSlipBinaryModal } from "./RestoreSlipBinaryModal";
 
 interface ReviewInboxClientProps {
   userId?: string;
@@ -86,6 +87,8 @@ export function ReviewInboxClient({
   // Preview Modal State
   const [previewModalUrl, setPreviewModalUrl] = useState<string | null>(null);
   const [loadingPreviewId, setLoadingPreviewId] = useState<string | null>(null);
+  const [missingBinarySlipId, setMissingBinarySlipId] = useState<string | null>(null);
+  const [restoreBinarySlipId, setRestoreBinarySlipId] = useState<string | null>(null);
 
   // Edit Modal State
   const [editingSlip, setEditingSlip] = useState<Slip | null>(null);
@@ -150,10 +153,16 @@ export function ReviewInboxClient({
   // Open Preview Modal with Signed URL
   const handleOpenPreview = async (slipId: string) => {
     setLoadingPreviewId(slipId);
+    setMissingBinarySlipId(null);
     try {
       const res = await getSlipSignedPreviewUrlAction(slipId);
       if (res.success && res.url) {
         setPreviewModalUrl(res.url);
+      } else if (
+        res.binaryStatus === "missing" ||
+        res.error?.includes("ไม่พบไฟล์ต้นฉบับในพื้นที่จัดเก็บ")
+      ) {
+        setMissingBinarySlipId(slipId);
       } else {
         alert(res.error || "ไม่สามารถโหลดภาพสลิปได้");
       }
@@ -657,11 +666,14 @@ export function ReviewInboxClient({
       )}
 
       {/* Slip Image Preview Modal */}
-      {previewModalUrl && (
+      {(previewModalUrl || missingBinarySlipId) && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/70 backdrop-blur-xs animate-in fade-in">
           <div
             className="fixed inset-0"
-            onClick={() => setPreviewModalUrl(null)}
+            onClick={() => {
+              setPreviewModalUrl(null);
+              setMissingBinarySlipId(null);
+            }}
           />
           <div className="relative max-w-lg w-full bg-surface rounded-2xl border border-border shadow-2xl p-4 z-10 space-y-3">
             <div className="flex items-center justify-between pb-2 border-b border-border">
@@ -669,19 +681,51 @@ export function ReviewInboxClient({
                 สลิปธนาคาร (Private Preview)
               </span>
               <button
-                onClick={() => setPreviewModalUrl(null)}
+                onClick={() => {
+                  setPreviewModalUrl(null);
+                  setMissingBinarySlipId(null);
+                }}
                 className="p-1 text-text-muted hover:text-text-primary rounded-md hover:bg-surface-soft"
               >
                 <X className="w-4 h-4" />
               </button>
             </div>
-            <div className="flex items-center justify-center max-h-[75vh] overflow-hidden rounded-xl bg-slate-950">
-              <img
-                src={previewModalUrl}
-                alt="Slip preview"
-                className="max-h-[70vh] object-contain"
-              />
-            </div>
+
+            {missingBinarySlipId ? (
+              <div className="py-6 px-4 space-y-4 text-center">
+                <div className="w-12 h-12 mx-auto rounded-full bg-amber-50 dark:bg-amber-950/50 flex items-center justify-center text-amber-600 dark:text-amber-400">
+                  <AlertCircle className="w-6 h-6" />
+                </div>
+                <div className="space-y-1">
+                  <h4 className="text-sm font-semibold text-text-primary">
+                    ไม่พบไฟล์ต้นฉบับในพื้นที่จัดเก็บ
+                  </h4>
+                  <p className="text-xs text-text-muted max-w-sm mx-auto">
+                    ข้อมูลสลิปและรหัสตรวจสอบความถูกต้อง (SHA-256) ยังคงอยู่ในระบบ แต่ไฟล์ภาพต้นฉบับใน Storage สูญหายหรือถูกลบ
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const sid = missingBinarySlipId;
+                    setMissingBinarySlipId(null);
+                    setRestoreBinarySlipId(sid);
+                  }}
+                  className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-primary hover:bg-primary-hover text-white text-xs font-semibold shadow-xs transition-colors"
+                >
+                  <ShieldCheck className="w-4 h-4" />
+                  <span>กู้คืนไฟล์หลักฐานเดิม</span>
+                </button>
+              </div>
+            ) : (
+              <div className="flex items-center justify-center max-h-[75vh] overflow-hidden rounded-xl bg-slate-950">
+                <img
+                  src={previewModalUrl!}
+                  alt="Slip preview"
+                  className="max-h-[70vh] object-contain"
+                />
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -1010,6 +1054,20 @@ export function ReviewInboxClient({
         onClose={() => setIsUploadModalOpen(false)}
         onSuccess={() => router.refresh()}
       />
+
+      {/* Restore Slip Binary Modal */}
+      {restoreBinarySlipId && (
+        <RestoreSlipBinaryModal
+          isOpen={Boolean(restoreBinarySlipId)}
+          slipId={restoreBinarySlipId}
+          onClose={() => setRestoreBinarySlipId(null)}
+          onSuccess={() => {
+            const sid = restoreBinarySlipId;
+            setRestoreBinarySlipId(null);
+            handleOpenPreview(sid);
+          }}
+        />
+      )}
     </div>
   );
 }

@@ -88,6 +88,17 @@ export interface IDataStore {
   voidTransaction(userId: string, transactionId: string, reason: string): Promise<import("@/types/finance").VoidTransactionResult>;
   restoreTransaction(userId: string, transactionId: string, reason?: string): Promise<import("@/types/finance").RestoreTransactionResult>;
   getTransactionVoidEvents(userId: string, transactionId: string): Promise<import("@/types/finance").TransactionVoidEvent[]>;
+  replaceVoidedSlipTransaction(
+    userId: string,
+    input: import("@/types/finance").ReplaceVoidedSlipTransactionInput
+  ): Promise<import("@/types/finance").ReplaceVoidedSlipTransactionResult>;
+  getTransactionReplacementEvents(
+    userId: string,
+    transactionId: string
+  ): Promise<{
+    replacedBy?: import("@/types/finance").TransactionReplacementEvent | null;
+    replaces?: import("@/types/finance").TransactionReplacementEvent | null;
+  }>;
 
   // Ingest Tokens
   getIngestTokens(userId: string): Promise<IngestToken[]>;

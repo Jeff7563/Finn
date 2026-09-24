@@ -261,6 +261,23 @@ export const DataStore: IDataStore = {
     return getActiveStore().getTransactionVoidEvents(userId, transactionId);
   },
 
+  async replaceVoidedSlipTransaction(
+    userId: string,
+    input: import("@/types/finance").ReplaceVoidedSlipTransactionInput
+  ): Promise<import("@/types/finance").ReplaceVoidedSlipTransactionResult> {
+    return getActiveStore().replaceVoidedSlipTransaction(userId, input);
+  },
+
+  async getTransactionReplacementEvents(
+    userId: string,
+    transactionId: string
+  ): Promise<{
+    replacedBy?: import("@/types/finance").TransactionReplacementEvent | null;
+    replaces?: import("@/types/finance").TransactionReplacementEvent | null;
+  }> {
+    return getActiveStore().getTransactionReplacementEvents(userId, transactionId);
+  },
+
   // INGEST TOKENS
   async getIngestTokens(userId: string): Promise<IngestToken[]> {
     return getActiveStore().getIngestTokens(userId);

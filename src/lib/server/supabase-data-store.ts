@@ -9,6 +9,9 @@ import {
   TransactionVoidEvent,
   VoidTransactionResult,
   RestoreTransactionResult,
+  TransactionReplacementEvent,
+  ReplaceVoidedSlipTransactionInput,
+  ReplaceVoidedSlipTransactionResult,
 } from "@/types/finance";
 import {
   AccountFormData,
@@ -1355,6 +1358,117 @@ export class SupabaseDataStoreImpl implements IDataStore {
       reason: row.reason ? String(row.reason) : null,
       created_at: String(row.created_at),
     }));
+  }
+
+  async replaceVoidedSlipTransaction(
+    userId: string,
+    input: ReplaceVoidedSlipTransactionInput
+  ): Promise<ReplaceVoidedSlipTransactionResult> {
+    assertUserId(userId);
+    const client = await this.getClient(userId);
+
+    const { data: rpcRes, error: rpcError } = await client.rpc(
+      "replace_voided_slip_transaction",
+      {
+        p_user_id: userId,
+        p_old_transaction_id: input.old_transaction_id,
+        p_slip_id: input.slip_id,
+        p_reason: (input.reason || "").trim(),
+        p_tx_type: input.type,
+        p_amount: Number(input.amount),
+        p_currency: input.currency || "THB",
+        p_transaction_date: input.transaction_date,
+        p_description: input.description || null,
+        p_note: input.note || null,
+        p_from_account_id: input.from_account_id || null,
+        p_to_account_id: input.to_account_id || null,
+        p_category_id: input.category_id || null,
+        p_merchant_id: input.merchant_id || null,
+        p_person_id: input.person_id || null,
+        p_reference_number: input.reference_number || null,
+      }
+    );
+
+    if (rpcError) {
+      throw new Error(`Failed to replace voided slip transaction: ${rpcError.message}`);
+    }
+
+    if (!rpcRes || !rpcRes.new_transaction_id) {
+      throw new Error("Failed to replace voided slip transaction: invalid RPC response");
+    }
+
+    const tx = await this.getTransactionById(userId, rpcRes.new_transaction_id);
+    if (!tx) {
+      throw new Error("Failed to retrieve replacement transaction");
+    }
+
+    const event: TransactionReplacementEvent = {
+      id: rpcRes.event_id,
+      user_id: userId,
+      slip_id: input.slip_id,
+      old_transaction_id: input.old_transaction_id,
+      new_transaction_id: rpcRes.new_transaction_id,
+      reason: input.reason,
+      created_at: new Date().toISOString(),
+    };
+
+    return {
+      success: true,
+      transaction: tx,
+      event,
+    };
+  }
+
+  async getTransactionReplacementEvents(
+    userId: string,
+    transactionId: string
+  ): Promise<{
+    replacedBy?: TransactionReplacementEvent | null;
+    replaces?: TransactionReplacementEvent | null;
+  }> {
+    assertUserId(userId);
+    const client = await this.getClient(userId);
+
+    const [replacedByRes, replacesRes] = await Promise.all([
+      client
+        .from("transaction_replacement_events")
+        .select("*")
+        .eq("user_id", userId)
+        .eq("old_transaction_id", transactionId)
+        .maybeSingle(),
+      client
+        .from("transaction_replacement_events")
+        .select("*")
+        .eq("user_id", userId)
+        .eq("new_transaction_id", transactionId)
+        .maybeSingle(),
+    ]);
+
+    const replacedBy = replacedByRes.data
+      ? {
+          id: String(replacedByRes.data.id),
+          user_id: String(replacedByRes.data.user_id),
+          slip_id: String(replacedByRes.data.slip_id),
+          old_transaction_id: String(replacedByRes.data.old_transaction_id),
+          new_transaction_id: String(replacedByRes.data.new_transaction_id),
+          reason: String(replacedByRes.data.reason),
+          created_at: String(replacedByRes.data.created_at),
+        }
+      : null;
+
+    const replaces = replacesRes.data
+      ? {
+          id: String(replacesRes.data.id),
+          user_id: String(replacesRes.data.user_id),
+          slip_id: String(replacesRes.data.slip_id),
+          old_transaction_id: String(replacesRes.data.old_transaction_id),
+          new_transaction_id: String(replacesRes.data.new_transaction_id),
+          reason: String(replacesRes.data.reason),
+          created_at: String(replacesRes.data.created_at),
+        }
+      : null;
+
+    return { replacedBy, replaces };
   }
 
   // INGEST TOKENS

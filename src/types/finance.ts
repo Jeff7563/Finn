@@ -138,12 +138,48 @@ export interface RestoreTransactionResult {
   event_id?: string;
 }
 
+export interface TransactionReplacementEvent {
+  id: string;
+  user_id: string;
+  slip_id: string;
+  old_transaction_id: string;
+  new_transaction_id: string;
+  reason: string;
+  created_at: string;
+}
+
+export interface ReplaceVoidedSlipTransactionInput {
+  old_transaction_id: string;
+  slip_id: string;
+  reason: string;
+  type: TransactionType;
+  amount: number;
+  currency?: string;
+  transaction_date: string;
+  description?: string | null;
+  note?: string | null;
+  from_account_id?: string | null;
+  to_account_id?: string | null;
+  category_id?: string | null;
+  merchant_id?: string | null;
+  person_id?: string | null;
+  reference_number?: string | null;
+}
+
+export interface ReplaceVoidedSlipTransactionResult {
+  success: boolean;
+  transaction: Transaction;
+  event: TransactionReplacementEvent;
+}
+
 export interface TransactionWithRelations extends Transaction {
   from_account?: Account | null;
   to_account?: Account | null;
   person?: Person | null;
   merchant?: Merchant | null;
   category?: Category | null;
+  replacement_event?: TransactionReplacementEvent | null;
+  replaced_by_event?: TransactionReplacementEvent | null;
 }
 
 export interface AccountBalance {

@@ -12,7 +12,13 @@ export type StorageBinaryAction =
   | "prune_completed"
   | "prune_failed"
   | "pin"
-  | "unpin";
+  | "unpin"
+  | "restore_requested"
+  | "restore_completed"
+  | "restore_failed"
+  | "external_missing_detected";
+
+export type SlipBinaryStatus = "available" | "missing" | "pruned" | "metadata_only";
 
 export interface StorageBinaryEvent {
   id: string;
