@@ -39,13 +39,19 @@ import {
   Loader2,
   Ban,
   RotateCcw,
+  RefreshCw,
+  AlertCircle,
 } from "lucide-react";
 import { getSlipSignedPreviewUrlAction } from "@/app/actions/slip-review";
 import { VoidTransactionModal } from "@/components/transactions/VoidTransactionModal";
 import { RestoreTransactionModal } from "@/components/transactions/RestoreTransactionModal";
+import { RestoreSlipBinaryModal } from "@/components/slips/RestoreSlipBinaryModal";
+import { ReplaceSlipTransactionModal } from "@/components/transactions/ReplaceSlipTransactionModal";
+import { Slip } from "@/types/slip";
 
 interface TransactionDetailClientProps {
   transaction: TransactionWithRelations;
+  slip?: Slip | null;
   accounts: Account[];
   categories: Category[];
   people: Person[];
@@ -55,6 +61,7 @@ interface TransactionDetailClientProps {
 
 export function TransactionDetailClient({
   transaction,
+  slip,
   accounts,
   categories,
   people,
@@ -65,31 +72,52 @@ export function TransactionDetailClient({
   const [isEditing, setIsEditing] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [isPreviewModalOpen, setIsPreviewModalOpen] = useState(false);
   const [isLoadingSlip, setIsLoadingSlip] = useState(false);
   const [isVoidModalOpen, setIsVoidModalOpen] = useState(false);
   const [isRestoreModalOpen, setIsRestoreModalOpen] = useState(false);
+  const [isReplaceModalOpen, setIsReplaceModalOpen] = useState(false);
+  const [isRestoreBinaryModalOpen, setIsRestoreBinaryModalOpen] = useState(false);
+  const [isMissingBinary, setIsMissingBinary] = useState(false);
+
+  const activeSlipId =
+    transaction.source_slip_id ||
+    slip?.id ||
+    transaction.replaced_by_event?.slip_id ||
+    transaction.replacement_event?.slip_id;
 
   const isVoided = Boolean(transaction.voided_at);
   const isEvidenceBacked =
     transaction.source !== "manual" ||
     Boolean(transaction.source_slip_id) ||
-    Boolean(transaction.source_document_id);
-  const canDelete = !isVoided && !isEvidenceBacked && !hasVoidHistory;
+    Boolean(transaction.source_document_id) ||
+    Boolean(activeSlipId);
+  const canDelete = !isVoided && !isEvidenceBacked && !hasVoidHistory && !transaction.replacement_event && !transaction.replaced_by_event;
 
   const handleViewSlip = async () => {
-    if (!transaction.source_slip_id) return;
+    if (!activeSlipId) return;
     setIsLoadingSlip(true);
+    setIsMissingBinary(false);
+    setIsPreviewModalOpen(true);
     try {
-      const res = await getSlipSignedPreviewUrlAction(transaction.source_slip_id);
+      const res = await getSlipSignedPreviewUrlAction(activeSlipId);
       if (res.success && res.url) {
         setPreviewUrl(res.url);
+      } else if (
+        res.binaryStatus === "missing" ||
+        res.error?.includes("ไม่พบไฟล์ต้นฉบับในพื้นที่จัดเก็บ")
+      ) {
+        setPreviewUrl(null);
+        setIsMissingBinary(true);
       } else {
         alert(res.error || "ไม่สามารถโหลดภาพสลิปได้");
+        setIsPreviewModalOpen(false);
       }
     } finally {
       setIsLoadingSlip(false);
     }
   };
+
 
   // Edit Action State
   const [editState, updateAction, isUpdating] = useActionState(
@@ -134,6 +162,74 @@ export function TransactionDetailClient({
 
       {/* Main Card */}
       <div className={`bg-surface dark:bg-surface-raised rounded-2xl border border-border shadow-sm overflow-hidden ${isVoided ? "border-rose-200 dark:border-rose-900/50" : ""}`}>
+        {/* Replaced By Banner (When this transaction was replaced by a newer one) */}
+        {transaction.replaced_by_event && (
+          <div className="p-4 bg-indigo-50 dark:bg-indigo-950/40 border-b border-indigo-200 dark:border-indigo-900 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 text-xs">
+            <div className="space-y-1">
+              <div className="flex items-center gap-2 font-semibold text-indigo-800 dark:text-indigo-300">
+                <RefreshCw className="w-4 h-4 text-indigo-600 dark:text-indigo-400 flex-shrink-0" />
+                <span>รายการนี้ถูกแทนที่ด้วยรายการใหม่</span>
+              </div>
+              <p className="text-indigo-700 dark:text-indigo-400">
+                รหัสรายการทดแทน:{" "}
+                <Link
+                  href={`/transactions/${transaction.replaced_by_event.new_transaction_id}`}
+                  className="font-mono font-semibold underline hover:text-indigo-950 dark:hover:text-indigo-200"
+                >
+                  {transaction.replaced_by_event.new_transaction_id.slice(0, 8)}...
+                </Link>{" "}
+                | รหัสสลิป: <span className="font-mono">{transaction.replaced_by_event.slip_id.slice(0, 8)}...</span>
+              </p>
+              {transaction.replaced_by_event.reason && (
+                <p className="text-text-muted text-[11px]">
+                  เหตุผล: {transaction.replaced_by_event.reason}
+                </p>
+              )}
+            </div>
+            <Link
+              href={`/transactions/${transaction.replaced_by_event.new_transaction_id}`}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-surface border border-indigo-200 dark:border-indigo-800 text-indigo-700 dark:text-indigo-300 hover:bg-surface-soft font-semibold text-xs transition-colors flex-shrink-0"
+            >
+              <span>ไปยังรายการทดแทน</span>
+              <ArrowRight className="w-3.5 h-3.5" />
+            </Link>
+          </div>
+        )}
+
+        {/* Replacement Of Banner (When this transaction was created as a replacement for an old voided one) */}
+        {transaction.replacement_event && (
+          <div className="p-4 bg-indigo-50 dark:bg-indigo-950/40 border-b border-indigo-200 dark:border-indigo-900 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 text-xs">
+            <div className="space-y-1">
+              <div className="flex items-center gap-2 font-semibold text-indigo-800 dark:text-indigo-300">
+                <RefreshCw className="w-4 h-4 text-indigo-600 dark:text-indigo-400 flex-shrink-0" />
+                <span>สร้างแทนรายการที่ถูกยกเลิก</span>
+              </div>
+              <p className="text-indigo-700 dark:text-indigo-400">
+                สร้างแทนรายการเดิม:{" "}
+                <Link
+                  href={`/transactions/${transaction.replacement_event.old_transaction_id}`}
+                  className="font-mono font-semibold underline hover:text-indigo-950 dark:hover:text-indigo-200"
+                >
+                  {transaction.replacement_event.old_transaction_id.slice(0, 8)}...
+                </Link>{" "}
+                | รหัสสลิป: <span className="font-mono">{transaction.replacement_event.slip_id.slice(0, 8)}...</span>
+              </p>
+              {transaction.replacement_event.reason && (
+                <p className="text-text-muted text-[11px]">
+                  เหตุผล: {transaction.replacement_event.reason}
+                </p>
+              )}
+            </div>
+            <Link
+              href={`/transactions/${transaction.replacement_event.old_transaction_id}`}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-surface border border-indigo-200 dark:border-indigo-800 text-indigo-700 dark:text-indigo-300 hover:bg-surface-soft font-semibold text-xs transition-colors flex-shrink-0"
+            >
+              <span>ดูรายการเดิม</span>
+              <ArrowRight className="w-3.5 h-3.5" />
+            </Link>
+          </div>
+        )}
+
         {/* Voided Warning Banner */}
         {isVoided && (
           <div className="p-4 bg-rose-50 dark:bg-rose-950/30 border-b border-rose-200 dark:border-rose-900/50 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 text-xs">
@@ -155,8 +251,14 @@ export function TransactionDetailClient({
             </div>
             <button
               type="button"
-              onClick={() => setIsRestoreModalOpen(true)}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-surface border border-border text-text-primary hover:bg-surface-soft font-semibold text-xs transition-colors flex-shrink-0"
+              onClick={() => {
+                if (transaction.replaced_by_event) {
+                  alert("ไม่สามารถคืนรายการนี้ได้ เนื่องจากมีรายการทดแทนที่กำลังใช้งานอยู่ กรุณายกเลิกรายการทดแทนก่อน");
+                  return;
+                }
+                setIsRestoreModalOpen(true);
+              }}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-surface border border-border text-text-primary hover:bg-surface-soft font-semibold text-xs transition-colors flex-shrink-0 disabled:opacity-50"
             >
               <RotateCcw className="w-3.5 h-3.5 text-emerald-600" />
               <span>กู้คืนรายการ</span>
@@ -175,12 +277,24 @@ export function TransactionDetailClient({
                   <span>ยกเลิกแล้ว (Voided)</span>
                 </span>
               )}
+              {transaction.replaced_by_event && (
+                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold bg-indigo-100 text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300">
+                  <RefreshCw className="w-3 h-3" />
+                  <span>ถูกแทนที่แล้ว</span>
+                </span>
+              )}
+              {transaction.replacement_event && (
+                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold bg-indigo-100 text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300">
+                  <RefreshCw className="w-3 h-3" />
+                  <span>รายการทดแทน</span>
+                </span>
+              )}
               <span className="text-xs font-medium text-text-muted">
                 {transaction.source === "slip" || transaction.source === "shortcut"
                   ? "แหล่งที่มา: สลิปธนาคาร"
                   : `ที่มา: ${transaction.source}`}
               </span>
-              {transaction.source_slip_id && (
+              {activeSlipId && (
                 <button
                   type="button"
                   onClick={handleViewSlip}
@@ -206,17 +320,36 @@ export function TransactionDetailClient({
             </div>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap justify-end">
             {isVoided ? (
-              <button
-                type="button"
-                onClick={() => setIsRestoreModalOpen(true)}
-                className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-surface-soft hover:bg-surface-muted border border-border text-xs font-semibold text-text-primary transition-colors"
-                title="กู้คืนรายการนี้"
-              >
-                <RotateCcw className="w-4 h-4 text-emerald-600" />
-                <span>กู้คืนรายการ</span>
-              </button>
+              <>
+                {!transaction.replaced_by_event && activeSlipId && (
+                  <button
+                    type="button"
+                    onClick={() => setIsReplaceModalOpen(true)}
+                    className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold shadow-xs transition-colors"
+                    title="สร้างรายการทดแทนจากสลิปเดิม"
+                  >
+                    <RefreshCw className="w-3.5 h-3.5" />
+                    <span>สร้างรายการทดแทนจากสลิปเดิม</span>
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (transaction.replaced_by_event) {
+                      alert("ไม่สามารถคืนรายการนี้ได้ เนื่องจากมีรายการทดแทนที่กำลังใช้งานอยู่ กรุณายกเลิกรายการทดแทนก่อน");
+                      return;
+                    }
+                    setIsRestoreModalOpen(true);
+                  }}
+                  className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-surface-soft hover:bg-surface-muted border border-border text-xs font-semibold text-text-primary transition-colors disabled:opacity-50"
+                  title="กู้คืนรายการนี้"
+                >
+                  <RotateCcw className="w-4 h-4 text-emerald-600" />
+                  <span>กู้คืนรายการ</span>
+                </button>
+              </>
             ) : !isEditing ? (
               <>
                 <button
@@ -615,11 +748,15 @@ export function TransactionDetailClient({
       </div>
 
       {/* Private Slip Preview Modal */}
-      {previewUrl && (
+      {isPreviewModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/70 backdrop-blur-xs animate-in fade-in">
           <div
             className="fixed inset-0"
-            onClick={() => setPreviewUrl(null)}
+            onClick={() => {
+              setIsPreviewModalOpen(false);
+              setPreviewUrl(null);
+              setIsMissingBinary(false);
+            }}
             aria-hidden="true"
           />
           <div className="relative max-w-lg w-full bg-surface rounded-2xl border border-border shadow-2xl p-4 z-10 space-y-3">
@@ -628,21 +765,95 @@ export function TransactionDetailClient({
                 สลิปธนาคาร (Private Preview)
               </span>
               <button
-                onClick={() => setPreviewUrl(null)}
+                onClick={() => {
+                  setIsPreviewModalOpen(false);
+                  setPreviewUrl(null);
+                  setIsMissingBinary(false);
+                }}
                 className="p-1 text-text-muted hover:text-text-primary rounded-md hover:bg-surface-soft transition-colors"
               >
                 <X className="w-4 h-4" />
               </button>
             </div>
-            <div className="flex items-center justify-center max-h-[75vh] overflow-hidden rounded-xl bg-slate-950">
-              <img
-                src={previewUrl}
-                alt="Slip preview"
-                className="max-h-[70vh] object-contain"
-              />
-            </div>
+
+            {isLoadingSlip && (
+              <div className="py-12 flex flex-col items-center justify-center gap-2 text-text-muted">
+                <Loader2 className="w-6 h-6 animate-spin text-primary" />
+                <span className="text-xs">กำลังตรวจสอบและโหลดหลักฐาน...</span>
+              </div>
+            )}
+
+            {!isLoadingSlip && isMissingBinary && (
+              <div className="py-6 px-4 space-y-4 text-center">
+                <div className="w-12 h-12 mx-auto rounded-full bg-amber-50 dark:bg-amber-950/50 flex items-center justify-center text-amber-600 dark:text-amber-400">
+                  <AlertCircle className="w-6 h-6" />
+                </div>
+                <div className="space-y-1">
+                  <h4 className="text-sm font-semibold text-text-primary">
+                    ไม่พบไฟล์ต้นฉบับในพื้นที่จัดเก็บ
+                  </h4>
+                  <p className="text-xs text-text-muted max-w-sm mx-auto">
+                    ข้อมูลสลิปและรหัสตรวจสอบความถูกต้อง (SHA-256) ยังคงอยู่ในระบบ แต่ไฟล์ภาพต้นฉบับใน Storage สูญหายหรือถูกลบ
+                  </p>
+                </div>
+                {activeSlipId && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsPreviewModalOpen(false);
+                      setIsRestoreBinaryModalOpen(true);
+                    }}
+                    className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-primary hover:bg-primary-hover text-white text-xs font-semibold shadow-xs transition-colors"
+                  >
+                    <ShieldCheck className="w-4 h-4" />
+                    <span>กู้คืนไฟล์หลักฐานเดิม</span>
+                  </button>
+                )}
+              </div>
+            )}
+
+            {!isLoadingSlip && previewUrl && (
+              <div className="flex items-center justify-center max-h-[75vh] overflow-hidden rounded-xl bg-slate-950">
+                <img
+                  src={previewUrl}
+                  alt="Slip preview"
+                  className="max-h-[70vh] object-contain"
+                />
+              </div>
+            )}
           </div>
         </div>
+      )}
+
+      {/* Replace Slip Transaction Modal */}
+      {activeSlipId && (
+        <ReplaceSlipTransactionModal
+          isOpen={isReplaceModalOpen}
+          transaction={transaction}
+          slip={slip}
+          accounts={accounts}
+          categories={categories}
+          merchants={merchants}
+          people={people}
+          onClose={() => setIsReplaceModalOpen(false)}
+          onSuccess={(newTxId) => {
+            setIsReplaceModalOpen(false);
+            router.push(`/transactions/${newTxId}`);
+          }}
+        />
+      )}
+
+      {/* Restore Slip Binary Modal */}
+      {activeSlipId && (
+        <RestoreSlipBinaryModal
+          isOpen={isRestoreBinaryModalOpen}
+          slipId={activeSlipId}
+          onClose={() => setIsRestoreBinaryModalOpen(false)}
+          onSuccess={() => {
+            setIsRestoreBinaryModalOpen(false);
+            handleViewSlip();
+          }}
+        />
       )}
 
       {/* Void Transaction Modal */}
