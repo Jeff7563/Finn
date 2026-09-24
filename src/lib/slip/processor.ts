@@ -14,7 +14,7 @@ import {
 } from "./validation";
 import { DefaultQrDecoder, QrDecoder } from "./qr/decoder";
 import { parseSlipQrPayload } from "./qr/parser";
-import { CompositeSlipParser, VisionSlipParser, VisionProviderDiagnostics } from "./ocr";
+import { CompositeSlipParser, VisionSlipParser, VisionProviderDiagnostics, getVisionTimeoutConfig } from "./ocr";
 import { normalizeBankName } from "./bank-normalization";
 import { matchOwnedAccount } from "./account-match";
 import { matchCounterparty } from "./counterparty-match";
@@ -44,6 +44,26 @@ export interface ReprocessSlipOptions {
   userId: string;
   slipId: string;
   buffer: Buffer;
+}
+
+/**
+ * Maps typed vision error codes to user-facing, non-secret-safe Thai messages.
+ */
+export function getFriendlyVisionErrorMessage(errorCode?: string | null): string {
+  switch (errorCode) {
+    case "VISION_PROVIDER_TIMEOUT":
+      return "ระบบอ่านสลิปตอบกลับช้ากว่ากำหนด กรุณาลองประมวลผลใหม่อีกครั้ง";
+    case "VISION_AUTH_FAILED":
+      return "การยืนยันสิทธิ์กับผู้ให้บริการอ่านสลิปล้มเหลว กรุณาตรวจสอบการตั้งค่า";
+    case "VISION_RATE_LIMITED":
+      return "ระบบอ่านสลิปถูกจำกัดอัตราการเรียกใช้งานชั่วคราว กรุณารอสักครู่แล้วลองใหม่";
+    case "VISION_PROVIDER_UNAVAILABLE":
+      return "ผู้ให้บริการอ่านสลิปไม่พร้อมใช้งานชั่วคราว กรุณาลองใหม่ในภายหลัง";
+    case "VISION_EMPTY_EXTRACTION":
+      return "ไม่สามารถอ่านข้อมูลที่จำเป็นจากภาพสลิปได้";
+    default:
+      return "การประมวลผลสลิปไม่สำเร็จ กรุณาลองใหม่อีกครั้ง";
+  }
 }
 
 export class SlipProcessor {
@@ -268,25 +288,55 @@ export class SlipProcessor {
 
       // Handle failed or materially unusable provider response
       if (newExtractionFailed || !rawExtraction) {
+        const timeoutConfig = getVisionTimeoutConfig();
+        const isTimeout =
+          extractionErrorCode === "VISION_PROVIDER_TIMEOUT" ||
+          Boolean(extractionDiagnostics?.timeout) ||
+          extractionDiagnostics?.errorCode === "VISION_PROVIDER_TIMEOUT";
+
         if (isReprocess && existingExtraction) {
           // Reprocess Quality Gate: Preserve existing extraction completely
+          const safeUserMessage = isTimeout
+            ? "ระบบอ่านสลิปตอบกลับช้ากว่ากำหนด กรุณาลองประมวลผลใหม่อีกครั้ง"
+            : "การประมวลผลใหม่อ่านข้อมูลได้ไม่ครบ จึงคงข้อมูลเดิมไว้";
+
+          const effectiveErrorCode = isTimeout
+            ? "VISION_PROVIDER_TIMEOUT"
+            : extractionErrorCode || "VISION_EMPTY_EXTRACTION";
+
           const diagJson = JSON.stringify({
             parser: slip.parser_version || "v2-vision",
             provider: extractionDiagnostics?.provider || "gemini",
-            primaryModel: extractionDiagnostics?.primaryModel || process.env.GEMINI_MODEL || "gemini-3.5-flash-lite",
-            primaryDurationMs: extractionDiagnostics?.primaryDurationMs,
-            primaryAttempts: extractionDiagnostics?.primaryAttempts,
-            fallbackModel: extractionDiagnostics?.fallbackModel || process.env.GEMINI_FALLBACK_MODEL || "gemini-3.1-flash-lite",
-            fallbackDurationMs: extractionDiagnostics?.fallbackDurationMs,
-            fallbackAttempts: extractionDiagnostics?.fallbackAttempts,
-            model: extractionDiagnostics?.model,
-            httpStatus: extractionDiagnostics?.httpStatus ?? null,
-            attemptCount: extractionDiagnostics?.attemptCount,
-            timeout: extractionDiagnostics?.timeout ?? false,
+            primaryModel:
+              extractionDiagnostics?.primaryModel ||
+              process.env.GEMINI_MODEL ||
+              "gemini-3.5-flash-lite",
+            primaryConfiguredTimeoutMs:
+              extractionDiagnostics?.primaryConfiguredTimeoutMs ??
+              timeoutConfig.primaryTimeoutMs,
+            primaryDurationMs: extractionDiagnostics?.primaryDurationMs ?? 0,
+            primaryAttempts: extractionDiagnostics?.primaryAttempts ?? 0,
+            fallbackModel:
+              extractionDiagnostics?.fallbackModel ||
+              process.env.GEMINI_FALLBACK_MODEL ||
+              "gemini-3.1-flash-lite",
+            fallbackConfiguredTimeoutMs:
+              extractionDiagnostics?.fallbackConfiguredTimeoutMs ??
+              timeoutConfig.fallbackTimeoutMs,
+            fallbackDurationMs: extractionDiagnostics?.fallbackDurationMs ?? 0,
+            fallbackAttempts: extractionDiagnostics?.fallbackAttempts ?? 0,
             fallbackModelUsed: extractionDiagnostics?.fallbackModelUsed ?? false,
-            totalDurationMs: extractionDiagnostics?.totalDurationMs,
-            errorCode: extractionErrorCode || "VISION_EMPTY_EXTRACTION",
-            safeErrorMessage: "การประมวลผลใหม่อ่านข้อมูลได้ไม่ครบ จึงคงข้อมูลเดิมไว้",
+            totalConfiguredDeadlineMs:
+              extractionDiagnostics?.totalConfiguredDeadlineMs ??
+              timeoutConfig.totalDeadlineMs,
+            totalDurationMs: extractionDiagnostics?.totalDurationMs ?? 0,
+            httpStatus: extractionDiagnostics?.httpStatus ?? null,
+            errorCode: effectiveErrorCode,
+            timeoutStage: extractionDiagnostics?.timeoutStage ?? (isTimeout ? "primary" : null),
+            model: extractionDiagnostics?.model,
+            attemptCount: extractionDiagnostics?.attemptCount,
+            timeout: isTimeout,
+            safeErrorMessage: safeUserMessage,
             preservedPrevious: true,
             completenessScore: {
               previous: prevScore,
@@ -298,7 +348,7 @@ export class SlipProcessor {
 
           await DataStore.updateSlipJob(userId, job.id, {
             status: "needs_review",
-            error_code: extractionErrorCode || "VISION_EMPTY_EXTRACTION",
+            error_code: effectiveErrorCode,
             safe_error_message: diagJson,
             finished_at: new Date().toISOString(),
           });
@@ -317,32 +367,59 @@ export class SlipProcessor {
             reviewUrl: `/review?slipId=${slip.id}`,
             extracted: existingExtraction,
             overallConfidence: slip.overall_confidence ?? undefined,
-            warningMessage: "การประมวลผลใหม่อ่านข้อมูลได้ไม่ครบ จึงคงข้อมูลเดิมไว้",
+            warningMessage: safeUserMessage,
             preservedPrevious: true,
             completenessScore: prevScore,
-            errorCode: extractionErrorCode || "VISION_EMPTY_EXTRACTION",
-            errorMessage: "การประมวลผลใหม่อ่านข้อมูลได้ไม่ครบ จึงคงข้อมูลเดิมไว้",
+            errorCode: effectiveErrorCode,
+            errorMessage: safeUserMessage,
           };
         } else {
           // Initial first-time ingestion failure
           const safeError = extractionErrorMessage || "Slip extraction failed";
+          const safeUserMessage = isTimeout
+            ? "ระบบอ่านสลิปตอบกลับช้ากว่ากำหนด กรุณาลองประมวลผลใหม่อีกครั้ง"
+            : safeError;
+          const warningMessage = isTimeout
+            ? "ระบบอ่านสลิปตอบกลับช้ากว่ากำหนด กรุณาลองประมวลผลใหม่อีกครั้ง"
+            : "ระบบอ่านสลิปอัตโนมัติไม่พร้อมใช้งานชั่วคราว";
+
+          const effectiveErrorCode = isTimeout
+            ? "VISION_PROVIDER_TIMEOUT"
+            : extractionErrorCode || "VISION_EXTRACTION_FAILED";
+
           const firstTimeDiag = JSON.stringify({
             parser: slip.parser_version || "v2-vision",
             provider: extractionDiagnostics?.provider || "gemini",
-            primaryModel: extractionDiagnostics?.primaryModel || process.env.GEMINI_MODEL || "gemini-3.5-flash-lite",
-            primaryDurationMs: extractionDiagnostics?.primaryDurationMs,
-            primaryAttempts: extractionDiagnostics?.primaryAttempts,
-            fallbackModel: extractionDiagnostics?.fallbackModel || process.env.GEMINI_FALLBACK_MODEL || "gemini-3.1-flash-lite",
-            fallbackDurationMs: extractionDiagnostics?.fallbackDurationMs,
-            fallbackAttempts: extractionDiagnostics?.fallbackAttempts,
-            model: extractionDiagnostics?.model,
-            httpStatus: extractionDiagnostics?.httpStatus ?? null,
-            attemptCount: extractionDiagnostics?.attemptCount,
-            timeout: extractionDiagnostics?.timeout ?? false,
+            primaryModel:
+              extractionDiagnostics?.primaryModel ||
+              process.env.GEMINI_MODEL ||
+              "gemini-3.5-flash-lite",
+            primaryConfiguredTimeoutMs:
+              extractionDiagnostics?.primaryConfiguredTimeoutMs ??
+              timeoutConfig.primaryTimeoutMs,
+            primaryDurationMs: extractionDiagnostics?.primaryDurationMs ?? 0,
+            primaryAttempts: extractionDiagnostics?.primaryAttempts ?? 0,
+            fallbackModel:
+              extractionDiagnostics?.fallbackModel ||
+              process.env.GEMINI_FALLBACK_MODEL ||
+              "gemini-3.1-flash-lite",
+            fallbackConfiguredTimeoutMs:
+              extractionDiagnostics?.fallbackConfiguredTimeoutMs ??
+              timeoutConfig.fallbackTimeoutMs,
+            fallbackDurationMs: extractionDiagnostics?.fallbackDurationMs ?? 0,
+            fallbackAttempts: extractionDiagnostics?.fallbackAttempts ?? 0,
             fallbackModelUsed: extractionDiagnostics?.fallbackModelUsed ?? false,
-            totalDurationMs: extractionDiagnostics?.totalDurationMs,
-            errorCode: extractionErrorCode || "VISION_EXTRACTION_FAILED",
-            safeErrorMessage: safeError,
+            totalConfiguredDeadlineMs:
+              extractionDiagnostics?.totalConfiguredDeadlineMs ??
+              timeoutConfig.totalDeadlineMs,
+            totalDurationMs: extractionDiagnostics?.totalDurationMs ?? 0,
+            httpStatus: extractionDiagnostics?.httpStatus ?? null,
+            errorCode: effectiveErrorCode,
+            timeoutStage: extractionDiagnostics?.timeoutStage ?? (isTimeout ? "primary" : null),
+            model: extractionDiagnostics?.model,
+            attemptCount: extractionDiagnostics?.attemptCount,
+            timeout: isTimeout,
+            safeErrorMessage: safeUserMessage,
             preservedPrevious: false,
           });
 
@@ -351,7 +428,7 @@ export class SlipProcessor {
           });
           await DataStore.updateSlipJob(userId, job.id, {
             status: "needs_review",
-            error_code: extractionErrorCode || "VISION_EXTRACTION_FAILED",
+            error_code: effectiveErrorCode,
             safe_error_message: firstTimeDiag,
             finished_at: new Date().toISOString(),
           });
@@ -362,9 +439,9 @@ export class SlipProcessor {
             status: "needs_review",
             currency: "THB",
             reviewUrl: `/review?slipId=${slip.id}`,
-            warningMessage: "ระบบอ่านสลิปอัตโนมัติไม่พร้อมใช้งานชั่วคราว",
-            errorCode: extractionErrorCode || "VISION_EXTRACTION_FAILED",
-            errorMessage: safeError,
+            warningMessage,
+            errorCode: effectiveErrorCode,
+            errorMessage: safeUserMessage,
           };
         }
       }

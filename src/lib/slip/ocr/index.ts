@@ -25,3 +25,4 @@ export class CompositeSlipParser implements VisionSlipParser {
 export * from "./types";
 export * from "./synthetic-parser";
 export * from "./ai-vision-parser";
+export * from "./config";

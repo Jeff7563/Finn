@@ -92,9 +92,20 @@ export function ReviewInboxClient({
 
   // Edit Modal State
   const [editingSlip, setEditingSlip] = useState<Slip | null>(null);
-  const [editFormData, setEditFormData] = useState({
+  const [editFormData, setEditFormData] = useState<{
+    type: string;
+    amount: number | string;
+    transaction_date: string;
+    from_account_id: string;
+    to_account_id: string;
+    category_id: string;
+    merchant_id: string;
+    person_id: string;
+    description: string;
+    note: string;
+  }>({
     type: "expense",
-    amount: 0,
+    amount: "",
     transaction_date: "",
     from_account_id: "",
     to_account_id: "",
@@ -114,7 +125,7 @@ export function ReviewInboxClient({
     try {
       const res = await reprocessSlipAction(slipId);
       if (res.success && res.result) {
-        if (res.result.preservedPrevious) {
+        if (res.result.preservedPrevious || res.result.warningMessage) {
           alert(
             res.result.warningMessage ||
               "ประมวลผลใหม่ไม่สำเร็จ — ระบบคงข้อมูลเดิมไว้แล้ว"
@@ -285,7 +296,7 @@ export function ReviewInboxClient({
     setEditingSlip(slip);
     setEditFormData({
       type: defaultType,
-      amount: ext?.amount || 0,
+      amount: typeof ext?.amount === "number" && ext.amount > 0 ? ext.amount : "",
       transaction_date: ext?.transactionDate
         ? canonicalInstantToBangkokDateTimeLocal(ext.transactionDate)
         : canonicalInstantToBangkokDateTimeLocal(new Date()),
@@ -308,6 +319,11 @@ export function ReviewInboxClient({
   const handleSaveEdit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!editingSlip) return;
+
+    if (!editFormData.amount || Number(editFormData.amount) <= 0) {
+      alert("กรุณาระบุจำนวนเงินที่มากกว่าศูนย์");
+      return;
+    }
 
     if (editFormData.type === "expense" && !editFormData.from_account_id) {
       alert("กรุณาระบุบัญชีต้นทางสำหรับรายจ่าย");
@@ -410,7 +426,6 @@ export function ReviewInboxClient({
         <div className="space-y-4">
           {slips.map((slip) => {
             const ext = slip.extracted_json;
-            const amount = ext?.amount || 0;
             const isAmountValid = typeof ext?.amount === "number" && ext.amount > 0;
             const formattedDate = ext?.transactionDate
               ? formatDateTimeThai(ext.transactionDate)
@@ -453,25 +468,37 @@ export function ReviewInboxClient({
                         ? "รายจ่ายที่คาดไว้ (Expense)"
                         : "รอระบุประเภทและบัญชี"}
                     </span>
-                    <MoneyAmount
-                      amount={amount}
-                      type={
-                        directionClass.direction === "internal_transfer"
-                          ? "transfer"
-                          : directionClass.direction === "incoming"
-                          ? "income"
-                          : "expense"
-                      }
-                      currency={ext?.currency || "THB"}
-                      size="xl"
-                    />
+                    {isAmountValid ? (
+                      <MoneyAmount
+                        amount={ext.amount!}
+                        type={
+                          directionClass.direction === "internal_transfer"
+                            ? "transfer"
+                            : directionClass.direction === "incoming"
+                            ? "income"
+                            : "expense"
+                        }
+                        currency={ext?.currency || "THB"}
+                        size="xl"
+                      />
+                    ) : (
+                      <div
+                        data-testid="missing-amount-placeholder"
+                        className="text-xl sm:text-2xl font-semibold tracking-tight text-text-muted py-1"
+                      >
+                        ยังอ่านจำนวนเงินไม่ได้
+                      </div>
+                    )}
                   </div>
 
                   <div className="flex items-center gap-2 flex-wrap">
                     {!isAmountValid && (
-                      <span className="flex items-center gap-1 px-2.5 py-1 rounded-full bg-amber-500/10 border border-amber-500/20 text-[11px] font-medium text-amber-600 dark:text-amber-400">
+                      <span
+                        data-testid="extraction-failed-badge"
+                        className="flex items-center gap-1 px-2.5 py-1 rounded-full bg-amber-500/10 border border-amber-500/20 text-[11px] font-medium text-amber-600 dark:text-amber-400"
+                      >
                         <AlertCircle className="w-3.5 h-3.5" />
-                        <span>อ่านข้อมูลสลิปไม่ครบ</span>
+                        <span>อ่านข้อมูลสลิปไม่สำเร็จ</span>
                       </span>
                     )}
 
@@ -776,12 +803,14 @@ export function ReviewInboxClient({
                   type="number"
                   name="amount"
                   step="0.01"
+                  min="0.01"
                   required
+                  placeholder="0.00"
                   value={editFormData.amount}
                   onChange={(e) =>
                     setEditFormData({
                       ...editFormData,
-                      amount: parseFloat(e.target.value) || 0,
+                      amount: e.target.value === "" ? "" : parseFloat(e.target.value) || 0,
                     })
                   }
                   className="w-full px-3 py-2 rounded-xl bg-surface-soft border border-border text-text-primary font-semibold text-sm focus:outline-hidden focus:ring-1 focus:ring-primary"

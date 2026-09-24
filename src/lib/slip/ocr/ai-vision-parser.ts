@@ -9,6 +9,7 @@ import {
 import { normalizeBankName } from "../bank-normalization";
 import { parseSlipQrPayload } from "../qr/parser";
 import { isMateriallyUnusable } from "../quality-gate";
+import { getVisionTimeoutConfig } from "./config";
 
 const THAI_SLIP_SYSTEM_PROMPT = `You are an expert AI vision system specialized in extracting structured data from Thai bank transfer slips (สลิปโอนเงินธนาคาร).
 Supported banks include: KBank (K PLUS, MAKE by KBank), SCB (SCB EASY), Krungthai (Krungthai NEXT, Paotang), Bangkok Bank (Bualuang mBanking), TTB (TTB Touch), Krungsri (KMA), GSB (MyMo), BAAC, CIMB, UOB, PromptPay, etc.
@@ -76,19 +77,23 @@ interface RawVisionExtraction {
 export interface VisionProviderDiagnostics {
   provider: string;
   primaryModel?: string;
+  primaryConfiguredTimeoutMs?: number;
   primaryDurationMs?: number;
   primaryAttempts?: number;
   fallbackModel?: string;
+  fallbackConfiguredTimeoutMs?: number;
   fallbackDurationMs?: number;
   fallbackAttempts?: number;
-  model?: string;
-  httpStatus?: number | null;
-  attemptCount?: number;
   fallbackModelUsed?: boolean;
-  timeout?: boolean;
+  totalConfiguredDeadlineMs?: number;
   totalDurationMs?: number;
-  errorCode?: string;
-  safeErrorMessage?: string;
+  httpStatus?: number | null;
+  errorCode?: string | null;
+  timeoutStage?: "primary" | "fallback" | "total" | null;
+  model?: string;
+  attemptCount?: number;
+  timeout?: boolean;
+  safeErrorMessage?: string | null;
 }
 
 export class VisionError extends Error {
@@ -129,6 +134,8 @@ export function sanitizeVisionErrorMessage(
   safe = safe.replace(/(Bearer\s+)[a-zA-Z0-9_\-\.]+/gi, "$1[REDACTED]");
   // Redact any Google API key pattern (AIzaSy...)
   safe = safe.replace(/AIzaSy[a-zA-Z0-9_\-]{33}/g, "[REDACTED]");
+  // Redact any OpenAI API key pattern (sk-...)
+  safe = safe.replace(/sk-[a-zA-Z0-9_\-]{20,}/g, "[REDACTED]");
   return safe;
 }
 
@@ -179,6 +186,8 @@ export interface AiVisionParserOptions {
   baseDelays?: number[];
   primaryRetryDelayMs?: number;
   fallbackRetryDelayMs?: number;
+  primaryTimeoutMs?: number;
+  fallbackTimeoutMs?: number;
   primaryAttemptTimeoutMs?: number;
   fallbackReservedBudgetMs?: number;
   attemptTimeoutMs?: number;
@@ -193,12 +202,13 @@ export class AiVisionSlipParser implements VisionSlipParser {
   private primaryRetryDelayMs: number;
   private fallbackRetryDelayMs: number;
   private primaryAttemptTimeoutMs: number;
-  private fallbackReservedBudgetMs: number;
-  private attemptTimeoutMs: number;
+  private fallbackAttemptTimeoutMs: number;
   private totalDeadlineMs: number;
   private sleepFn: (ms: number) => Promise<void>;
+  private lastDiagnostics: VisionProviderDiagnostics | null = null;
 
   constructor(options?: AiVisionParserOptions) {
+    const envConfig = getVisionTimeoutConfig();
     this.primaryModel =
       options?.primaryModel ||
       options?.geminiModel ||
@@ -209,7 +219,7 @@ export class AiVisionSlipParser implements VisionSlipParser {
       options?.geminiFallbackModel ||
       process.env.GEMINI_FALLBACK_MODEL ||
       "gemini-3.1-flash-lite";
-    this.maxAttempts = options?.maxAttempts ?? 2;
+    this.maxAttempts = options?.maxAttempts ?? envConfig.maxAttempts;
     const isTest =
       process.env.VITEST === "true" ||
       process.env.NODE_ENV === "test" ||
@@ -219,14 +229,33 @@ export class AiVisionSlipParser implements VisionSlipParser {
     this.fallbackRetryDelayMs =
       options?.fallbackRetryDelayMs ?? (isTest ? 5 : 400);
     this.primaryAttemptTimeoutMs =
-      options?.primaryAttemptTimeoutMs ?? (options?.attemptTimeoutMs ? Math.min(options.attemptTimeoutMs, 3500) : 3500);
-    this.fallbackReservedBudgetMs =
-      options?.fallbackReservedBudgetMs ?? 4000;
-    this.attemptTimeoutMs = options?.attemptTimeoutMs ?? 5000;
-    this.totalDeadlineMs = options?.totalDeadlineMs ?? 12000;
+      options?.primaryTimeoutMs ??
+      options?.primaryAttemptTimeoutMs ??
+      envConfig.primaryTimeoutMs;
+    this.fallbackAttemptTimeoutMs =
+      options?.fallbackTimeoutMs ??
+      options?.attemptTimeoutMs ??
+      envConfig.fallbackTimeoutMs;
+    this.totalDeadlineMs =
+      options?.totalDeadlineMs ?? envConfig.totalDeadlineMs;
     this.sleepFn =
       options?.sleepFn ||
       ((ms: number) => new Promise((resolve) => setTimeout(resolve, ms)));
+  }
+
+  public getConfiguredTimeouts() {
+    return {
+      primaryTimeoutMs: this.primaryAttemptTimeoutMs,
+      fallbackTimeoutMs: this.fallbackAttemptTimeoutMs,
+      totalDeadlineMs: this.totalDeadlineMs,
+      maxAttempts: this.maxAttempts,
+      primaryModel: this.primaryModel,
+      fallbackModel: this.fallbackModel,
+    };
+  }
+
+  public getDiagnostics(): VisionProviderDiagnostics | null {
+    return this.lastDiagnostics;
   }
 
   async parse(input: SlipVisionInput): Promise<SlipExtraction> {
@@ -310,43 +339,92 @@ export class AiVisionSlipParser implements VisionSlipParser {
     let fallbackDurationMs = 0;
     let fallbackAttempts = 0;
     let fallbackModelUsed = false;
+    let timeoutStage: "primary" | "fallback" | "total" | null = null;
 
-    // 1. Try Primary Model (gemini-3.5-flash-lite) with retry for transient errors
+    const buildDiagnostics = (overrides?: Partial<VisionProviderDiagnostics>): VisionProviderDiagnostics => {
+      const elapsed = Date.now() - startTime;
+      return {
+        provider: "gemini",
+        primaryModel: this.primaryModel,
+        primaryConfiguredTimeoutMs: this.primaryAttemptTimeoutMs,
+        primaryDurationMs,
+        primaryAttempts,
+        fallbackModel: this.fallbackModel,
+        fallbackConfiguredTimeoutMs: this.fallbackAttemptTimeoutMs,
+        fallbackDurationMs,
+        fallbackAttempts,
+        fallbackModelUsed,
+        totalConfiguredDeadlineMs: this.totalDeadlineMs,
+        totalDurationMs: elapsed,
+        httpStatus: overrides?.httpStatus !== undefined ? overrides.httpStatus : (lastError?.httpStatus ?? null),
+        errorCode: overrides?.errorCode !== undefined ? overrides.errorCode : (lastError?.code || "VISION_PROVIDER_UNAVAILABLE"),
+        timeoutStage: overrides?.timeoutStage !== undefined ? overrides.timeoutStage : timeoutStage,
+        model: fallbackModelUsed ? this.fallbackModel : this.primaryModel,
+        attemptCount: primaryAttempts + fallbackAttempts,
+        timeout: overrides?.timeoutStage
+          ? true
+          : (timeoutStage !== null || lastError?.code === "VISION_PROVIDER_TIMEOUT"),
+        safeErrorMessage: overrides?.safeErrorMessage !== undefined ? overrides.safeErrorMessage : (lastError?.diagnostics?.safeErrorMessage || lastError?.message),
+      };
+    };
+
+    // 0. Check initial deadline
+    if (Date.now() - startTime >= this.totalDeadlineMs) {
+      timeoutStage = "total";
+      const diag = buildDiagnostics({ timeoutStage: "total", errorCode: "VISION_PROVIDER_TIMEOUT" });
+      throw new VisionError(
+        "Vision request deadline exceeded",
+        "VISION_PROVIDER_TIMEOUT",
+        null,
+        diag
+      );
+    }
+
+    // 1. Try Primary Model (gemini-3.5-flash-lite)
     const primaryStart = Date.now();
     try {
+      const remainingForPrimary = this.totalDeadlineMs - (Date.now() - startTime);
+      if (remainingForPrimary <= 0) {
+        timeoutStage = "total";
+        throw new VisionError("Vision request deadline exceeded", "VISION_PROVIDER_TIMEOUT");
+      }
+      const primaryTimeout = Math.min(this.primaryAttemptTimeoutMs, remainingForPrimary);
+
       const primaryResult = await this.callGeminiModel({
         model: this.primaryModel,
         input,
         apiKey,
         isFallback: false,
-        maxAttemptTimeoutMs: this.primaryAttemptTimeoutMs, // max 3.5s
+        maxAttemptTimeoutMs: primaryTimeout,
         retryDelayMs: this.primaryRetryDelayMs,
         startTime,
-        reserveForFallbackMs: this.fallbackReservedBudgetMs, // reserve at least 4s
         allowTimeoutRetry: false, // on timeout, DO NOT retry; switch directly to fallback
       });
       primaryDurationMs = Date.now() - primaryStart;
       primaryAttempts = primaryResult.attempts;
+      this.lastDiagnostics = buildDiagnostics({
+        errorCode: null,
+        timeoutStage: null,
+        safeErrorMessage: null,
+      });
       return primaryResult.data;
     } catch (err: unknown) {
       primaryDurationMs = Date.now() - primaryStart;
       if (err instanceof VisionError) {
         lastError = err;
         primaryAttempts = err.diagnostics?.attemptCount ?? 1;
+        if (err.code === "VISION_PROVIDER_TIMEOUT") {
+          timeoutStage = "primary";
+        }
         // Never fallback to another model for authentication/permission errors (401/403) or client 400
         if (err.code === "VISION_AUTH_FAILED" || err.httpStatus === 400) {
-          err.diagnostics = {
-            ...err.diagnostics,
-            provider: "gemini",
-            primaryModel: this.primaryModel,
-            primaryDurationMs,
-            primaryAttempts,
-            fallbackModel: this.fallbackModel,
-            fallbackDurationMs: 0,
-            fallbackAttempts: 0,
-            totalDurationMs: primaryDurationMs,
-            fallbackModelUsed: false,
-          };
+          const authDiag = buildDiagnostics({
+            httpStatus: err.httpStatus ?? null,
+            errorCode: err.code,
+            timeoutStage: null,
+          });
+          this.lastDiagnostics = authDiag;
+          err.diagnostics = authDiag;
           throw err;
         }
       } else {
@@ -363,69 +441,65 @@ export class AiVisionSlipParser implements VisionSlipParser {
     const elapsedBeforeFallback = Date.now() - startTime;
     const remainingForFallback = this.totalDeadlineMs - elapsedBeforeFallback;
     if (remainingForFallback <= 0) {
-      const diag: VisionProviderDiagnostics = {
-        provider: "gemini",
-        primaryModel: this.primaryModel,
-        primaryDurationMs,
-        primaryAttempts,
-        fallbackModel: this.fallbackModel,
-        fallbackDurationMs: 0,
-        fallbackAttempts: 0,
-        model: this.primaryModel,
-        httpStatus: lastError?.httpStatus ?? null,
-        attemptCount: primaryAttempts,
-        fallbackModelUsed: false,
-        timeout: lastError?.code === "VISION_PROVIDER_TIMEOUT",
-        totalDurationMs: elapsedBeforeFallback,
-        errorCode: "VISION_PROVIDER_UNAVAILABLE",
+      const finalStage = timeoutStage || "total";
+      const diag = buildDiagnostics({
+        timeoutStage: finalStage,
+        errorCode: "VISION_PROVIDER_TIMEOUT",
         safeErrorMessage: "Overall vision deadline reached before fallback could be attempted",
-      };
+      });
+      this.lastDiagnostics = diag;
       throw new VisionError(
         "Vision request deadline exceeded",
-        "VISION_PROVIDER_UNAVAILABLE",
+        "VISION_PROVIDER_TIMEOUT",
         lastError?.httpStatus ?? null,
         diag
       );
     }
 
-    // 2. Try Fallback Model (gemini-3.1-flash-lite) if primary model was unavailable
+    // 2. Try Fallback Model (gemini-3.1-flash-lite) if primary model failed/timed out
     if (this.fallbackModel && this.fallbackModel !== this.primaryModel) {
       fallbackModelUsed = true;
       const fallbackStart = Date.now();
       try {
+        const fallbackTimeout = Math.min(this.fallbackAttemptTimeoutMs, remainingForFallback);
         const fallbackResult = await this.callGeminiModel({
           model: this.fallbackModel,
           input,
           apiKey,
           isFallback: true,
-          // Reserve at least 4s, up to remaining budget (capped at 5s)
-          maxAttemptTimeoutMs: Math.max(10, Math.min(5000, remainingForFallback)),
+          maxAttemptTimeoutMs: fallbackTimeout,
           retryDelayMs: this.fallbackRetryDelayMs,
           startTime,
-          reserveForFallbackMs: 0,
           allowTimeoutRetry: false,
         });
         fallbackDurationMs = Date.now() - fallbackStart;
         fallbackAttempts = fallbackResult.attempts;
+        this.lastDiagnostics = buildDiagnostics({
+          errorCode: null,
+          timeoutStage: null,
+          safeErrorMessage: null,
+        });
         return fallbackResult.data;
       } catch (err: unknown) {
         fallbackDurationMs = Date.now() - fallbackStart;
         if (err instanceof VisionError) {
           lastError = err;
           fallbackAttempts = err.diagnostics?.attemptCount ?? 1;
+          if (err.code === "VISION_PROVIDER_TIMEOUT") {
+            if (Date.now() - startTime >= this.totalDeadlineMs) {
+              timeoutStage = "total";
+            } else {
+              timeoutStage = "fallback";
+            }
+          }
           if (err.code === "VISION_AUTH_FAILED" || err.httpStatus === 400) {
-            err.diagnostics = {
-              ...err.diagnostics,
-              provider: "gemini",
-              primaryModel: this.primaryModel,
-              primaryDurationMs,
-              primaryAttempts,
-              fallbackModel: this.fallbackModel,
-              fallbackDurationMs,
-              fallbackAttempts,
-              totalDurationMs: Date.now() - startTime,
-              fallbackModelUsed: true,
-            };
+            const authDiag = buildDiagnostics({
+              httpStatus: err.httpStatus ?? null,
+              errorCode: err.code,
+              timeoutStage: null,
+            });
+            this.lastDiagnostics = authDiag;
+            err.diagnostics = authDiag;
             throw err;
           }
         } else {
@@ -440,24 +514,17 @@ export class AiVisionSlipParser implements VisionSlipParser {
     }
 
     // Both primary and fallback Gemini attempts failed
-    const finalElapsed = Date.now() - startTime;
-    const finalDiag: VisionProviderDiagnostics = {
-      provider: "gemini",
-      primaryModel: this.primaryModel,
-      primaryDurationMs,
-      primaryAttempts,
-      fallbackModel: this.fallbackModel,
-      fallbackDurationMs,
-      fallbackAttempts,
-      model: lastError?.diagnostics?.model || (fallbackModelUsed ? this.fallbackModel : this.primaryModel),
-      httpStatus: lastError?.httpStatus ?? null,
-      attemptCount: primaryAttempts + fallbackAttempts,
-      fallbackModelUsed,
-      timeout: lastError?.diagnostics?.timeout ?? (lastError?.code === "VISION_PROVIDER_TIMEOUT"),
-      totalDurationMs: finalElapsed,
+    const totalElapsed = Date.now() - startTime;
+    if (totalElapsed >= this.totalDeadlineMs && !timeoutStage) {
+      timeoutStage = "total";
+    }
+
+    const finalDiag = buildDiagnostics({
       errorCode: lastError?.code || "VISION_PROVIDER_UNAVAILABLE",
+      timeoutStage,
       safeErrorMessage: lastError?.diagnostics?.safeErrorMessage || lastError?.message,
-    };
+    });
+    this.lastDiagnostics = finalDiag;
 
     if (lastError) {
       lastError.diagnostics = finalDiag;
@@ -466,7 +533,7 @@ export class AiVisionSlipParser implements VisionSlipParser {
 
     throw new VisionError(
       "All Gemini models failed",
-      "VISION_PROVIDER_UNAVAILABLE",
+      finalDiag.errorCode || "VISION_PROVIDER_UNAVAILABLE",
       null,
       finalDiag
     );
@@ -483,7 +550,6 @@ export class AiVisionSlipParser implements VisionSlipParser {
     maxAttemptTimeoutMs: number;
     retryDelayMs: number;
     startTime: number;
-    reserveForFallbackMs: number;
     allowTimeoutRetry: boolean;
   }): Promise<{ data: RawVisionExtraction; attempts: number }> {
     const {
@@ -494,7 +560,6 @@ export class AiVisionSlipParser implements VisionSlipParser {
       maxAttemptTimeoutMs,
       retryDelayMs,
       startTime,
-      reserveForFallbackMs,
       allowTimeoutRetry,
     } = params;
 
@@ -535,27 +600,34 @@ export class AiVisionSlipParser implements VisionSlipParser {
         const diag: VisionProviderDiagnostics = {
           provider: "gemini",
           primaryModel: this.primaryModel,
+          primaryConfiguredTimeoutMs: this.primaryAttemptTimeoutMs,
+          primaryDurationMs: isFallback ? 0 : elapsedBefore,
+          primaryAttempts: isFallback ? 1 : attempt,
           fallbackModel: this.fallbackModel,
-          model,
-          httpStatus: lastStatus,
-          attemptCount: attempt,
+          fallbackConfiguredTimeoutMs: this.fallbackAttemptTimeoutMs,
+          fallbackDurationMs: isFallback ? elapsedBefore : 0,
+          fallbackAttempts: isFallback ? attempt : 0,
           fallbackModelUsed: isFallback,
-          timeout: isTimeout,
+          totalConfiguredDeadlineMs: this.totalDeadlineMs,
           totalDurationMs: elapsedBefore,
-          errorCode: "VISION_PROVIDER_UNAVAILABLE",
+          httpStatus: lastStatus,
+          errorCode: "VISION_PROVIDER_TIMEOUT",
+          timeoutStage: "total",
+          model,
+          attemptCount: attempt,
+          timeout: true,
           safeErrorMessage: "Overall vision deadline reached",
         };
         throw new VisionError(
           `Gemini request deadline exceeded on model ${model}`,
-          "VISION_PROVIDER_UNAVAILABLE",
+          "VISION_PROVIDER_TIMEOUT",
           lastStatus,
           diag
         );
       }
 
-      // Compute attempt timeout: must respect reserveForFallbackMs for primary model
-      const availableBudget = Math.max(10, remainingTotal - reserveForFallbackMs);
-      const timeoutMs = Math.min(maxAttemptTimeoutMs, availableBudget);
+      // Compute attempt timeout: must respect remaining total budget
+      const timeoutMs = Math.max(10, Math.min(maxAttemptTimeoutMs, remainingTotal));
 
       const controller = new AbortController();
       const timeoutId = setTimeout(() => {
@@ -586,20 +658,34 @@ export class AiVisionSlipParser implements VisionSlipParser {
         }
 
         const elapsedNow = Date.now() - startTime;
+        const isTotalDeadline = elapsedNow >= this.totalDeadlineMs;
+        const stage: "primary" | "fallback" | "total" = isTotalDeadline
+          ? "total"
+          : isFallback
+          ? "fallback"
+          : "primary";
 
         // If it was a timeout, DO NOT RETRY THIS MODEL (switch to fallback directly!)
         if (isTimeout && !allowTimeoutRetry) {
           const diag: VisionProviderDiagnostics = {
             provider: "gemini",
             primaryModel: this.primaryModel,
+            primaryConfiguredTimeoutMs: this.primaryAttemptTimeoutMs,
+            primaryDurationMs: isFallback ? 0 : elapsedNow,
+            primaryAttempts: isFallback ? 1 : attempt,
             fallbackModel: this.fallbackModel,
-            model,
-            httpStatus: null,
-            attemptCount: attempt,
+            fallbackConfiguredTimeoutMs: this.fallbackAttemptTimeoutMs,
+            fallbackDurationMs: isFallback ? elapsedNow : 0,
+            fallbackAttempts: isFallback ? attempt : 0,
             fallbackModelUsed: isFallback,
-            timeout: true,
+            totalConfiguredDeadlineMs: this.totalDeadlineMs,
             totalDurationMs: elapsedNow,
+            httpStatus: null,
             errorCode: "VISION_PROVIDER_TIMEOUT",
+            timeoutStage: stage,
+            model,
+            attemptCount: attempt,
+            timeout: true,
             safeErrorMessage: lastErrorText,
           };
           throw new VisionError(
@@ -610,12 +696,9 @@ export class AiVisionSlipParser implements VisionSlipParser {
           );
         }
 
-        // For non-timeout network errors: check if retry is allowed and fallback budget is intact
+        // For non-timeout network errors: check if retry is allowed and budget permits
         const remainingAfterDelay = this.totalDeadlineMs - elapsedNow - (retryDelayMs + 200);
-        if (
-          attempt < this.maxAttempts &&
-          remainingAfterDelay >= reserveForFallbackMs
-        ) {
+        if (attempt < this.maxAttempts && remainingAfterDelay > 0) {
           const jitter = Math.floor(Math.random() * (retryDelayMs * 0.2));
           await this.sleepFn(retryDelayMs + jitter);
           continue;
@@ -627,14 +710,21 @@ export class AiVisionSlipParser implements VisionSlipParser {
         const diag: VisionProviderDiagnostics = {
           provider: "gemini",
           primaryModel: this.primaryModel,
+          primaryConfiguredTimeoutMs: this.primaryAttemptTimeoutMs,
+          primaryDurationMs: isFallback ? 0 : elapsedNow,
+          primaryAttempts: isFallback ? 1 : attempt,
           fallbackModel: this.fallbackModel,
-          model,
+          fallbackConfiguredTimeoutMs: this.fallbackAttemptTimeoutMs,
+          fallbackDurationMs: isFallback ? elapsedNow : 0,
+          fallbackAttempts: isFallback ? attempt : 0,
+          fallbackModelUsed: isFallback,
+          totalConfiguredDeadlineMs: this.totalDeadlineMs,
+          totalDurationMs: elapsedNow,
           httpStatus: null,
           attemptCount: attempt,
-          fallbackModelUsed: isFallback,
           timeout: isTimeout,
-          totalDurationMs: elapsedNow,
           errorCode: errCode,
+          timeoutStage: isTimeout ? stage : null,
           safeErrorMessage: lastErrorText,
         };
         throw new VisionError(
@@ -667,14 +757,22 @@ export class AiVisionSlipParser implements VisionSlipParser {
         const diag: VisionProviderDiagnostics = {
           provider: "gemini",
           primaryModel: this.primaryModel,
+          primaryConfiguredTimeoutMs: this.primaryAttemptTimeoutMs,
+          primaryDurationMs: isFallback ? 0 : elapsedNow,
+          primaryAttempts: isFallback ? 1 : attempt,
           fallbackModel: this.fallbackModel,
+          fallbackConfiguredTimeoutMs: this.fallbackAttemptTimeoutMs,
+          fallbackDurationMs: isFallback ? elapsedNow : 0,
+          fallbackAttempts: isFallback ? attempt : 0,
+          fallbackModelUsed: isFallback,
+          totalConfiguredDeadlineMs: this.totalDeadlineMs,
+          totalDurationMs: elapsedNow,
           model,
           httpStatus: res.status,
           attemptCount: attempt,
-          fallbackModelUsed: isFallback,
           timeout: false,
-          totalDurationMs: elapsedNow,
           errorCode: "VISION_AUTH_FAILED",
+          timeoutStage: null,
           safeErrorMessage: `Authentication failed (${res.status})`,
         };
         throw new VisionError(
@@ -690,14 +788,22 @@ export class AiVisionSlipParser implements VisionSlipParser {
         const diag: VisionProviderDiagnostics = {
           provider: "gemini",
           primaryModel: this.primaryModel,
+          primaryConfiguredTimeoutMs: this.primaryAttemptTimeoutMs,
+          primaryDurationMs: isFallback ? 0 : elapsedNow,
+          primaryAttempts: isFallback ? 1 : attempt,
           fallbackModel: this.fallbackModel,
+          fallbackConfiguredTimeoutMs: this.fallbackAttemptTimeoutMs,
+          fallbackDurationMs: isFallback ? elapsedNow : 0,
+          fallbackAttempts: isFallback ? attempt : 0,
+          fallbackModelUsed: isFallback,
+          totalConfiguredDeadlineMs: this.totalDeadlineMs,
+          totalDurationMs: elapsedNow,
           model,
           httpStatus: 404,
           attemptCount: attempt,
-          fallbackModelUsed: isFallback,
           timeout: false,
-          totalDurationMs: elapsedNow,
           errorCode: "VISION_PROVIDER_UNAVAILABLE",
+          timeoutStage: null,
           safeErrorMessage: `Model ${model} not found (404)`,
         };
         throw new VisionError(
@@ -724,11 +830,8 @@ export class AiVisionSlipParser implements VisionSlipParser {
         delay += jitter;
 
         const remainingAfterDelay = this.totalDeadlineMs - elapsedNow - delay;
-        // Only retry if attempts remain AND fallback reserved budget is preserved!
-        if (
-          attempt < this.maxAttempts &&
-          remainingAfterDelay >= reserveForFallbackMs
-        ) {
+        // Only retry if attempts remain AND deadline permits
+        if (attempt < this.maxAttempts && remainingAfterDelay > 0) {
           await this.sleepFn(delay);
           continue;
         }
@@ -737,14 +840,22 @@ export class AiVisionSlipParser implements VisionSlipParser {
         const diag: VisionProviderDiagnostics = {
           provider: "gemini",
           primaryModel: this.primaryModel,
+          primaryConfiguredTimeoutMs: this.primaryAttemptTimeoutMs,
+          primaryDurationMs: isFallback ? 0 : elapsedNow,
+          primaryAttempts: isFallback ? 1 : attempt,
           fallbackModel: this.fallbackModel,
+          fallbackConfiguredTimeoutMs: this.fallbackAttemptTimeoutMs,
+          fallbackDurationMs: isFallback ? elapsedNow : 0,
+          fallbackAttempts: isFallback ? attempt : 0,
+          fallbackModelUsed: isFallback,
+          totalConfiguredDeadlineMs: this.totalDeadlineMs,
+          totalDurationMs: elapsedNow,
           model,
           httpStatus: res.status,
           attemptCount: attempt,
-          fallbackModelUsed: isFallback,
           timeout: false,
-          totalDurationMs: elapsedNow,
           errorCode,
+          timeoutStage: null,
           safeErrorMessage: `Provider error (${res.status})`,
         };
         throw new VisionError(
@@ -759,14 +870,22 @@ export class AiVisionSlipParser implements VisionSlipParser {
       const diag: VisionProviderDiagnostics = {
         provider: "gemini",
         primaryModel: this.primaryModel,
+        primaryConfiguredTimeoutMs: this.primaryAttemptTimeoutMs,
+        primaryDurationMs: isFallback ? 0 : elapsedNow,
+        primaryAttempts: isFallback ? 1 : attempt,
         fallbackModel: this.fallbackModel,
+        fallbackConfiguredTimeoutMs: this.fallbackAttemptTimeoutMs,
+        fallbackDurationMs: isFallback ? elapsedNow : 0,
+        fallbackAttempts: isFallback ? attempt : 0,
+        fallbackModelUsed: isFallback,
+        totalConfiguredDeadlineMs: this.totalDeadlineMs,
+        totalDurationMs: elapsedNow,
         model,
         httpStatus: res.status,
         attemptCount: attempt,
-        fallbackModelUsed: isFallback,
         timeout: false,
-        totalDurationMs: elapsedNow,
         errorCode: "VISION_PROVIDER_UNAVAILABLE",
+        timeoutStage: null,
         safeErrorMessage: `Client error (${res.status})`,
       };
       throw new VisionError(
@@ -831,14 +950,60 @@ export class AiVisionSlipParser implements VisionSlipParser {
       temperature: 0.1,
     };
 
-    const res = await fetch(url, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(payload),
-    });
+    const startTime = Date.now();
+    const timeoutMs = Math.min(this.primaryAttemptTimeoutMs, this.totalDeadlineMs);
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+    let res: Response;
+    try {
+      res = await fetch(url, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(payload),
+        signal: controller.signal,
+      });
+    } catch (fetchErr: unknown) {
+      clearTimeout(timeoutId);
+      const isAbort =
+        controller.signal.aborted ||
+        (fetchErr instanceof Error && fetchErr.name === "AbortError");
+      const elapsed = Date.now() - startTime;
+      const diag: VisionProviderDiagnostics = {
+        provider: "openai",
+        primaryModel: model,
+        primaryConfiguredTimeoutMs: this.primaryAttemptTimeoutMs,
+        primaryDurationMs: elapsed,
+        primaryAttempts: 1,
+        fallbackModel: model,
+        fallbackConfiguredTimeoutMs: 0,
+        fallbackDurationMs: 0,
+        fallbackAttempts: 0,
+        fallbackModelUsed: false,
+        totalConfiguredDeadlineMs: this.totalDeadlineMs,
+        totalDurationMs: elapsed,
+        httpStatus: null,
+        errorCode: isAbort ? "VISION_PROVIDER_TIMEOUT" : "VISION_PROVIDER_UNAVAILABLE",
+        timeoutStage: isAbort ? "primary" : null,
+        model,
+        attemptCount: 1,
+        timeout: isAbort,
+        safeErrorMessage: isAbort ? `OpenAI timed out after ${timeoutMs}ms` : "OpenAI fetch failed",
+      };
+      throw new VisionError(
+        diag.safeErrorMessage || "OpenAI error",
+        diag.errorCode || "VISION_PROVIDER_UNAVAILABLE",
+        null,
+        diag
+      );
+    } finally {
+      clearTimeout(timeoutId);
+    }
+
+    const elapsed = Date.now() - startTime;
 
     if (!res.ok) {
       const errText = await res.text().catch(() => "");
@@ -846,9 +1011,24 @@ export class AiVisionSlipParser implements VisionSlipParser {
       const errorCode = classifyVisionErrorCode(res.status, safeErrText);
       const diag: VisionProviderDiagnostics = {
         provider: "openai",
-        model,
+        primaryModel: model,
+        primaryConfiguredTimeoutMs: this.primaryAttemptTimeoutMs,
+        primaryDurationMs: elapsed,
+        primaryAttempts: 1,
+        fallbackModel: model,
+        fallbackConfiguredTimeoutMs: 0,
+        fallbackDurationMs: 0,
+        fallbackAttempts: 0,
+        fallbackModelUsed: false,
+        totalConfiguredDeadlineMs: this.totalDeadlineMs,
+        totalDurationMs: elapsed,
         httpStatus: res.status,
         errorCode,
+        timeoutStage: null,
+        model,
+        attemptCount: 1,
+        timeout: false,
+        safeErrorMessage: `OpenAI API error (${res.status})`,
       };
       throw new VisionError(
         `OpenAI API error (${res.status}): ${safeErrText}`,
