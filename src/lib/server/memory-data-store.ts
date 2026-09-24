@@ -583,13 +583,15 @@ export const MemoryDataStore: IDataStore = {
       );
     }
 
-    // Idempotency: if an active transaction for this source_slip_id was already created, return it
+    // Invariant: at most one active transaction per source_slip_id
     if (data.source_slip_id) {
-      const existing = dbState.transactions.find(
+      const activeExisting = dbState.transactions.find(
         (t) => !t.voided_at && t.source_slip_id === data.source_slip_id && t.user_id === userId
       );
-      if (existing) {
-        return existing;
+      if (activeExisting) {
+        throw new Error(
+          'duplicate key value violates unique constraint "idx_transactions_source_slip_id_unique"'
+        );
       }
     }
 
@@ -2058,9 +2060,9 @@ export const MemoryDataStore: IDataStore = {
       }
     }
 
-    // 2. Idempotency Tier 2: Check if transaction already exists for source_slip_id
+    // 2. Idempotency Tier 2: Check if transaction already exists for source_slip_id (ACTIVE only)
     const existingBySlip = dbState.transactions.find(
-      (t) => t.source_slip_id === input.slipId && t.user_id === userId
+      (t) => !t.voided_at && t.source_slip_id === input.slipId && t.user_id === userId
     );
     if (existingBySlip) {
       slip.status = "created";
