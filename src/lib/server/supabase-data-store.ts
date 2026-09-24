@@ -1068,17 +1068,20 @@ export class SupabaseDataStoreImpl implements IDataStore {
     assertUserId(userId);
     const client = await this.getClient(userId);
 
-    // Idempotency: if transaction for this source_slip_id was already created, return it
+    // Invariant: at most one active transaction per source_slip_id
     if (data.source_slip_id) {
       const { data: existing } = await client
         .from("transactions")
         .select()
         .eq("user_id", userId)
         .eq("source_slip_id", data.source_slip_id)
+        .is("voided_at", null)
         .maybeSingle();
 
       if (existing) {
-        return mapTransaction(existing);
+        throw new Error(
+          'duplicate key value violates unique constraint "idx_transactions_source_slip_id_unique"'
+        );
       }
     }
 
