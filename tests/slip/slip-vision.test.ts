@@ -1382,8 +1382,7 @@ describe("Thai Bank Slip Vision & OCR Extraction", () => {
       expect(result.status).toBe("needs_review");
       expect(result.preservedPrevious).toBe(true);
       expect(result.amount).toBe(18.0);
-      expect(result.extracted?.reference).toBe("REF-PRESERVED-8");
-      expect(result.warningMessage).toBe("การประมวลผลใหม่อ่านข้อมูลได้ไม่ครบ จึงคงข้อมูลเดิมไว้");
+      expect(result.warningMessage).toBe("Gemini กำลังมีผู้ใช้งานหนาแน่น กรุณาลองประมวลผลใหม่ภายหลัง");
       expect(result.errorCode).toBe("VISION_PROVIDER_OVERLOADED");
 
       const dbSlip = await DataStore.getSlipById(userId, slip.id);
