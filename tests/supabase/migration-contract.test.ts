@@ -117,3 +117,63 @@ describe("Migration Contract Tests: 20260924000000_slip_replacement_and_binary_r
     expect(sqlContent).toContain("14. storage_binary_events action check includes restore actions");
   });
 });
+
+describe("Migration Contract Tests: 20260924000001_source_slip_active_uniqueness.sql", () => {
+  const hotfixPath = path.resolve(
+    process.cwd(),
+    "supabase/migrations/20260924000001_source_slip_active_uniqueness.sql"
+  );
+  const hotfixSql = fs.readFileSync(hotfixPath, "utf-8");
+
+  it("hotfix migration file exists and is wrapped in an explicit transaction", () => {
+    expect(fs.existsSync(hotfixPath)).toBe(true);
+    expect(hotfixSql).toMatch(/^\s*BEGIN;/m);
+    expect(hotfixSql).toMatch(/COMMIT;\s*$/m);
+  });
+
+  it("drops old lifetime-unique index idx_transactions_source_slip_id_unique", () => {
+    expect(hotfixSql).toContain("DROP INDEX IF EXISTS public.idx_transactions_source_slip_id_unique;");
+  });
+
+  it("creates active-only unique index with predicate (source_slip_id IS NOT NULL AND voided_at IS NULL)", () => {
+    expect(hotfixSql).toMatch(
+      /CREATE\s+UNIQUE\s+INDEX\s+idx_transactions_source_slip_id_unique\s+ON\s+public\.transactions\s*\(\s*source_slip_id\s*\)\s+WHERE\s+source_slip_id\s+IS\s+NOT\s+NULL\s+AND\s+voided_at\s+IS\s+NULL;/i
+    );
+  });
+
+  it("updates confirm_slip_transaction RPC with active-only source_slip_id fallback query", () => {
+    expect(hotfixSql).toContain("CREATE OR REPLACE FUNCTION public.confirm_slip_transaction");
+    expect(hotfixSql).toMatch(/WHERE\s+source_slip_id\s*=\s*p_slip_id\s+AND\s+user_id\s*=\s*p_user_id\s+AND\s+voided_at\s+IS\s+NULL/i);
+    expect(hotfixSql).toMatch(/ORDER\s+BY\s+created_at\s+DESC\s+LIMIT\s+1/i);
+  });
+
+  it("preserves canonical linked_transaction_id priority in confirm_slip_transaction", () => {
+    expect(hotfixSql).toMatch(/v_slip\.linked_transaction_id\s+IS\s+NOT\s+NULL/i);
+    expect(hotfixSql).toMatch(/WHERE\s+id\s*=\s*v_slip\.linked_transaction_id\s+AND\s+user_id\s*=\s*p_user_id/i);
+  });
+
+  it("hardens confirm_slip_transaction RPC execute permissions", () => {
+    expect(hotfixSql).toContain("REVOKE ALL ON FUNCTION public.confirm_slip_transaction");
+    expect(hotfixSql).toContain("FROM PUBLIC");
+    expect(hotfixSql).toContain("FROM anon");
+    expect(hotfixSql).toContain("TO authenticated");
+    expect(hotfixSql).toContain("TO service_role");
+  });
+
+  it("includes all 7 operator verification PASS/FAIL checks in Section 4", () => {
+    expect(hotfixSql).toContain("1. old index exists with new active-only predicate");
+    expect(hotfixSql).toContain("2. index is UNIQUE");
+    expect(hotfixSql).toContain("3. predicate includes source_slip_id IS NOT NULL");
+    expect(hotfixSql).toContain("4. predicate includes voided_at IS NULL");
+    expect(hotfixSql).toContain("5. no lifetime-unique source_slip index remains");
+    expect(hotfixSql).toContain("6. replacement RPC still exists");
+    expect(hotfixSql).toContain("7. restore replacement guard still exists");
+  });
+
+  it("includes production-safe invariant assertion query (active_count <= 1)", () => {
+    expect(hotfixSql).toContain("COUNT(*) FILTER (WHERE voided_at IS NULL) AS active_count");
+    expect(hotfixSql).toContain("HAVING COUNT(*) FILTER (WHERE voided_at IS NULL) > 1");
+    expect(hotfixSql).toContain("active_count <= 1");
+  });
+});
+
