@@ -1135,6 +1135,7 @@ describe("Thai Bank Slip Vision & OCR Extraction", () => {
         primaryRetryDelayMs: 5,
         fallbackReservedBudgetMs: 40,
         totalDeadlineMs: 120,
+        maxAttempts: 2,
       });
 
       const result = await parser.parse({
@@ -1176,6 +1177,7 @@ describe("Thai Bank Slip Vision & OCR Extraction", () => {
         fallbackModel: "gemini-3.1-flash-lite",
         primaryRetryDelayMs: 5,
         fallbackRetryDelayMs: 5,
+        maxAttempts: 2,
       });
 
       const result = await parser.parse({
