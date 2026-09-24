@@ -5,6 +5,7 @@ import { DataStore } from "@/lib/server/data-store";
 import type { IDataStore } from "./data-store-interface";
 import { StoragePruneResult, SlipBinaryStatus } from "@/types/storage";
 import { evaluateStorageMutationGuard } from "./storage-guards";
+import { validateSlipFile } from "@/lib/slip/validation";
 
 /**
  * Server-only helper enforcing that SESSION_SECRET is configured and meets
@@ -722,18 +723,26 @@ export async function restoreMissingSlipBinary(
     };
   }
 
-  // 4. Validate uploaded file buffer size & type
-  const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
-  if (!fileBuffer || fileBuffer.length === 0) {
-    throw new Error("ไฟล์ที่อัปโหลดว่างเปล่า (Uploaded file is empty)");
+  // 4. Validate uploaded file buffer size & authoritative magic bytes (JPEG, PNG, WebP, PDF)
+  const validation = validateSlipFile(fileBuffer);
+  if (!validation.valid) {
+    if (validation.errorCode === "EMPTY_FILE") {
+      throw new Error("ไฟล์ที่อัปโหลดว่างเปล่า (Uploaded file is empty)");
+    }
+    if (validation.errorCode === "FILE_TOO_LARGE") {
+      throw new Error("ขนาดไฟล์เกินขีดจำกัดสูงสุด 10MB");
+    }
+    throw new Error(
+      "ประเภทไฟล์ไม่ถูกต้อง รองรับเฉพาะไฟล์รูปภาพ (JPEG, PNG, WebP) หรือ PDF"
+    );
   }
-  if (fileBuffer.length > MAX_FILE_SIZE) {
-    throw new Error("ขนาดไฟล์เกินขีดจำกัดสูงสุด 10MB");
-  }
-  const allowedMimes = ["image/jpeg", "image/png", "image/webp"];
+
+  const allowedMimes = ["image/jpeg", "image/png", "image/webp", "application/pdf"];
   if (mimeType && !allowedMimes.includes(mimeType.toLowerCase())) {
-    throw new Error("ประเภทไฟล์ไม่ถูกต้อง รองรับเฉพาะไฟล์รูปภาพ (JPEG, PNG, WebP)");
+    throw new Error("ประเภทไฟล์ไม่ถูกต้อง รองรับเฉพาะไฟล์รูปภาพ (JPEG, PNG, WebP) หรือ PDF");
   }
+
+  const detectedMime = validation.mime || "image/jpeg";
 
   // 5. Calculate SHA-256 from ORIGINAL uploaded bytes
   const uploadedHash = crypto.createHash("sha256").update(fileBuffer).digest("hex");
@@ -779,13 +788,14 @@ export async function restoreMissingSlipBinary(
     throw new Error(`การอัปโหลดไฟล์ไปยังพื้นที่จัดเก็บล้มเหลว: ${errMsg}`);
   }
 
-  // 9. Update stored_file_size and clear binary_deleted_at
+  // 9. Update stored_file_size, mime_type, and clear binary_deleted_at
   await DataStore.updateSlip(
     userId,
     slip.id,
     {
       stored_file_size: fileBuffer.length,
       binary_deleted_at: null,
+      mime_type: detectedMime,
     },
     { trustedServer: true }
   );

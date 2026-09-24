@@ -45,9 +45,23 @@ CREATE TABLE IF NOT EXISTS public.transaction_replacement_events (
     reason              TEXT NOT NULL,
     created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT chk_different_transactions CHECK (old_transaction_id <> new_transaction_id),
+    CONSTRAINT chk_transaction_replacement_events_reason
+        CHECK (length(trim(reason)) > 0 AND length(reason) <= 500),
     CONSTRAINT uq_transaction_replacement_old_tx UNIQUE (old_transaction_id),
     CONSTRAINT uq_transaction_replacement_new_tx UNIQUE (new_transaction_id)
 );
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'chk_transaction_replacement_events_reason'
+    ) THEN
+        ALTER TABLE public.transaction_replacement_events
+            ADD CONSTRAINT chk_transaction_replacement_events_reason
+            CHECK (length(trim(reason)) > 0 AND length(reason) <= 500);
+    END IF;
+END $$;
 
 CREATE INDEX IF NOT EXISTS idx_tx_replacement_user_id
     ON public.transaction_replacement_events(user_id);
@@ -145,6 +159,8 @@ DECLARE
     v_old_tx RECORD;
     v_new_tx_id UUID;
     v_event_id UUID;
+    v_evidence_tx_id UUID;
+    v_has_canonical_evidence BOOLEAN := false;
 BEGIN
     -- 1. Caller Authentication & Authorization
     v_caller_uid := auth.uid();
@@ -204,25 +220,65 @@ BEGIN
 
     -- 4. Old transaction MUST be voided
     IF v_old_tx.voided_at IS NULL THEN
-        RAISE EXCEPTION 'Cannot replace active transaction %: only voided transactions may be replaced', p_old_transaction_id;
+        RAISE EXCEPTION 'Cannot replace active transaction %: only voided transactions may be replaced (สามารถสร้างรายการทดแทนได้เฉพาะรายการที่ถูกยกเลิก (Voided) แล้วเท่านั้น)', p_old_transaction_id;
     END IF;
 
-    -- 5. Slip must currently/canonically reference old transaction
-    IF v_slip.linked_transaction_id IS DISTINCT FROM p_old_transaction_id
-       AND v_old_tx.source_slip_id IS DISTINCT FROM p_slip_id
-       AND NOT EXISTS (
-           SELECT 1 FROM public.transaction_evidence
-           WHERE slip_id = p_slip_id AND transaction_id = p_old_transaction_id
-       ) THEN
-        RAISE EXCEPTION 'Slip % is not linked to transaction %', p_slip_id, p_old_transaction_id;
+    -- 5. Lock canonical transaction_evidence row for this slip if it exists
+    SELECT transaction_id INTO v_evidence_tx_id
+    FROM public.transaction_evidence
+    WHERE slip_id = p_slip_id
+    FOR UPDATE;
+
+    IF FOUND THEN
+        v_has_canonical_evidence := true;
     END IF;
 
-    -- 6. Verify old transaction has not already been replaced
+    -- 6. Canonical Link Safety Validation
+    -- A. If slip is canonically linked to another transaction -> FAIL CLOSED
+    IF v_slip.linked_transaction_id IS NOT NULL AND v_slip.linked_transaction_id <> p_old_transaction_id THEN
+        RAISE EXCEPTION 'สลิปนี้เชื่อมโยงกับรายการอื่นอยู่แล้ว ไม่สามารถใช้สร้างรายการทดแทนสำหรับรายการนี้ได้ (Slip % is canonically linked to transaction %)',
+            p_slip_id, v_slip.linked_transaction_id;
+    END IF;
+
+    -- B. If canonical transaction_evidence belongs to another transaction -> FAIL CLOSED
+    IF v_has_canonical_evidence AND v_evidence_tx_id <> p_old_transaction_id THEN
+        RAISE EXCEPTION 'สลิปนี้มีหลักฐานเชื่อมโยงกับรายการอื่นอยู่แล้ว ไม่สามารถใช้สร้างรายการทดแทนสำหรับรายการนี้ได้ (Slip evidence belongs to transaction %)',
+            v_evidence_tx_id;
+    END IF;
+
+    -- C. Legacy compatibility check:
+    -- If slip has no canonical link and no transaction_evidence row exists,
+    -- old_transaction.source_slip_id = p_slip_id may be accepted as legacy evidence.
+    IF v_slip.linked_transaction_id IS NULL AND NOT v_has_canonical_evidence THEN
+        IF v_old_tx.source_slip_id IS DISTINCT FROM p_slip_id THEN
+            RAISE EXCEPTION 'สามารถสร้างรายการทดแทนได้เฉพาะรายการที่มีหลักฐานสลิปเท่านั้น (Old transaction % has no association with slip %)',
+                p_old_transaction_id, p_slip_id;
+        END IF;
+    END IF;
+
+    -- D. One Canonical Slip -> One Active Transaction:
+    -- Ensure no other ACTIVE transaction claims this slip through
+    -- slips.linked_transaction_id, transaction_evidence.slip_id, or transactions.source_slip_id
+    IF EXISTS (
+        SELECT 1 FROM public.transactions t
+        WHERE t.user_id = p_user_id
+          AND t.id <> p_old_transaction_id
+          AND t.voided_at IS NULL
+          AND (
+              t.id = v_slip.linked_transaction_id
+              OR t.id = v_evidence_tx_id
+              OR t.source_slip_id = p_slip_id
+          )
+    ) THEN
+        RAISE EXCEPTION 'สลิปนี้ถูกเชื่อมโยงกับรายการที่กำลังใช้งานอยู่แล้ว (Slip % is already linked to another active transaction)', p_slip_id;
+    END IF;
+
+    -- 7. Verify old transaction has not already been replaced
     IF EXISTS (
         SELECT 1 FROM public.transaction_replacement_events
         WHERE old_transaction_id = p_old_transaction_id
     ) THEN
-        RAISE EXCEPTION 'Transaction % has already been replaced', p_old_transaction_id;
+        RAISE EXCEPTION 'รายการนี้มีรายการทดแทนอยู่แล้ว (Transaction % has already been replaced)', p_old_transaction_id;
     END IF;
 
     -- 7. Validate corrected transaction payload
@@ -336,7 +392,7 @@ BEGIN
     RETURNING id INTO v_new_tx_id;
 
     -- 9. Move canonical slip evidence association from old tx -> new tx
-    IF EXISTS (SELECT 1 FROM public.transaction_evidence WHERE slip_id = p_slip_id) THEN
+    IF v_has_canonical_evidence THEN
         UPDATE public.transaction_evidence
         SET transaction_id = v_new_tx_id
         WHERE slip_id = p_slip_id;
@@ -344,7 +400,7 @@ BEGIN
         INSERT INTO public.transaction_evidence (
             user_id,
             transaction_id,
-            source_type,
+            evidence_type,
             slip_id
         ) VALUES (
             p_user_id,
@@ -543,7 +599,7 @@ GRANT EXECUTE ON FUNCTION public.restore_transaction(UUID, UUID, TEXT) TO servic
 -- ============================================================================
 /*
 WITH operator_checks AS (
-    -- 1. transaction_replacement_events exists
+    -- 1. transaction_replacement_events table exists
     SELECT
         '1. transaction_replacement_events table exists' AS check_name,
         EXISTS (
@@ -552,9 +608,60 @@ WITH operator_checks AS (
         ) AS passed,
         'transaction_replacement_events table created for auditable slip replacement' AS details
     UNION ALL
-    -- 2. RLS enabled on transaction_replacement_events
+    -- 2. transaction_evidence column evidence_type exists
     SELECT
-        '2. Row Level Security enabled on transaction_replacement_events',
+        '2. transaction_evidence column evidence_type exists',
+        EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_schema = 'public' AND table_name = 'transaction_evidence' AND column_name = 'evidence_type'
+        ),
+        'transaction_evidence schema adheres to Phase 3 evidence_type column'
+    UNION ALL
+    -- 3. transaction_replacement_events reason CHECK exists
+    SELECT
+        '3. transaction_replacement_events reason CHECK exists',
+        EXISTS (
+            SELECT 1 FROM pg_constraint con
+            JOIN pg_class c ON con.conrelid = c.oid
+            JOIN pg_namespace n ON c.relnamespace = n.oid
+            WHERE n.nspname = 'public' AND c.relname = 'transaction_replacement_events' AND con.contype = 'c'
+              AND pg_get_constraintdef(con.oid) LIKE '%length(trim(reason))%'
+        ),
+        'transaction_replacement_events enforces length(trim(reason)) > 0 AND length(reason) <= 500'
+    UNION ALL
+    -- 4. RPC replace_voided_slip_transaction exists and is SECURITY DEFINER
+    SELECT
+        '4. replace_voided_slip_transaction is SECURITY DEFINER',
+        EXISTS (
+            SELECT 1 FROM pg_proc p
+            JOIN pg_namespace n ON p.pronamespace = n.oid
+            WHERE n.nspname = 'public' AND p.proname = 'replace_voided_slip_transaction' AND p.prosecdef = true
+        ),
+        'replace_voided_slip_transaction function exists with SECURITY DEFINER'
+    UNION ALL
+    -- 5. RPC execute denied to anon and PUBLIC
+    SELECT
+        '5. RPC execute denied to anon/PUBLIC',
+        NOT EXISTS (
+            SELECT 1 FROM information_schema.routine_privileges
+            WHERE routine_schema = 'public' AND routine_name = 'replace_voided_slip_transaction'
+              AND grantee IN ('anon', 'PUBLIC') AND privilege_type = 'EXECUTE'
+        ),
+        'Execution denied to anon and PUBLIC roles'
+    UNION ALL
+    -- 6. RPC execute allowed to authenticated and service_role
+    SELECT
+        '6. RPC execute allowed to authenticated and service_role',
+        EXISTS (
+            SELECT 1 FROM information_schema.routine_privileges
+            WHERE routine_schema = 'public' AND routine_name = 'replace_voided_slip_transaction'
+              AND grantee = 'authenticated' AND privilege_type = 'EXECUTE'
+        ),
+        'Execution granted to authenticated role'
+    UNION ALL
+    -- 7. Row Level Security enabled on transaction_replacement_events
+    SELECT
+        '7. Row Level Security enabled on transaction_replacement_events',
         EXISTS (
             SELECT 1 FROM pg_class c
             JOIN pg_namespace n ON c.relnamespace = n.oid
@@ -562,9 +669,9 @@ WITH operator_checks AS (
         ),
         'RLS is enabled to enforce owner-only read isolation'
     UNION ALL
-    -- 3. Direct mutation denied on transaction_replacement_events
+    -- 8. Direct mutations denied on transaction_replacement_events
     SELECT
-        '3. Direct mutations denied on transaction_replacement_events',
+        '8. Direct mutations denied on transaction_replacement_events',
         NOT EXISTS (
             SELECT 1 FROM information_schema.role_table_grants
             WHERE table_schema = 'public'
@@ -574,20 +681,9 @@ WITH operator_checks AS (
         ),
         'No direct INSERT, UPDATE, DELETE permissions for client roles; RPC only'
     UNION ALL
-    -- 4. Ownership validation trigger exists on transaction_replacement_events
+    -- 9. Foreign keys enforce ON DELETE RESTRICT
     SELECT
-        '4. Ownership integrity trigger exists',
-        EXISTS (
-            SELECT 1 FROM information_schema.triggers
-            WHERE event_object_schema = 'public'
-              AND event_object_table = 'transaction_replacement_events'
-              AND trigger_name = 'trg_validate_transaction_replacement_event_ownership'
-        ),
-        'Trigger validates that slip_id, old_tx, and new_tx belong to the same user'
-    UNION ALL
-    -- 5. Foreign keys enforce ON DELETE RESTRICT
-    SELECT
-        '5. Foreign keys enforce ON DELETE RESTRICT',
+        '9. Foreign keys enforce ON DELETE RESTRICT',
         (
             SELECT COUNT(*) = 3 FROM pg_constraint con
             JOIN pg_class c ON con.conrelid = c.oid
@@ -599,22 +695,58 @@ WITH operator_checks AS (
         ),
         'slip_id, old_transaction_id, and new_transaction_id all enforce ON DELETE RESTRICT'
     UNION ALL
-    -- 6. Uniqueness protections exist (unique old_transaction_id and new_transaction_id)
+    -- 10. Uniqueness on old_transaction_id
     SELECT
-        '6. Uniqueness protections exist on replacement transactions',
-        (
-            SELECT COUNT(*) >= 2 FROM pg_constraint con
+        '10. Uniqueness on old_transaction_id',
+        EXISTS (
+            SELECT 1 FROM pg_constraint con
             JOIN pg_class c ON con.conrelid = c.oid
             JOIN pg_namespace n ON c.relnamespace = n.oid
             WHERE n.nspname = 'public'
               AND c.relname = 'transaction_replacement_events'
-              AND con.contype = 'u'
+              AND con.conname = 'uq_transaction_replacement_old_tx'
         ),
-        'UNIQUE(old_transaction_id) and UNIQUE(new_transaction_id) prevent duplicate replacement chains'
+        'UNIQUE(old_transaction_id) prevents multiple replacements for a single voided transaction'
     UNION ALL
-    -- 7. storage_binary_events supports restore actions
+    -- 11. Uniqueness on new_transaction_id
     SELECT
-        '7. storage_binary_events action check includes restore actions',
+        '11. Uniqueness on new_transaction_id',
+        EXISTS (
+            SELECT 1 FROM pg_constraint con
+            JOIN pg_class c ON con.conrelid = c.oid
+            JOIN pg_namespace n ON c.relnamespace = n.oid
+            WHERE n.nspname = 'public'
+              AND c.relname = 'transaction_replacement_events'
+              AND con.conname = 'uq_transaction_replacement_new_tx'
+        ),
+        'UNIQUE(new_transaction_id) prevents a replacement transaction from replacing multiple old transactions'
+    UNION ALL
+    -- 12. Ownership integrity trigger exists
+    SELECT
+        '12. Ownership integrity trigger exists',
+        EXISTS (
+            SELECT 1 FROM information_schema.triggers
+            WHERE event_object_schema = 'public'
+              AND event_object_table = 'transaction_replacement_events'
+              AND trigger_name = 'trg_validate_transaction_replacement_event_ownership'
+        ),
+        'Trigger validates that slip_id, old_tx, and new_tx belong to the same user'
+    UNION ALL
+    -- 13. Function definition references evidence_type and not source_type
+    SELECT
+        '13. Function definition references evidence_type and not source_type',
+        EXISTS (
+            SELECT 1 FROM pg_proc p
+            JOIN pg_namespace n ON p.pronamespace = n.oid
+            WHERE n.nspname = 'public' AND p.proname = 'replace_voided_slip_transaction'
+              AND pg_get_functiondef(p.oid) LIKE '%evidence_type%'
+              AND pg_get_functiondef(p.oid) NOT LIKE '%source_type%'
+        ),
+        'replace_voided_slip_transaction references evidence_type and does NOT reference source_type'
+    UNION ALL
+    -- 14. storage_binary_events supports restore actions
+    SELECT
+        '14. storage_binary_events action check includes restore actions',
         EXISTS (
             SELECT 1 FROM pg_constraint con
             JOIN pg_class c ON con.conrelid = c.oid
@@ -627,18 +759,6 @@ WITH operator_checks AS (
               AND pg_get_constraintdef(con.oid) LIKE '%restore_failed%'
         ),
         'storage_binary_events supports restore_requested, restore_completed, restore_failed'
-    UNION ALL
-    -- 8. No direct browser audit writes on storage_binary_events
-    SELECT
-        '8. No direct browser audit writes on storage_binary_events',
-        NOT EXISTS (
-            SELECT 1 FROM information_schema.role_table_grants
-            WHERE table_schema = 'public'
-              AND table_name = 'storage_binary_events'
-              AND grantee IN ('authenticated', 'anon', 'PUBLIC')
-              AND privilege_type IN ('INSERT', 'UPDATE', 'DELETE')
-        ),
-        'No direct browser INSERT/UPDATE/DELETE on storage_binary_events'
 )
 SELECT check_name, CASE WHEN passed THEN 'PASS' ELSE 'FAIL' END AS status, details
 FROM operator_checks;

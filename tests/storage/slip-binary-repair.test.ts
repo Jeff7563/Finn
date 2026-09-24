@@ -12,6 +12,7 @@ import {
   restoreMissingSlipBinaryAction,
   getSlipBinaryStatusAction,
 } from "@/app/actions/storage";
+import { revalidatePath } from "next/cache";
 import { Slip } from "@/types/slip";
 
 let mockUser: { id: string; email: string; display_name?: string } | null = null;
@@ -32,12 +33,19 @@ describe("Part A: Missing Slip Binary Repair & Detection Suite (Scenarios 1-13, 
   const USER_ID = "user-binary-repair-1";
   const OTHER_USER = "user-binary-repair-attacker";
 
-  const originalBuffer = Buffer.from("ORIGINAL_SLIP_IMAGE_CONTENT_XYZ_12345");
+  const createMockJpeg = (content: string) =>
+    Buffer.concat([
+      Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46]),
+      Buffer.from(content),
+    ]);
+
+  const originalBuffer = createMockJpeg("ORIGINAL_SLIP_IMAGE_CONTENT_XYZ_12345");
   const originalSha256 = crypto.createHash("sha256").update(originalBuffer).digest("hex");
 
-  const wrongBuffer = Buffer.from("DIFFERENT_IMAGE_CONTENT_ABC_99999");
+  const wrongBuffer = createMockJpeg("DIFFERENT_IMAGE_CONTENT_ABC_99999");
 
   beforeEach(() => {
+    vi.restoreAllMocks();
     DataStore.reset();
     mockUser = { id: USER_ID, email: "tester@example.com" };
   });
@@ -350,5 +358,148 @@ describe("Part A: Missing Slip Binary Repair & Detection Suite (Scenarios 1-13, 
 
     // Verify binary is now restored
     expect(await DataStore.slipFileExists(slip.storage_path!)).toBe(true);
+  });
+
+  // Support for PDF, PNG, WebP repair
+  it("restores PDF slip binary with exact matching SHA-256", async () => {
+    const pdfBuffer = Buffer.concat([Buffer.from("%PDF-1.4\n"), Buffer.from("PDF_SAMPLE_DATA_XYZ")]);
+    const pdfSha256 = crypto.createHash("sha256").update(pdfBuffer).digest("hex");
+    const slipId = crypto.randomUUID();
+    const storagePath = deriveTrustedSlipPath(USER_ID, slipId, "application/pdf");
+
+    const slip = await DataStore.createSlip(USER_ID, {
+      id: slipId,
+      user_id: USER_ID,
+      file_hash_sha256: pdfSha256,
+      storage_path: storagePath,
+      stored_file_size: pdfBuffer.length,
+      mime_type: "application/pdf",
+      status: "needs_review",
+    });
+
+    const res = await restoreMissingSlipBinary(USER_ID, slip.id, pdfBuffer, "application/pdf");
+    expect(res.success).toBe(true);
+    expect(await DataStore.slipFileExists(storagePath)).toBe(true);
+    const content = await DataStore.getSlipFile(storagePath);
+    expect(content).toEqual(pdfBuffer);
+  });
+
+  it("restores PNG slip binary with exact matching SHA-256", async () => {
+    const pngBuffer = Buffer.concat([
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      Buffer.from("PNG_SAMPLE_DATA_XYZ"),
+    ]);
+    const pngSha256 = crypto.createHash("sha256").update(pngBuffer).digest("hex");
+    const slipId = crypto.randomUUID();
+    const storagePath = deriveTrustedSlipPath(USER_ID, slipId, "image/png");
+
+    const slip = await DataStore.createSlip(USER_ID, {
+      id: slipId,
+      user_id: USER_ID,
+      file_hash_sha256: pngSha256,
+      storage_path: storagePath,
+      stored_file_size: pngBuffer.length,
+      mime_type: "image/png",
+      status: "needs_review",
+    });
+
+    const res = await restoreMissingSlipBinary(USER_ID, slip.id, pngBuffer, "image/png");
+    expect(res.success).toBe(true);
+    expect(await DataStore.slipFileExists(storagePath)).toBe(true);
+  });
+
+  it("restores WebP slip binary with exact matching SHA-256", async () => {
+    const webpBuffer = Buffer.concat([
+      Buffer.from("RIFF\x20\x00\x00\x00WEBPVP8 "),
+      Buffer.from("WEBP_SAMPLE_DATA_XYZ"),
+    ]);
+    const webpSha256 = crypto.createHash("sha256").update(webpBuffer).digest("hex");
+    const slipId = crypto.randomUUID();
+    const storagePath = deriveTrustedSlipPath(USER_ID, slipId, "image/webp");
+
+    const slip = await DataStore.createSlip(USER_ID, {
+      id: slipId,
+      user_id: USER_ID,
+      file_hash_sha256: webpSha256,
+      storage_path: storagePath,
+      stored_file_size: webpBuffer.length,
+      mime_type: "image/webp",
+      status: "needs_review",
+    });
+
+    const res = await restoreMissingSlipBinary(USER_ID, slip.id, webpBuffer, "image/webp");
+    expect(res.success).toBe(true);
+    expect(await DataStore.slipFileExists(storagePath)).toBe(true);
+  });
+
+  it("rejects fake MIME with invalid magic bytes (authoritative magic byte check)", async () => {
+    const fakeBuffer = Buffer.from("THIS_IS_PLAIN_TEXT_NOT_AN_IMAGE");
+    const fakeSha256 = crypto.createHash("sha256").update(fakeBuffer).digest("hex");
+    const slipId = crypto.randomUUID();
+    const storagePath = deriveTrustedSlipPath(USER_ID, slipId, "image/jpeg");
+
+    const slip = await DataStore.createSlip(USER_ID, {
+      id: slipId,
+      user_id: USER_ID,
+      file_hash_sha256: fakeSha256,
+      storage_path: storagePath,
+      stored_file_size: fakeBuffer.length,
+      mime_type: "image/jpeg",
+      status: "needs_review",
+    });
+
+    // Client claims it's image/jpeg, but authoritative magic bytes fail
+    await expect(
+      restoreMissingSlipBinary(USER_ID, slip.id, fakeBuffer, "image/jpeg")
+    ).rejects.toThrow("ประเภทไฟล์ไม่ถูกต้อง");
+  });
+
+  it("client-declared MIME cannot bypass magic byte validation", async () => {
+    const fakeExeBuffer = Buffer.from("MZ\x90\x00\x03\x00\x00\x00\x04\x00\x00\x00\xff\xff");
+    const fakeSha256 = crypto.createHash("sha256").update(fakeExeBuffer).digest("hex");
+    const slipId = crypto.randomUUID();
+    const storagePath = deriveTrustedSlipPath(USER_ID, slipId, "image/png");
+
+    const slip = await DataStore.createSlip(USER_ID, {
+      id: slipId,
+      user_id: USER_ID,
+      file_hash_sha256: fakeSha256,
+      storage_path: storagePath,
+      stored_file_size: fakeExeBuffer.length,
+      mime_type: "image/png",
+      status: "needs_review",
+    });
+
+    await expect(
+      restoreMissingSlipBinary(USER_ID, slip.id, fakeExeBuffer, "image/png")
+    ).rejects.toThrow("ประเภทไฟล์ไม่ถูกต้อง");
+  });
+
+  it("restoreMissingSlipBinaryAction revalidates linked transaction route and does not use slipId route", async () => {
+    const slip = await setupTestSlip({ saveBinary: false });
+    const account = await DataStore.createAccount(USER_ID, {
+      name: "Checking",
+      type: "bank",
+    });
+    const tx = await DataStore.createTransaction(USER_ID, {
+      type: "expense",
+      amount: 100,
+      transaction_date: new Date().toISOString(),
+      from_account_id: account.id,
+    });
+    await DataStore.updateSlip(USER_ID, slip.id, { linked_transaction_id: tx.id });
+
+    const formData = new FormData();
+    const file = new File([originalBuffer], "slip.jpg", { type: "image/jpeg" });
+    formData.append("file", file);
+
+    const actionRes = await restoreMissingSlipBinaryAction(slip.id, formData);
+    expect(actionRes.success).toBe(true);
+
+    expect(revalidatePath).toHaveBeenCalledWith(`/transactions/${tx.id}`);
+    expect(revalidatePath).toHaveBeenCalledWith("/review");
+    expect(revalidatePath).toHaveBeenCalledWith("/transactions");
+    expect(revalidatePath).toHaveBeenCalledWith("/settings");
+    expect(revalidatePath).not.toHaveBeenCalledWith(`/transactions/${slip.id}`);
   });
 });

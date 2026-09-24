@@ -214,7 +214,7 @@ describe("Part B: Voided Slip Reuse & Atomic Replacement Suite (Scenarios 14-29)
         from_account_id: account1.id,
         reason: "Attempt replacement with already active slip",
       })
-    ).rejects.toThrow("สลิปนี้ถูกเชื่อมโยงกับรายการที่กำลังใช้งานอยู่แล้ว");
+    ).rejects.toThrow(/สลิปนี้เชื่อมโยงกับรายการอื่นอยู่แล้ว|สลิปนี้ถูกเชื่อมโยงกับรายการที่กำลังใช้งานอยู่แล้ว/);
   });
 
   // Scenario 18: Replace transaction: old transaction REMAINS voided (its voided_at, void_reason are preserved)
@@ -387,7 +387,7 @@ describe("Part B: Voided Slip Reuse & Atomic Replacement Suite (Scenarios 14-29)
         from_account_id: account1.id,
         reason: "Second replacement attempt",
       })
-    ).rejects.toThrow(/มีรายการทดแทนอยู่แล้ว|สลิปนี้ถูกเชื่อมโยงกับรายการที่กำลังใช้งานอยู่แล้ว/);
+    ).rejects.toThrow(/สลิปนี้เชื่อมโยงกับรายการอื่นอยู่แล้ว|มีรายการทดแทนอยู่แล้ว|สลิปนี้ถูกเชื่อมโยงกับรายการที่กำลังใช้งานอยู่แล้ว/);
   });
 
   // Scenario 25: Re-uploading the same slip file after voiding: exact-file duplicate protection STILL triggers
@@ -551,5 +551,267 @@ describe("Part B: Voided Slip Reuse & Atomic Replacement Suite (Scenarios 14-29)
     expect(eventsRes.success).toBe(true);
     expect(eventsRes.replacedBy).toBeDefined();
     expect(eventsRes.replacedBy?.new_transaction_id).toBe(actionRes.newTransactionId);
+  });
+
+  // Additional Canonical Link Safety & Edge Case Regression Tests
+
+  it("Legacy slip without transaction_evidence can be replaced and creates evidence with evidence_type='slip'", async () => {
+    const slipId = crypto.randomUUID();
+    const fileHash = crypto.createHash("sha256").update(`LEGACY_SLIP_${slipId}`).digest("hex");
+    const oldTx = await DataStore.createTransaction(USER_ID, {
+      type: "expense",
+      amount: 600,
+      transaction_date: "2026-09-10T12:00:00.000Z",
+      from_account_id: account1.id,
+      source: "slip",
+      source_slip_id: slipId,
+    });
+    const slip = await DataStore.createSlip(USER_ID, {
+      id: slipId,
+      user_id: USER_ID,
+      file_hash_sha256: fileHash,
+      storage_path: `${USER_ID}/slips/${slipId}.jpg`,
+      stored_file_size: 1024,
+      status: "created",
+      linked_transaction_id: null,
+    });
+    // Note: No transaction_evidence row exists
+    await DataStore.voidTransaction(USER_ID, oldTx.id, "Voiding legacy tx");
+
+    const result = await DataStore.replaceVoidedSlipTransaction(USER_ID, {
+      old_transaction_id: oldTx.id,
+      slip_id: slip.id,
+      type: "expense",
+      amount: 650,
+      currency: "THB",
+      transaction_date: "2026-09-10T14:00:00.000Z",
+      from_account_id: account1.id,
+      reason: "Correcting legacy slip tx",
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.transaction?.id).toBeDefined();
+
+    // Verify transaction_evidence was created with evidence_type='slip'
+    const evidences = await DataStore.getTransactionEvidence(USER_ID, result.transaction.id);
+    expect(evidences.length).toBe(1);
+    expect(evidences[0].slip_id).toBe(slip.id);
+    expect(evidences[0].evidence_type).toBe("slip");
+
+    // Verify slip is now linked to newTx
+    const updatedSlip = await DataStore.getSlipById(USER_ID, slip.id);
+    expect(updatedSlip?.linked_transaction_id).toBe(result.transaction.id);
+  });
+
+  it("Slip canonically linked to another ACTIVE transaction is rejected (One Canonical Slip -> One Active Transaction)", async () => {
+    const { tx: oldTx, slip } = await setupVoidedSlipScenario();
+    // Create another active transaction linked to this slip
+    const activeTx = await DataStore.createTransaction(USER_ID, {
+      type: "expense",
+      amount: 700,
+      transaction_date: "2026-09-11T10:00:00.000Z",
+      from_account_id: account1.id,
+      source: "slip",
+      source_slip_id: slip!.id,
+    });
+    await DataStore.updateSlip(USER_ID, slip!.id, { linked_transaction_id: activeTx.id });
+
+    await expect(
+      DataStore.replaceVoidedSlipTransaction(USER_ID, {
+        old_transaction_id: oldTx.id,
+        slip_id: slip!.id,
+        type: "expense",
+        amount: 550,
+        transaction_date: "2026-09-10T12:00:00.000Z",
+        from_account_id: account1.id,
+        reason: "Try to steal slip from active tx",
+      })
+    ).rejects.toThrow("สลิปนี้เชื่อมโยงกับรายการอื่นอยู่แล้ว");
+  });
+
+  it("Slip canonically linked to another VOIDED transaction is rejected unless that tx is old_transaction_id", async () => {
+    const { tx: voidTx1, slip } = await setupVoidedSlipScenario();
+
+    const voidTx2 = await DataStore.createTransaction(USER_ID, {
+      type: "expense",
+      amount: 300,
+      transaction_date: "2026-09-12T10:00:00.000Z",
+      from_account_id: account1.id,
+    });
+    await DataStore.voidTransaction(USER_ID, voidTx2.id, "Voided tx2");
+
+    await expect(
+      DataStore.replaceVoidedSlipTransaction(USER_ID, {
+        old_transaction_id: voidTx2.id,
+        slip_id: slip!.id,
+        type: "expense",
+        amount: 350,
+        transaction_date: "2026-09-12T10:00:00.000Z",
+        from_account_id: account1.id,
+        reason: "Mismatching voided transaction link",
+      })
+    ).rejects.toThrow("สลิปนี้เชื่อมโยงกับรายการอื่นอยู่แล้ว");
+  });
+
+  it("Evidence row linked to another transaction is rejected", async () => {
+    const { tx: oldTx, slip } = await setupVoidedSlipScenario();
+
+    const otherTx = await DataStore.createTransaction(USER_ID, {
+      type: "expense",
+      amount: 400,
+      transaction_date: "2026-09-12T10:00:00.000Z",
+      from_account_id: account1.id,
+    });
+
+    // Break the link on slips.linked_transaction_id to isolate evidence test
+    await DataStore.updateSlip(USER_ID, slip!.id, { linked_transaction_id: null });
+    // Point the evidence row to otherTx
+    const evidenceList = await DataStore.getTransactionEvidence(USER_ID, oldTx.id);
+    if (evidenceList.length > 0) {
+      (evidenceList[0] as any).transaction_id = otherTx.id;
+    }
+
+    await expect(
+      DataStore.replaceVoidedSlipTransaction(USER_ID, {
+        old_transaction_id: oldTx.id,
+        slip_id: slip!.id,
+        type: "expense",
+        amount: 450,
+        transaction_date: "2026-09-10T12:00:00.000Z",
+        from_account_id: account1.id,
+        reason: "Conflicting evidence row test",
+      })
+    ).rejects.toThrow("สลิปนี้มีหลักฐานเชื่อมโยงกับรายการอื่นอยู่แล้ว");
+  });
+
+  it("Historical old source_slip_id alone cannot override conflicting canonical link", async () => {
+    const { tx: oldTx, slip } = await setupVoidedSlipScenario();
+    expect(oldTx.source_slip_id).toBe(slip!.id);
+
+    const tx2 = await DataStore.createTransaction(USER_ID, {
+      type: "expense",
+      amount: 900,
+      transaction_date: "2026-09-13T10:00:00.000Z",
+      from_account_id: account1.id,
+    });
+    await DataStore.updateSlip(USER_ID, slip!.id, { linked_transaction_id: tx2.id });
+
+    await expect(
+      DataStore.replaceVoidedSlipTransaction(USER_ID, {
+        old_transaction_id: oldTx.id,
+        slip_id: slip!.id,
+        type: "expense",
+        amount: 500,
+        transaction_date: "2026-09-10T12:00:00.000Z",
+        from_account_id: account1.id,
+        reason: "Attempt override canonical with source_slip_id",
+      })
+    ).rejects.toThrow("สลิปนี้เชื่อมโยงกับรายการอื่นอยู่แล้ว");
+  });
+
+  it("Replacement chain works: tx1 (void) -> replaced by tx2, tx2 (void) -> replaced by tx3", async () => {
+    const { tx: tx1, slip } = await setupVoidedSlipScenario({ amount: 500 });
+
+    // tx1 -> tx2
+    const res1 = await DataStore.replaceVoidedSlipTransaction(USER_ID, {
+      old_transaction_id: tx1.id,
+      slip_id: slip!.id,
+      type: "expense",
+      amount: 550,
+      currency: "THB",
+      transaction_date: "2026-09-10T13:00:00.000Z",
+      from_account_id: account1.id,
+      reason: "First replacement tx1 -> tx2",
+    });
+    expect(res1.success).toBe(true);
+    const tx2Id = res1.transaction.id;
+
+    // Void tx2
+    await DataStore.voidTransaction(USER_ID, tx2Id, "tx2 was also slightly wrong");
+
+    // tx2 -> tx3
+    const res2 = await DataStore.replaceVoidedSlipTransaction(USER_ID, {
+      old_transaction_id: tx2Id,
+      slip_id: slip!.id,
+      type: "expense",
+      amount: 580,
+      currency: "THB",
+      transaction_date: "2026-09-10T14:00:00.000Z",
+      from_account_id: account1.id,
+      reason: "Second replacement tx2 -> tx3",
+    });
+    expect(res2.success).toBe(true);
+    const tx3Id = res2.transaction.id;
+
+    // Verify slip is now linked to tx3
+    const finalSlip = await DataStore.getSlipById(USER_ID, slip!.id);
+    expect(finalSlip?.linked_transaction_id).toBe(tx3Id);
+
+    // Verify replacement events
+    const event1 = await DataStore.getTransactionReplacementEvents(USER_ID, tx1.id);
+    expect(event1.replacedBy?.new_transaction_id).toBe(tx2Id);
+
+    const event2 = await DataStore.getTransactionReplacementEvents(USER_ID, tx2Id);
+    expect(event2.replacedBy?.new_transaction_id).toBe(tx3Id);
+
+    // Both tx1 and tx2 cannot be restored because active replacement tx3 exists
+    await expect(DataStore.restoreTransaction(USER_ID, tx1.id)).rejects.toThrow("ไม่สามารถคืนรายการนี้ได้");
+    await expect(DataStore.restoreTransaction(USER_ID, tx2Id)).rejects.toThrow("ไม่สามารถคืนรายการนี้ได้");
+  });
+
+  it("Failed replacement leaves zero partial state (atomicity)", async () => {
+    const { tx: oldTx, slip } = await setupVoidedSlipScenario({ amount: 500 });
+    const initialTxs = await DataStore.getTransactions(USER_ID);
+    const initialEvents = await DataStore.getTransactionReplacementEvents(USER_ID, oldTx.id);
+
+    await expect(
+      DataStore.replaceVoidedSlipTransaction(USER_ID, {
+        old_transaction_id: oldTx.id,
+        slip_id: slip!.id,
+        type: "expense",
+        amount: 600,
+        transaction_date: "2026-09-10T12:00:00.000Z",
+        from_account_id: "non-existent-or-foreign-account",
+        reason: "Atomic test with bad account",
+      })
+    ).rejects.toThrow();
+
+    const postTxs = await DataStore.getTransactions(USER_ID);
+    expect(postTxs.length).toBe(initialTxs.length);
+
+    const postEvents = await DataStore.getTransactionReplacementEvents(USER_ID, oldTx.id);
+    expect(postEvents.replacedBy).toBe(null);
+    expect(postEvents.replacedBy).toEqual(initialEvents.replacedBy);
+
+    const currentSlip = await DataStore.getSlipById(USER_ID, slip!.id);
+    expect(currentSlip?.linked_transaction_id).toBe(oldTx.id);
+  });
+
+  it("Rejects replacement with empty or whitespace-only reason or exceeding 500 characters", async () => {
+    const { tx: oldTx, slip } = await setupVoidedSlipScenario();
+
+    await expect(
+      DataStore.replaceVoidedSlipTransaction(USER_ID, {
+        old_transaction_id: oldTx.id,
+        slip_id: slip!.id,
+        type: "expense",
+        amount: 450,
+        transaction_date: "2026-09-10T12:00:00.000Z",
+        from_account_id: account1.id,
+        reason: "   ",
+      })
+    ).rejects.toThrow("Replacement reason is required");
+
+    await expect(
+      DataStore.replaceVoidedSlipTransaction(USER_ID, {
+        old_transaction_id: oldTx.id,
+        slip_id: slip!.id,
+        type: "expense",
+        amount: 450,
+        transaction_date: "2026-09-10T12:00:00.000Z",
+        from_account_id: account1.id,
+        reason: "a".repeat(501),
+      })
+    ).rejects.toThrow("Replacement reason cannot exceed 500 characters");
   });
 });

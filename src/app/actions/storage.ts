@@ -351,6 +351,11 @@ export async function restoreMissingSlipBinaryAction(
   }
 
   try {
+    const ownedSlip = await DataStore.getSlipById(user.id, slipId);
+    if (!ownedSlip) {
+      return { success: false, error: "ไม่พบข้อมูลสลิป (Slip not found or access denied)" };
+    }
+
     const arrayBuffer = await file.arrayBuffer();
     const buffer = Buffer.from(arrayBuffer);
     const mimeType = file.type || "image/jpeg";
@@ -362,9 +367,11 @@ export async function restoreMissingSlipBinaryAction(
       mimeType
     );
 
+    if (ownedSlip.linked_transaction_id) {
+      revalidatePath(`/transactions/${ownedSlip.linked_transaction_id}`);
+    }
     revalidatePath("/review");
     revalidatePath("/transactions");
-    revalidatePath(`/transactions/${slipId}`);
     revalidatePath("/settings");
 
     return {

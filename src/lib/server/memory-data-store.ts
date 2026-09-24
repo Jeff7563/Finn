@@ -1002,35 +1002,56 @@ export const MemoryDataStore: IDataStore = {
       );
     }
 
-    // 4. Slip must currently/canonically reference old transaction
+    // 4. Canonical Link Safety Validation:
+    // A. If slip is canonically linked to another transaction -> FAIL CLOSED
     if (slip.linked_transaction_id && slip.linked_transaction_id !== input.old_transaction_id) {
-      const activeLinked = dbState.transactions.some(
-        (t) => t.id === slip.linked_transaction_id && !t.voided_at
+      throw new Error(
+        `สลิปนี้เชื่อมโยงกับรายการอื่นอยู่แล้ว ไม่สามารถใช้สร้างรายการทดแทนสำหรับรายการนี้ได้ (Slip ${input.slip_id} is canonically linked to transaction ${slip.linked_transaction_id})`
       );
-      if (activeLinked) {
+    }
+
+    // B. Check canonical transaction_evidence row for this slip
+    const existingEvidence = dbState.transaction_evidence.find((e) => e.slip_id === input.slip_id);
+    if (existingEvidence && existingEvidence.transaction_id !== input.old_transaction_id) {
+      throw new Error(
+        `สลิปนี้มีหลักฐานเชื่อมโยงกับรายการอื่นอยู่แล้ว ไม่สามารถใช้สร้างรายการทดแทนสำหรับรายการนี้ได้ (Slip evidence belongs to transaction ${existingEvidence.transaction_id})`
+      );
+    }
+
+    // C. Legacy compatibility check:
+    // If slip has no canonical link (linked_transaction_id is null) and no transaction_evidence row exists,
+    // verify old_transaction.source_slip_id = slip_id
+    const hasCanonicalLink = Boolean(slip.linked_transaction_id) || Boolean(existingEvidence);
+    if (!hasCanonicalLink) {
+      if (oldTx.source_slip_id !== input.slip_id) {
         throw new Error(
-          `สลิปนี้ถูกเชื่อมโยงกับรายการที่กำลังใช้งานอยู่แล้ว (Slip ${input.slip_id} is already linked to active transaction ${slip.linked_transaction_id})`
+          `สามารถสร้างรายการทดแทนได้เฉพาะรายการที่มีหลักฐานสลิปเท่านั้น (Old transaction ${input.old_transaction_id} has no association with slip ${input.slip_id})`
         );
       }
     }
 
-    const hasEvidence = dbState.transaction_evidence.some(
-      (e) => e.slip_id === input.slip_id && e.transaction_id === input.old_transaction_id
+    // D. One Canonical Slip -> One Active Transaction:
+    // Ensure no other ACTIVE transaction claims this slip through
+    // slips.linked_transaction_id, transaction_evidence.slip_id, or transactions.source_slip_id
+    const otherActiveTx = dbState.transactions.find(
+      (t) =>
+        t.user_id === userId &&
+        t.id !== input.old_transaction_id &&
+        !t.voided_at &&
+        (t.id === slip.linked_transaction_id ||
+          t.id === existingEvidence?.transaction_id ||
+          t.source_slip_id === input.slip_id)
     );
-    if (
-      slip.linked_transaction_id !== input.old_transaction_id &&
-      oldTx.source_slip_id !== input.slip_id &&
-      !hasEvidence
-    ) {
+    if (otherActiveTx) {
       throw new Error(
-        `สามารถสร้างรายการทดแทนได้เฉพาะรายการที่มีหลักฐานสลิปเท่านั้น (Slip ${input.slip_id} is not linked to transaction ${input.old_transaction_id})`
+        `สลิปนี้ถูกเชื่อมโยงกับรายการที่กำลังใช้งานอยู่แล้ว (Slip ${input.slip_id} is already linked to another active transaction)`
       );
     }
 
     // 5. Verify old transaction has not already been replaced
     if (dbState.transaction_replacement_events.some((e) => e.old_transaction_id === input.old_transaction_id)) {
       throw new Error(
-        `มีรายการทดแทนอยู่แล้ว (Transaction ${input.old_transaction_id} has already been replaced)`
+        `รายการนี้มีรายการทดแทนอยู่แล้ว (Transaction ${input.old_transaction_id} has already been replaced)`
       );
     }
 
